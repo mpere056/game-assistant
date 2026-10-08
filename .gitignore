@@ -1,0 +1,23 @@
+# Whitelist: ignore everything, then include only our own source and docs.
+# Never invert this. Extracted game data, logs, environments and keys stay out.
+*
+!*/
+
+!/.gitignore
+!/AGENTS.md
+!/CLAUDE.md
+!/README.md
+!/MODLOG.md
+!/LICENSE
+!/requirements.txt
+!/*.bat
+
+!/docs/**/*.md
+!/game_assistant/**/*.py
+!/tests/**/*.py
+
+# Never, even if matched above
+/.venv/
+/.local/
+/runtime/
+**/__pycache__/

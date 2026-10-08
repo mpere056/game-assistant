@@ -1,0 +1,2 @@
+# Python 3.12. Install into the project-local environment with Setup.bat.
+anthropic==1.12.1
