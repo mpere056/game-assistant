@@ -7,7 +7,10 @@ Pure code, never a model. Modes:
           for a few seconds, then comes back.
 - go:     flies to an entity or a point and stays there until told otherwise.
 - lead:   flies ahead along a route (phase 4), waiting when the player falls behind.
-Every target is clamped to the leash: never further than LEASH metres from the player. A target
+- guide:  for far places (a grace, a landmark 2 km away): flies ahead toward it, up to GUIDE_AHEAD
+          metres from the player, hovering BEACON_HEIGHT above the ground like a beacon, and keeps
+          moving ahead as the player follows. Within ARRIVE metres it announces the arrival.
+Every target except guide's is clamped to the leash: never further than LEASH metres from the player. A target
 beyond it makes the fairy wait at the edge, pointing the way (`waiting` is True).
 
 update() takes a Snapshot and returns a FairyView: the world position plus what an overlay needs
@@ -33,6 +36,10 @@ SHOW_SECONDS = 4.0
 WORLD_RADIUS = 0.06      # the glow's core size in the world, metres
 CROSSHAIR_CLEAR = 0.14   # screen half-size (-1..1 units) the fairy keeps out of while following
 OCCLUSION_EVERY = 6      # frames between "is a wall in front of it?" rays
+GUIDE_AHEAD = 100.0      # guide mode: at most this far ahead of the player (the user asked for 100 m)
+BEACON_HEIGHT = 4.0      # guide mode: metres above the ground under it
+ARRIVE = 15.0            # guide mode: this close (horizontally) counts as arrived
+GROUND_EVERY = 20        # guide mode: frames between ground checks under the fairy
 
 Raycast = Callable[[list[tuple[Vec3, Vec3]]], list]
 
@@ -55,14 +62,19 @@ class _Target:
     entity_id: int | None = None
     point: Vec3 | None = None
     until: float | None = None   # for 'show': return after this time
+    name: str | None = None      # for 'guide': the place's name (for the arrival message)
     path: list[Vec3] = field(default_factory=list)  # for 'lead'
 
 
 class Companion:
-    def __init__(self, raycast: Raycast | None = None, leash: float = LEASH, scale: float = 1.0):
+    def __init__(self, raycast: Raycast | None = None, leash: float = LEASH, scale: float = 1.0,
+                 guide_ahead: float = GUIDE_AHEAD):
         self.raycast = raycast
         self.leash = leash
         self.scale = scale
+        self.guide_ahead = guide_ahead
+        self.events: list[str] = []   # things to tell the player ("arrived:<place>"), taken by the app
+        self._ground: float | None = None
         self.pos: Vec3 | None = None
         self.vel: Vec3 = (0.0, 0.0, 0.0)
         self.mode = 'follow'
@@ -87,6 +99,10 @@ class Companion:
 
     def lead(self, path: list[Vec3]) -> None:
         self.mode, self.target = 'lead', _Target(path=list(path))
+
+    def guide(self, point: Vec3, name: str | None = None) -> None:
+        self.mode, self.target = 'guide', _Target(point=point, name=name)
+        self._ground = None
 
     def stop(self) -> None:
         """Hold still where it is (it still keeps to the leash)."""
@@ -126,9 +142,36 @@ class Companion:
             goal = add(p, scale(normalize(sub(goal, p)), 8.0))
         return (goal[0], goal[1] + 1.5, goal[2])
 
+    def _guide_spot(self, snap: Snapshot) -> Vec3 | None:
+        goal, p = self.target.point, snap.player.pos
+        dx, dz = goal[0] - p[0], goal[2] - p[2]
+        d = math.hypot(dx, dz)
+        if d < ARRIVE:
+            self.events.append(f'arrived:{self.target.name or "there"}')
+            self.show(point=goal, seconds=SHOW_SECONDS)
+            return None
+        ahead = min(self.guide_ahead, d)
+        x, z = p[0] + dx / d * ahead, p[2] + dz / d * ahead
+        y_line = p[1] + (goal[1] - p[1]) * ahead / d  # straight line toward the goal's height
+        if self.raycast and (self._ground is None or self.frame % GROUND_EVERY == 0):
+            try:
+                h = self.raycast([((x, y_line + 120.0, z), (x, y_line - 120.0, z))])[0]
+                if h.hit and h.pos:
+                    self._ground = h.pos[1]
+            except Exception:
+                pass
+        base = self._ground if self._ground is not None else y_line
+        bob = math.sin(self.t * 2.0) * 0.4
+        return (x, base + BEACON_HEIGHT + bob, z)
+
     def _wanted(self, snap: Snapshot) -> Vec3:
         spot = None
-        if self.mode in ('show', 'go'):
+        if self.mode == 'guide':
+            spot = self._guide_spot(snap)
+            if spot is not None:
+                self.waiting = False
+                return spot  # far guiding is not held by the leash; GUIDE_AHEAD limits it
+        if spot is None and self.mode in ('show', 'go'):
             if self.mode == 'show' and self.target.until is not None and self.t > self.target.until:
                 self.follow()
             elif self.target.entity_id is not None:
@@ -138,7 +181,7 @@ class Companion:
             elif self.target.point is not None:
                 pt = self.target.point
                 spot = (pt[0], pt[1] + 1.0, pt[2]) if self.mode == 'show' else pt
-        elif self.mode == 'lead':
+        if self.mode == 'lead':
             spot = self._lead_spot(snap)
             if spot is None:
                 self.follow()
@@ -206,7 +249,8 @@ class Companion:
             ty = math.tan(math.radians(cam.fov_y_deg) / 2)
             view.screen_x = scr.x + (x + 1) / 2 * scr.width
             view.screen_y = scr.y + (1 - y) / 2 * scr.height
-            view.size_px = max(10.0, min(96.0, WORLD_RADIUS * self.scale / (depth * ty) * scr.height * 2.2))
+            smallest = 18.0 if self.mode == 'guide' else 10.0  # a far beacon must stay easy to spot
+            view.size_px = max(smallest, min(96.0, WORLD_RADIUS * self.scale / (depth * ty) * scr.height * 2.2))
         else:
             view.visible = False
         return view

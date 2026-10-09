@@ -164,7 +164,7 @@ def resolve(snap: Snapshot, raycast: Raycast | None = None) -> LookResult:
 def facts(result: LookResult, knowledge: Callable[[int], dict | None] | None = None) -> dict:
     """The short, exact facts a model is allowed to phrase. Nothing here is guessed."""
 
-    def entity_facts(c: Candidate) -> dict:
+    def entity_facts(c: Candidate, side: bool = False) -> dict:
         e = c.entity
         known = knowledge(e.type_id) if (knowledge and e.type_id is not None) else None
         out = {
@@ -172,9 +172,10 @@ def facts(result: LookResult, knowledge: Callable[[int], dict | None] | None = N
             'type_id': e.type_id,
             'model': e.model,
             'hostile': e.hostile,
-            'distance_m': round(c.distance, 1),
-            'where_on_screen': c.side,
+            'distance_m': round(c.distance),
         }
+        if side:  # only to tell several candidates apart
+            out['side'] = c.side
         if e.health is not None and e.max_health:
             out['health'] = f'{e.health:.0f}/{e.max_health:.0f}'
         if known:
@@ -185,7 +186,7 @@ def facts(result: LookResult, knowledge: Callable[[int], dict | None] | None = N
     if result.best:
         f['thing'] = entity_facts(result.best)
     if result.others:
-        f['also_near_crosshair'] = [entity_facts(c) for c in result.others]
+        f['also_near_crosshair'] = [entity_facts(c, side=True) for c in result.others]
     if result.hidden:
         f['behind_cover'] = [entity_facts(c) for c in result.hidden]
     if result.kind == 'surface' and result.surface:

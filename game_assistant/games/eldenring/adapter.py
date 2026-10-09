@@ -14,11 +14,13 @@ import threading
 import time
 from pathlib import Path
 
-from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN, CAP_SEARCH, Camera, Entity,
+from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_PLACES, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN,
+                              CAP_SEARCH, Camera, Entity,
                               GameNotRunning, Player, RayHit, Screen, Snapshot, Vec3, cross, normalize, sub)
 from .memory import Memory
 from .knowledge import EldenRingKnowledge
-from .params import read_graces, read_npc_params
+from .params import read_graces, read_legacy_conversions, read_map_points, read_npc_params
+from .places import PlaceIndex, compass, place_words
 
 ROOT = Path(__file__).resolve().parents[3]
 NPC_DUMP = ROOT / '.local' / 'eldenring' / 'npc_params.json'   # what was read from memory, for checking
@@ -71,7 +73,7 @@ def _rotate(q: tuple[float, float, float, float], v: Vec3) -> Vec3:
 
 class EldenRingAdapter:
     game = 'Elden Ring'
-    capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN})
+    capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN, CAP_PLACES})
     # Wikis the assistant may search for attack patterns, strategies, lore and quests.
     web_sources = ('eldenring.wiki.fextralife.com', 'eldenring.fandom.com')
     # Words that help speech recognition hear game terms (Whisper's initial prompt).
@@ -88,6 +90,7 @@ class EldenRingAdapter:
         self.kb = EldenRingKnowledge()
         self._ray_lock = threading.Lock()  # one ray request at a time (fairy loop and agent share it)
         self._graces_tried = False
+        self._places: PlaceIndex | None = None
 
     # ---- connection ----
 
@@ -209,6 +212,71 @@ class EldenRingAdapter:
         if row is None:
             return None
         return npc_facts(row, self.kb.npc_name(type_id))
+
+    def warm_up(self) -> None:
+        """Load the game data (enemy stats, graces, places) ahead of the first question. Called in the
+        background at start-up; quietly does nothing until a character is in the world."""
+        try:
+            if self.snapshot().in_world:
+                self._load_npcs()
+                self._place_index()
+                if not self._graces_tried:
+                    self._graces_tried = True
+                    self.kb.set_graces(read_graces(Memory(self._map())))
+        except (GameNotRunning, RuntimeError):
+            pass
+
+    def _place_index(self) -> PlaceIndex:
+        if self._places is None:
+            mem = Memory(self._map())
+            self._places = PlaceIndex(read_graces(mem), read_map_points(mem), read_legacy_conversions(mem),
+                                      self.kb.lists['BonfireWarpParam'], self.kb.lists['WorldMapPointParam'])
+        return self._places
+
+    def locate(self, query: str) -> dict:
+        """Where a named place is relative to the player, for guiding. The query may also be an item:
+        then its first known location is used ("lead me to the Moonveil" -> Gael Tunnel)."""
+        snap = self.snapshot()
+        if not snap.in_world or not snap.player:
+            return {'error': 'no character in the world right now'}
+        idx = self._place_index()
+        zone = int(snap.area, 16) if snap.area else 0
+        me = idx.player_world(zone, snap.player.pos)
+        places, via = idx.find(query), None
+        if not places:
+            fixed = self.kb.closest_name('place', query)
+            places = idx.find(fixed) if fixed else []
+        if not places:  # maybe an item: go to where it is found
+            for item in self.kb.find_item(query, limit=2):
+                for loc in item.get('found_in_world', []):
+                    for word in place_words(loc):
+                        places = idx.find(word)
+                        if places:
+                            via = f"{item['name']} is at {loc}"
+                            break
+                    if places:
+                        break
+                if places:
+                    break
+        out = []
+        for pl in places:
+            r = {'name': pl.name, 'region': pl.region, 'kind': pl.kind}
+            if pl.world is None or me is None:
+                r['note'] = 'its map position is not known' if pl.world is None else 'your own map position is not known here'
+            elif pl.world[0] != me[0]:
+                r['note'] = 'it is in the other world (the Lands Between vs the Realm of Shadow)'
+            else:
+                dx, dy, dz = pl.world[1] - me[1], pl.world[2] - me[2], pl.world[3] - me[3]
+                p = snap.player.pos
+                r.update(distance_m=round((dx * dx + dz * dz) ** 0.5), compass=compass(dx, dz), height_diff_m=round(dy),
+                         position=(p[0] + dx, p[1] + dy, p[2] + dz))
+            out.append(r)
+        res = {'query': query, 'results': out}
+        if via:
+            res['found_via_item'] = via
+        if not out:
+            res['note'] = 'no place with that name'
+        return res
 
     def search(self, kind: str, query: str) -> dict:
         if not self._graces_tried:  # map tiles -> nearby graces, for open-world item locations

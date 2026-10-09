@@ -23,16 +23,18 @@ planning with "lead the way" (4). See [docs/STATUS.md](docs/STATUS.md).
 - **A fairy companion**: a small glowing fairy floating around your character, like Navi in Zelda.
   It's what you talk to; it flies to what it's telling you about, goes where you send it and leads
   the way. Drawing an enemy's aggro and tackling it come in phase 5.
-- **Voice**: hold F9 and speak; it answers aloud. Speech recognition and the voice both run on your
-  PC, free.
+- **Voice**: hold F9 and speak; it answers aloud in its own small, bright fairy voice (a neural voice
+  raised in pitch, with a little sparkle before it speaks). Speech recognition and the voice both run
+  on your PC, free.
 
 Full plan: [docs/PLAN.md](docs/PLAN.md). Game adapter interface: [docs/ADAPTER.md](docs/ADAPTER.md).
 
 ## Setup
 
-1. Python 3.12. Run `Setup.bat`: it creates `.venv`, installs the packages (Anthropic SDK, voice:
-   pywin32, sounddevice, faster-whisper) and gets the game data lists (`Get-GameData.bat`). The
-   speech model (about 145 MB) downloads on the first start of the assistant.
+1. Python 3.12. Run `Setup.bat`: it creates `.venv`, installs the packages (Anthropic SDK; voice:
+   pywin32, sounddevice, faster-whisper, kokoro-onnx, pyworld), gets the game data lists
+   (`Get-GameData.bat`) and the fairy's voice (`Get-VoiceModel.bat`, about 120 MB). The speech
+   recognition model (about 145 MB) downloads on the first start of the assistant.
 4. Optional: settings (fairy colour and size, leash, voice, talk key, microphone) in
    `.local/settings.json`, created on the first start.
 2. An Anthropic API key from the [Claude Console](https://platform.claude.com) (API Keys page),

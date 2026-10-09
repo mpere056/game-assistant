@@ -137,7 +137,7 @@ CAP_KNOWLEDGE = 'knowledge'    # names and facts by type id
 CAP_SCREEN = 'screen'          # Snapshot.screen is filled (overlays can be drawn)
 CAP_SEARCH = 'search'          # find enemies, items and places by name (search())
 CAP_ACTIONS = 'actions'        # phase 3
-CAP_PLACES = 'places'          # named places / fast travel (phase 3)
+CAP_PLACES = 'places'          # locate(name): where a named place is from the player, for guiding
 
 
 class GameAdapter(Protocol):
@@ -152,6 +152,10 @@ class GameAdapter(Protocol):
 
     def knowledge(self, type_id: int) -> dict | None:
         """Facts about an entity type from the game's own data (name, resistances...), or None."""
+
+    def locate(self, query: str) -> dict:
+        """Where a named place (or an item's location) is from the player: results with name, region,
+        distance_m, compass and position (in the snapshot's coordinates). Only with CAP_PLACES."""
 
     def search(self, kind: str, query: str) -> dict:
         """Find an 'enemy', 'item' or 'place' by name: exact facts (where items are found, which

@@ -1,0 +1,241 @@
+"""The fairy's voice: a local neural voice (Kokoro), raised in pitch, with a sparkle and stereo pan.
+
+Kokoro (82M parameters, Apache 2.0, https://github.com/thewh1teagle/kokoro-onnx) runs on the CPU from
+two files in .local/voice/ (Get-VoiceModel.bat). Two ways to make it sound like a fairy:
+- 'world' (default): the WORLD vocoder (pyworld) sets the pitch to `pitch_hz` (Navi measures about
+  558 Hz; Kokoro's voices speak around 200 Hz) and makes the voice `size` times smaller (formants),
+  separately, so it stays clear.
+- 'speedup': each sentence is made slower and played back `pitch` times faster: pitch and voice size
+  rise together (a tiny-creature sound, chipmunk-like when high).
+A short two-note sparkle plays before an answer.
+Audio is ours (sounddevice), so it is panned left or right to where the fairy is on screen.
+
+Same interface as tts.Speaker (feed, flush, say, stop, speaking, error), so the app can use either.
+"""
+from __future__ import annotations
+
+import math
+import queue
+import re
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+MODEL = ROOT / '.local' / 'voice' / 'kokoro-v1.0.int8.onnx'
+VOICES = ROOT / '.local' / 'voice' / 'voices-v1.0.bin'
+SOURCE = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/'
+_SENTENCE_END = re.compile(r'([.!?])(\s+|$)')
+
+
+def available() -> bool:
+    return MODEL.exists() and VOICES.exists()
+
+
+def sparkle(sr: int, volume: float = 0.18):
+    """Two quick bell notes (G6, C7) with a soft shimmer: the fairy's 'ting'."""
+    import numpy as np
+    out = []
+    for f in (1568.0, 2093.0):
+        n = int(sr * 0.09)
+        t = np.arange(n) / sr
+        env = np.exp(-t * 28.0)
+        tone = np.sin(2 * math.pi * f * t) + 0.35 * np.sin(2 * math.pi * f * 2.01 * t)
+        out.append(tone * env)
+    return (np.concatenate(out) * volume / 1.35).astype('float32')
+
+
+def median_f0(a, sr: int, lo: int = 70, hi: int = 1600) -> float:
+    """Median pitch of the voiced parts (autocorrelation), 0 if none found."""
+    import numpy as np
+    fr = int(sr * 0.04)
+    out = []
+    for i in range(0, len(a) - fr, fr // 2):
+        x = a[i:i + fr] * np.hanning(fr)
+        if np.sqrt(np.mean(x ** 2)) < 0.02:
+            continue
+        c = np.correlate(x, x, 'full')[fr - 1:]
+        k = int(sr / hi) + int(np.argmax(c[int(sr / hi):int(sr / lo)]))
+        if c[k] > 0.35 * c[0]:
+            out.append(sr / k)
+    return float(np.median(out)) if out else 0.0
+
+
+def highpass(a, sr: int, hz: float):
+    """Remove everything below `hz` (smooth roll-off): the voice at ~550 Hz has nothing useful there."""
+    import numpy as np
+    n = len(a)
+    f = np.fft.rfftfreq(n, 1 / sr)
+    gain = np.clip((f - hz * 0.6) / (hz * 0.4), 0, 1) ** 2
+    return np.fft.irfft(np.fft.rfft(a) * gain, n).astype('float32')
+
+
+def _envelope(a, sr: int, ms: float = 12):
+    import numpy as np
+    k = max(1, int(sr * ms / 1000))
+    return np.sqrt(np.convolve(a.astype(np.float64) ** 2, np.ones(k) / k, mode='same'))
+
+
+def gate(out, ref, sr: int):
+    """Never louder than the original voice was at that moment (scaled to the overall level), so noise
+    in gaps and at word ends can't stand out."""
+    import numpy as np
+    e_out, e_ref = _envelope(out, sr), _envelope(ref, sr)
+    scale = np.sqrt(np.mean(out.astype(np.float64) ** 2)) / max(1e-9, np.sqrt(np.mean(ref.astype(np.float64) ** 2)))
+    g = np.minimum(1.0, (e_ref * scale * 1.3 + 1e-6) / (e_out + 1e-6))
+    w = max(1, int(sr * 0.006))
+    g = np.convolve(g, np.ones(w) / w, mode='same')  # smooth, no clicks
+    return (out * g).astype('float32')
+
+
+def world_shift(a, sr: int, f0_factor: float, formant_factor: float, breath: float = 0.3, low_cut_hz: float = 280.0):
+    """Raise the pitch by f0_factor and the voice size (spectral envelope) by formant_factor, apart.
+
+    Cleaned up against a 'blowing into the mic' noise the user heard (2026-10-09): the harvest pitch
+    tracker (dio misjudged voiced sounds as noise: 4.5 % of the energy was rumble below 300 Hz), less
+    breath noise in voiced frames (`breath`), a high-pass at `low_cut_hz`, and a gate that keeps the
+    result no louder than the original voice at each moment."""
+    import numpy as np
+    import pyworld as pw
+    x = a.astype(np.float64)
+    f0, t = pw.harvest(x, sr, f0_floor=70, f0_ceil=800, frame_period=5.0)
+    sp = pw.cheaptrick(x, f0, t, sr)
+    ap = pw.d4c(x, f0, t, sr)
+    voiced = f0 > 0
+    ap[voiced] = ap[voiced] * breath
+    bins = sp.shape[1]
+    src = np.clip(np.arange(bins) / formant_factor, 0, bins - 1)  # stretch the envelope upward
+    sp2 = np.stack([np.interp(src, np.arange(bins), row) for row in sp])
+    ap2 = np.stack([np.interp(src, np.arange(bins), row) for row in ap])
+    y = pw.synthesize(f0 * f0_factor, sp2, ap2, sr)[:len(a)].astype('float32')
+    y = gate(highpass(y, sr, low_cut_hz), a, sr)
+    return (y / max(1e-6, float(np.max(np.abs(y)))) * 0.9).astype('float32')
+
+
+def pitch_shift(audio, factor: float):
+    """Raise the pitch by `factor` by playing it faster (shorter); tempo rises by the same factor."""
+    import numpy as np
+    if abs(factor - 1.0) < 1e-3:
+        return audio
+    n = int(len(audio) / factor)
+    return np.interp(np.arange(n) * factor, np.arange(len(audio)), audio).astype('float32')
+
+
+class FairyVoice:
+    def __init__(self, voice: str = 'af_heart', pitch: float = 1.25, speed: float = 1.12, chime: bool = True,
+                 volume: float = 0.9, method: str = 'world', pitch_hz: float = 440.0, size: float = 1.3):
+        self.voice, self.pitch, self.speed, self.chime, self.volume = voice, pitch, speed, chime, volume
+        self.method, self.pitch_hz, self.size = method, pitch_hz, size
+        self._voice_hz: float | None = None  # the chosen voice's own pitch, measured once
+        self.pan = 0.0               # -1 left .. +1 right; set by the app from the fairy's screen position
+        self.error: str | None = None
+        self._text: queue.Queue = queue.Queue()    # sentences to make
+        self._audio: queue.Queue = queue.Queue()   # (samples, sample rate) to play
+        self._buf = ''
+        self._gen = 0                # bumped by stop(): stale audio is dropped
+        self._playing = False
+        self._first_of_answer = True
+        self.ready = threading.Event()
+        threading.Thread(target=self._make, name='fairy voice', daemon=True).start()
+        threading.Thread(target=self._play, name='fairy voice output', daemon=True).start()
+
+    # ---- same interface as tts.Speaker ----
+
+    @property
+    def speaking(self) -> bool:
+        return self._playing or not self._audio.empty() or not self._text.empty()
+
+    def feed(self, text: str) -> None:
+        self._buf += text
+        while True:
+            m = _SENTENCE_END.search(self._buf)
+            if not m:
+                break
+            sentence, self._buf = self._buf[:m.end(1)], self._buf[m.end():]
+            self.say(sentence)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            self.say(self._buf)
+        self._buf = ''
+        self._first_of_answer = True
+
+    def say(self, text: str) -> None:
+        text = text.strip()
+        if text:
+            self._text.put((self._gen, text, self._first_of_answer and self.chime))
+            self._first_of_answer = False
+
+    def stop(self) -> None:
+        self._gen += 1
+        self._buf = ''
+        self._first_of_answer = True
+        for q in (self._text, self._audio):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+
+    # ---- threads ----
+
+    def _make(self) -> None:
+        try:
+            import numpy as np
+            from kokoro_onnx import Kokoro
+            tts = Kokoro(str(MODEL), str(VOICES))
+            # Warm up, and measure this voice's own pitch once from a full sentence.
+            warm, wsr = tts.create('Hello there, it is good to see you again today.', voice=self.voice, speed=1.0,
+                                   lang='en-us')
+            self._voice_hz = median_f0(np.asarray(warm, dtype='float32'), wsr) or 200.0
+        except Exception as e:
+            self.error = f'{type(e).__name__}: {e}'
+            self.ready.set()
+            return
+        self.ready.set()
+        while True:
+            gen, text, chime = self._text.get()
+            if gen != self._gen:
+                continue
+            try:
+                if self.method == 'world':
+                    audio, sr = tts.create(text, voice=self.voice, speed=min(2.0, max(0.5, self.speed)), lang='en-us')
+                    audio = np.asarray(audio, dtype='float32')
+                    if self._voice_hz is None or self._voice_hz <= 0:
+                        self._voice_hz = median_f0(audio, sr) or 200.0
+                    audio = world_shift(audio, sr, self.pitch_hz / self._voice_hz, self.size) * self.volume
+                else:
+                    audio, sr = tts.create(text, voice=self.voice, speed=min(2.0, max(0.5, self.speed / self.pitch)),
+                                           lang='en-us')
+                    audio = pitch_shift(np.asarray(audio, dtype='float32'), self.pitch) * self.volume
+            except Exception as e:
+                self.error = f'{type(e).__name__}: {e}'
+                continue
+            if chime:
+                audio = np.concatenate([sparkle(sr), np.zeros(int(sr * 0.05), 'float32'), audio])
+            if gen == self._gen:
+                self._audio.put((gen, audio, sr))
+
+    def _play(self) -> None:
+        import numpy as np
+        import sounddevice as sd
+        while True:
+            gen, audio, sr = self._audio.get()
+            if gen != self._gen:
+                continue
+            self._playing = True
+            try:
+                # Equal-power pan, kept gentle so the voice never leaves one ear entirely.
+                p = max(-1.0, min(1.0, self.pan)) * 0.6
+                left, right = math.cos((p + 1) * math.pi / 4), math.sin((p + 1) * math.pi / 4)
+                stereo = np.stack([audio * left, audio * right], axis=1)
+                sd.play(stereo, sr)
+                while sd.get_stream().active:
+                    if gen != self._gen:
+                        sd.stop()
+                        break
+                    time.sleep(0.02)
+            except Exception as e:
+                self.error = f'{type(e).__name__}: {e}'
+            finally:
+                self._playing = False
