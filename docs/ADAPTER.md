@@ -15,7 +15,7 @@ skills, navigation) only talks to that interface, so it runs unchanged on every 
 | Target | the game's own lock-on or interaction target | not read yet | phase 2 |
 | Raycast | segments through the game's collision: hit point and surface normal | `CSPhysWorld::CastRay` through the assistant's own ray block (`AOER_OFF_ASSIST_RAYS`) | yes |
 | Knowledge | facts by type id: name, resistances, drops; item names | game data extracted to `.local/eldenring/` | phase 2 |
-| Places | named places, fast-travel points, current area | area id now; grace tiles and positions read (BonfireWarpParam) | phase 4 |
+| Places | `locate(name)`: where a named place (or an item's location) is from the player: distance, compass direction, position | Sites of Grace, map landmarks and the legacy-dungeon conversion table, read from the game | yes (2026-10-09) |
 | Actions | named game actions mapped to the game's input; fast travel | synthetic keyboard input; AoTTG2's input path while linked | phase 4 |
 | Screen | the game window's position and size on the desktop, and whether a menu or loading screen is up (the fairy overlay hides then) | state block: `winX/Y/W/H`; menus not detected yet | phase 3 |
 | Companion body | the fairy's in-world character: spawn and remove, place at a position each frame, ignored by or visible to enemies, strike an entity (damage plus hit reaction), draw an entity's attention | Attack on Elden Ring bridge (to build: spawn, NoDead, hide and pin like the stand-in; the damage queue; the "attract attention" throw) | phase 5 |

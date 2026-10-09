@@ -91,7 +91,8 @@ window stays for typing and for a written record). Added 2026-10-08.
 | Shows what it is talking about: flies to the thing at the crosshair or the enemy it describes, then comes back | Look-at resolver and entity positions | 3 |
 | "Go to X": flies to an enemy, an item spot, a grace or a place, but never further than the leash (75 m) and stays in view; if X is further it waits at the edge and points | Code; X comes from look-at, nearby characters or search_game_data | 3 |
 | Glows or pulses while it speaks; its voice comes from where it is on screen (stereo pan) | Voice wrapper (phase 2b), then panned from its screen position | 2b + 3 |
-| "Lead the way": flies ahead along a route you can walk, stopping when you fall behind | Navigation (walkability grid and A*) | 4 |
+| "Lead the way" to something nearby: flies ahead along a route you can walk, stopping when you fall behind | Navigation (walkability grid and A*) | 4 |
+| "Take me to the Forsaken Ruins" (or to an item: "take me to the Moonveil"): flies ahead toward a place anywhere in this world, up to 100 m in front of you, hovering like a beacon, and says when you arrive | Place positions from the game's own map tables, converted to your position | 4 (built) |
 | Normally invisible to enemies; on command visible to them like a player, to draw an enemy's aggro | An in-world body through the game's bridge | 5 |
 | Attacks on command: a tackle (dash in, hit, back off) that damages the enemy | In-world body plus the bridge's damage path | 5 |
 
@@ -113,6 +114,9 @@ window stays for typing and for a written record). Added 2026-10-08.
 **Rules for the fairy**
 
 - Movement is code, never a model: a model only names a target ("the dog on the left").
+- It moves only when you ask; it never flies off on its own (it used to fly to whatever it was
+  describing; the user didn't want that).
+- It talks like Navi: bright, quick, very short, and answers only what was asked.
 - It is never further than the leash from you and comes back if you move away; "come back" and
   "stop" are instant local commands.
 - It only fights or draws aggro when you tell it to; it never starts a fight on its own.
@@ -127,13 +131,20 @@ A wrapper around the same agent; the text window stays. Built 2026-10-09:
   is recorded while held; on release, faster-whisper (`base.en`, int8, on the CPU so the GPU stays
   with the game) turns it into text. Each game gives a vocabulary hint, so "Moonveil" is not heard as
   "Moonvale". Measured: a 5-second question transcribed in 0.7 to 0.9 s.
-- **Hear:** Windows' own voices (default Zira), free and local. Each sentence is spoken as soon as
-  it has streamed. The fairy glows and pulses while it speaks.
+- **Hear:** the fairy's own voice (`voice/fairy_voice.py`): Kokoro, a local neural voice on the CPU
+  (voice af_heart), raised to 440 Hz and made smaller (voice size 1.3) with the WORLD vocoder, which
+  sets pitch and size separately, cleaned of breath noise (harvest pitch tracking, less breath,
+  280 Hz high-pass, a gate), with a sparkle before each answer and panned to where the fairy is on
+  screen. Chosen by ear by the user from several rounds of samples (Navi measures about 558 Hz; 440
+  sounded best). Each sentence is spoken as soon as it has streamed (first sound about 0.6 s after the
+  answer starts). Windows' own voice stays as the fallback (`voice_engine: windows`).
 - **Interrupt:** a new question, "stop" or "quiet" cuts speech off at once.
-- **Later:** a nicer local voice (Piper or Kokoro) and the voice panned left or right to where the
-  fairy is on screen (Windows voices can't be panned). Hosted real-time voice only if a cheap
-  option appears; it would count toward the cap.
-- Settings (key, voice, speed, microphone, speech model): `.local/settings.json`.
+- **Looked into, not used (2026-10-09):** the only Navi-trained voice found is a fan-made RVC voice
+  converter trained on about two seconds of game audio and unfinished; heavy (PyTorch), a grey area
+  (Nintendo audio, the voice actor's performance) and unlikely to beat the tuned voice. Real Navi
+  exclamations ("Hey!", "Listen!") from the player's own recording before the answer remain an
+  option. Hosted real-time voice only if a cheap option appears; it would count toward the cap.
+- Settings (talk key, microphone, speech model, voice, pitch, size, speed, sparkle): `.local/settings.json`.
 
 - Push-to-talk key; speech to text on the CPU with an open Whisper model (faster-whisper);
   Windows speech recognition as the fallback.
@@ -155,7 +166,7 @@ scene), but a phase counts as done only when its game gate passes.
 | 2 | "What am I looking at?": look-at resolver (built in phase 1), lock-on target, NpcParam names and resistances extracted from game data to `.local/eldenring/`, Haiku agent with fact tools, text chat window | Ask "what is that and what is it weak to?" near a known enemy: correct name, resistances match the game's data; time to first word measured | **Game test passed 2026-10-09** (user: "working really well"). Exact numbers from the game's memory; names, item locations, drops, shops and places from community lists; attack patterns, strategies and lore from a wiki search |
 | 2b | Voice (see above) | Spoken question and answer; frame rate unchanged | **Game test passed 2026-10-09** (a whole session by voice). Offline: Windows voice into Whisper exact with the game vocabulary, 0.9 s |
 | 3 | Fairy companion, look and movement: overlay renderer (projection, wall fading, hidden in menus), companion controller (float, follow, leash), fly to what it talks about, "go to X", "come back", instant "stop" | The fairy follows you for 10 minutes without blocking the crosshair or drifting off; "go to that enemy" flies to the right one and stays within the leash | **Built 2026-10-09**, tested offline and in the demo scene (follow, show, go, leash, menus, instant commands, the agent's fairy tool). First game test 2026-10-09: looks and moves well; leash raised to 75 m on request. Gate (10 minutes, crosshair, right target) still to confirm |
-| 4 | Navigation: raycast walkability grid, A*, the fairy leads the way along it, grace locations; then `goto()` (the character walks itself) and fast travel | The fairy leads you between two points around a wall and waits when you fall behind; then the character walks it alone; "stop" halts in under 100 ms | **Route planning and "lead the way" built 2026-10-09** (offline: around a wall in under 1,200 rays). Not built: the character walking itself, fast travel, routes to graces (grace positions are map-tile local; converting them to the bridge's world frame is research) |
+| 4 | Navigation: raycast walkability grid, A*, the fairy leads the way along it, grace locations; then `goto()` (the character walks itself) and fast travel | The fairy leads you between two points around a wall and waits when you fall behind; then the character walks it alone; "stop" halts in under 100 ms | **Route planning and "lead the way" built 2026-10-09** (offline: around a wall in under 1,200 rays). Guiding to far places built 2026-10-09: every Site of Grace and map landmark (and legacy dungeons through the game's conversion table) gets a position relative to you; tested in game (Forsaken Ruins 151 m west, Stormveil Castle 1.9 km west). Not built: the character walking itself, fast travel |
 | 5 | Fairy in the world (Elden Ring bridge work, in Attack on Elden Ring): hidden, unkillable ally body pinned to the fairy; ignored-by-enemies / visible-to-enemies switch; draw aggro; tackle attack through the damage path | Invisible to enemies by default; on command one chosen enemy turns to it; a tackle damages that enemy with a hit reaction and the fairy backs off | not started; research steps below |
 | 6 | Skills: sandbox, skill library, skill writer (Sonnet 5.5), dry runs | One sentence makes a working skill, such as sorting items | not started |
 | 7 | Minecraft: new bridge (client mod) and adapter only; the fairy's look works unchanged | Questions, the fairy and `goto()` work with no change to the core | later |
@@ -193,7 +204,6 @@ Done in Attack on Elden Ring, step by step, each tested in game before the next:
 
 ## Open questions
 
-- Which voice should it speak with?
 - Can Haiku 5.5 write simple skills well enough to skip Sonnet 5.5 for them?
 - Where Elden Ring keeps the lock-on target and the inventory in memory (start from fromsoftware-rs
   and Cheat Engine tables).

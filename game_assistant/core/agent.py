@@ -17,46 +17,60 @@ import anthropic
 
 from . import lookat, nav
 from .companion import Companion
-from .interface import CAP_KNOWLEDGE, CAP_RAYCAST, CAP_SEARCH, GameAdapter, GameNotRunning, dist, dot, normalize, sub
+from .interface import CAP_KNOWLEDGE, CAP_PLACES, CAP_RAYCAST, CAP_SEARCH, GameAdapter, GameNotRunning, dist, dot, normalize, sub
 from .spend import SpendGuard
 
 MODEL = 'claude-haiku-5-5'
-MAX_TOKENS = 600          # an answer is a few sentences; this caps a runaway reply
+MAX_TOKENS = 300          # answers are short and spoken; this caps a runaway reply
 MAX_TOOL_ROUNDS = 4
 MAX_HISTORY_MESSAGES = 60  # past this, start a fresh conversation (keeps every request small)
 
-SYSTEM = """You are a game assistant that the player talks to while playing {game}.{persona}
+SYSTEM = """You are a game assistant that the player talks to while playing {game}. Your answers are
+spoken aloud.{persona}
 
 How to answer:
-- Answer in one or two short sentences unless the player asks for more detail.
-- Each message starts with <game_view_now>: exact facts about what is at the centre of the screen at
-  the moment the player asked (the same as the look_at tool). Use it directly for "what is that"
-  questions. For anything else about the game state (who is nearby, another enemy's data), call a
-  tool. Use only facts from game_view_now or tools.
-- Never invent names, numbers, abilities, locations or lore. If a tool has no name for something,
-  say you don't know its name; you may still give its facts. If a fact is missing, say so.
+- Be brief. Most answers are one short sentence, often under 12 words. Answer only what was asked:
+  "can you see that?" gets what it is and about how far, not its stats. Give weaknesses, stats, drops
+  or lore only when asked for them. No filler, no repeating the question, no explaining how you know.
+- Each message starts with <game_view_now>: exact facts about what is at the centre of the screen
+  when the player asked (the same as the look_at tool). Use it for "what is that" questions. For
+  anything else about the game state (who is nearby, another enemy's data), call a tool. Use only
+  facts from game_view_now or tools.
+- Never invent names, numbers, abilities, locations or lore. If there is no name, say you don't know
+  its name. If a fact is missing, say so.
 - damage_taken_percent: 100 is normal damage, above 100 is a weakness, below 100 a resistance.
-  status_buildup_needed: lower numbers trigger sooner; immune_to lists statuses that never build up.
-  weak_to lists types clearly above the enemy's usual; takes_extra_from_everything means every type
-  does more than normal damage (say so instead of listing every type).
-- Facts are base values from the game data; mention that only if the player asks how exact they are.
-- For "where is X", "where do I find X", "what drops X", "what enemies are called X" or a place's
-  region, call search_game_data. Its locations are exact; describe them plainly.
-- Use web_search (if available) only for what the game data can't say: attack patterns, boss
-  strategies, lore, NPC questlines, puzzle solutions, or when search_game_data finds nothing. Say the
-  answer comes from the wiki. Search once if possible.
-- If what they mean is unclear (for example two enemies at the crosshair), ask one short question.
-- Distances are in metres. Directions are relative to the camera: ahead, left, right, behind.
-- Write plain text with no markdown (no asterisks or headings). Don't mention type ids, refs or
-  other internal numbers unless the player asks for them."""
+  status_buildup_needed: lower numbers trigger sooner; immune_to: statuses that never build up.
+  weak_to: types clearly above the enemy's usual; takes_extra_from_everything: every type does extra
+  damage (say that rather than listing every type).
+- Facts are base values from the game data; mention that only if asked how exact they are.
+- For "where is X", "where do I find X", "what drops X": call search_game_data and give the one or two
+  most useful places, not the whole list, unless asked for all.
+- web_search (if available) only for what the game data can't say: attack patterns, boss strategies,
+  lore, questlines, puzzles, or when search_game_data finds nothing. Say briefly it's from the wiki.
+- If what they mean is unclear (two enemies at the crosshair), ask one short question.
+- Round distances ("about 50 metres"). Directions are relative to the camera: ahead, left, right,
+  behind; for far places use the compass too. Never describe where things are on the screen.
+- Plain text, no markdown, no lists. Don't mention ids, refs or other internal numbers.
+- Mention only the thing asked about; leave out other things nearby unless the player asks.
+
+Examples of the right length:
+  "Can you see that?" -> "Yes! A Giant Dog, about 50 metres ahead."
+  "What about those over there?" -> "Three Putrid Corpses, about 45 metres to the right."
+  "What's it weak to?" -> "Fire and slash!"
+  "Lead me to the Forsaken Ruins." -> "This way! About 150 metres west."
+  "Where's the Moonveil?" -> "In Gael Tunnel, guarded by a Magma Wyrm."
+"""
 
 PERSONA = """
-You are also a small glowing fairy companion that floats beside the player's character, like a
-guiding fairy in an adventure game. Speak as that fairy: friendly, brief, never chatty. Your body
-moves by itself: when you describe the thing at the crosshair you automatically fly over to it.
-Use the fairy tool when the player asks you to go somewhere, show something, lead the way, or come
-back. You stay within {leash:.0f} metres of the player; if something is further, say you'll wait at
-the edge and point the way."""
+You are a small glowing fairy companion floating beside the player's character, like the guiding
+fairy in an adventure game. Talk like one: bright, quick, a little eager ("Look!", "Over there!",
+"Hey!" now and then, not every time), always short.
+You move only when the player asks you to; never fly anywhere on your own.
+- "Go to", "fly to", "show me" or "lead me to" something nearby (an enemy, what they're looking at):
+  use the fairy tool. Your range for those is {leash:.0f} metres.
+- "Take me to", "guide me to" or "lead me to" a place or an item somewhere in the world (a grace, a
+  ruin, a castle, "the Moonveil"): use guide_to. You fly ahead toward it, up to {guide:.0f} metres in
+  front of the player, and keep going as they follow, so tell them which way and roughly how far."""
 
 
 TOOLS = [
@@ -107,6 +121,18 @@ TOOLS = [
         },
     },
     {
+        'name': 'guide_to',
+        'description': 'Guide the player to a named place anywhere in this world (a Site of Grace, a ruin, a '
+                       'castle, a cave) or to where an item is found: you fly ahead toward it, up to 100 m in '
+                       'front of them, until they arrive. Returns its distance and compass direction.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {'place': {'type': 'string', 'description': 'Place or item name, e.g. "Forsaken Ruins".'}},
+            'required': ['place'],
+            'additionalProperties': False,
+        },
+    },
+    {
         'name': 'character_info',
         'description': 'Facts from the game data about a character type, by the type_id another tool returned: '
                        'name, base HP, damage taken per damage type, status buildup needed, immunities.',
@@ -149,12 +175,13 @@ class Agent:
         self.guard = guard or SpendGuard()
         self.client = client or anthropic.Anthropic()
         self.companion = companion
-        persona = PERSONA.format(leash=companion.leash) if companion else ''
+        persona = PERSONA.format(leash=companion.leash, guide=companion.guide_ahead) if companion else ''
         self.system = SYSTEM.format(game=adapter.game, persona=persona)
         self.messages: list[dict] = []
         self.tools = [t for t in TOOLS
                       if (t['name'] != 'search_game_data' or CAP_SEARCH in adapter.capabilities)
-                      and (t['name'] != 'fairy' or companion is not None)]
+                      and (t['name'] != 'fairy' or companion is not None)
+                      and (t['name'] != 'guide_to' or (companion is not None and CAP_PLACES in adapter.capabilities))]
         sources = getattr(adapter, 'web_sources', None)
         if sources:  # Anthropic's server-side web search, limited to the game's wikis ($0.01 per search)
             self.tools.append({'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 2,
@@ -257,10 +284,31 @@ class Agent:
         return {'done': f'flying there ({action})', 'beyond_leash': far,
                 'distance_m': round(dist(goal, snap.player.pos), 1) if goal else None}
 
+    def tool_guide_to(self, inp: dict) -> dict:
+        place = str(inp.get('place') or '').strip()
+        if not place or self.companion is None:
+            return {'error': 'need a place name'}
+        found = self.adapter.locate(place)
+        if 'error' in found:
+            return found
+        for r in found.get('results', []):
+            if r.get('position') is not None:
+                self.companion.guide(r['position'], r['name'])
+                out = {'guiding_to': r['name'], 'region': r.get('region'), 'kind': r.get('kind'),
+                       'distance_m': r['distance_m'], 'compass': r['compass'], 'height_diff_m': r.get('height_diff_m')}
+                snap = self.adapter.snapshot()
+                if snap.camera:
+                    out['direction_from_camera'] = direction(snap.camera, r['position'])
+                if found.get('found_via_item'):
+                    out['found_via_item'] = found['found_via_item']
+                return out
+        notes = [f"{r['name']}: {r.get('note')}" for r in found.get('results', [])][:3]
+        return {'error': 'no reachable place with that name', 'details': notes or found.get('note')}
+
     def _run_tool(self, name: str, inp: dict) -> tuple[str, bool]:
         fn = {'look_at': self.tool_look_at, 'nearby_characters': self.tool_nearby_characters,
               'character_info': self.tool_character_info, 'search_game_data': self.tool_search_game_data,
-              'fairy': self.tool_fairy}.get(name)
+              'fairy': self.tool_fairy, 'guide_to': self.tool_guide_to}.get(name)
         if fn is None:
             return f'unknown tool {name}', True
         try:

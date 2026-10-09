@@ -72,7 +72,7 @@ class ParamTable:
 # game on 2026-10-09 (they differ from fromsoftware-rs's INDEX values); other holders are tried if wrong.
 SOLO_PARAM_REPOSITORY_RVA = 0x3D85F58
 HOLDERS, HOLDER_SIZE, HOLDER_COUNT = 0x88, 0x48, 194
-PARAM_INDEX = {'NPC_PARAM_ST': 6, 'BONFIRE_WARP_PARAM_ST': 43}
+PARAM_INDEX = {'NPC_PARAM_ST': 6, 'BONFIRE_WARP_PARAM_ST': 43}  # others: found by name
 
 
 def struct_name_at(mem: Memory, f: int) -> str | None:
@@ -161,4 +161,33 @@ def read_graces(mem: Memory) -> dict[int, dict]:
         area, gx, gz = row[0x20], row[0x21], row[0x22]
         if area:
             out[rid] = {'area': area, 'grid_x': gx, 'grid_z': gz, 'pos': struct.unpack_from('<3f', row, 0x24)}
+    return out
+
+
+# WORLD_MAP_POINT_PARAM_ST (map landmarks: ruins, caves, churches...), 0x100 bytes; area, tile and
+# position at the same offsets as BONFIRE_WARP_PARAM_ST. WORLD_MAP_LEGACY_CONV_PARAM_ST, 0x30 bytes:
+# places a point of a legacy dungeon (its own map) on the open-world map.
+WORLD_MAP_POINT_PARAM_SIZE = 0x100
+LEGACY_CONV_PARAM_SIZE = 0x30
+
+
+def read_map_points(mem: Memory) -> dict[int, dict]:
+    t = read_param(mem, 'WORLD_MAP_POINT_PARAM_ST', WORLD_MAP_POINT_PARAM_SIZE)
+    out = {}
+    for rid, row in t.rows.items():
+        area, gx, gz = row[0x20], row[0x21], row[0x22]
+        if area:
+            out[rid] = {'area': area, 'grid_x': gx, 'grid_z': gz, 'pos': struct.unpack_from('<3f', row, 0x24)}
+    return out
+
+
+def read_legacy_conversions(mem: Memory) -> list[dict]:
+    t = read_param(mem, 'WORLD_MAP_LEGACY_CONV_PARAM_ST', LEGACY_CONV_PARAM_SIZE)
+    out = []
+    for row in t.rows.values():
+        src = (row[0x04], row[0x05], row[0x06])
+        dst = (row[0x14], row[0x15], row[0x16])
+        if src[0] and dst[0]:
+            out.append({'src': src, 'src_pos': struct.unpack_from('<3f', row, 0x08),
+                        'dst': dst, 'dst_pos': struct.unpack_from('<3f', row, 0x18)})
     return out

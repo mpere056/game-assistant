@@ -29,7 +29,27 @@ def get_eldenring() -> int:
     return 1 if failed else 0
 
 
-GAMES = {'eldenring': get_eldenring}
+def get_voice() -> int:
+    """The fairy's neural voice (Kokoro int8 model and voices, about 120 MB) into .local/voice/."""
+    from ..voice import fairy_voice as fv
+    fv.MODEL.parent.mkdir(parents=True, exist_ok=True)
+    failed = 0
+    for target in (fv.MODEL, fv.VOICES):
+        if target.exists():
+            print(f'  {target.name}  already there')
+            continue
+        try:
+            with urllib.request.urlopen(fv.SOURCE + target.name, timeout=120) as r:
+                data = r.read()
+            target.write_bytes(data)
+            print(f'  {target.name}  {len(data):,} bytes')
+        except OSError as e:
+            failed += 1
+            print(f'  {target.name}  FAILED: {e}')
+    return 1 if failed else 0
+
+
+GAMES = {'eldenring': get_eldenring, 'voice': get_voice}
 
 
 def main() -> int:

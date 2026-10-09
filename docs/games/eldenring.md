@@ -54,6 +54,25 @@ Three sources, in this order; the assistant says which one an answer came from w
 Never used: the memory-wide scan command. Tried once (2026-10-08), it ran for many minutes inside the
 game and blocked the mailbox for everyone.
 
+## Places and coordinates (guiding)
+
+Measured 2026-10-09: in the open world the bridge's published positions are global map coordinates,
+position inside the map tile + 256 m x (tile X, 0, tile Z) (zone = area << 24), the same as the
+game's place tables. Check: standing in Caelid, the nearest grace came out as Caelem Ruins at 88 m.
+
+- Sites of Grace: `BONFIRE_WARP_PARAM_ST` (holder 43), area, tile and position at 0x20-0x2F.
+- Map landmarks: `WORLD_MAP_POINT_PARAM_ST` (0x100 bytes, same offsets), 472 rows.
+- Legacy dungeons (Stormveil, Leyndell, caves...) have their own maps;
+  `WORLD_MAP_LEGACY_CONV_PARAM_ST` (0x30 bytes) places their points on the world map. Each source map
+  has several rows; the first may point at another dungeon map (Stormveil -> area 34), so only rows
+  whose destination is area 60 or 61 are used. All such rows agree.
+- North is +Z, east is +X. Areas 60 (the Lands Between) and 61 (Realm of Shadow) are separate.
+- Landmark rows whose name starts with a "Guidance" region (grace and starlight guidance lights)
+  name several places at once and are skipped.
+- Results: Forsaken Ruins 151 m west, Gael Tunnel 276 m south-west, Church of Elleh 1.6 km
+  south-west, Stormveil Castle 1.9 km west, Leyndell 2.9 km north. Some places have no conversion
+  (Leyndell Catacombs, area 35): their position is unknown.
+
 ## Findings
 
 - Elden Ring is left-handed with Y up, like Unity: right = up × forward. Confirmed by the

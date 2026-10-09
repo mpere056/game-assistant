@@ -149,3 +149,94 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   similar angle). Two candidates within 1.5 points of each other still make it ask which one.
 - Live check: a Giant Dog 54 m away, 5.7 degrees off the crosshair -> found, confidence 0.85.
   30 offline tests pass (3 new).
+
+## 2026-10-09: Navi-style answers; guiding to far places
+- User: answers too long and full of meaningless extras ("high on your screen, so it's distant
+  rather than right in front of you"); the fairy flew to the enemy without being asked; "can you see
+  them?" got their weaknesses. They want less text, in the style of Navi. And "lead me to the
+  Forsaken Ruins" failed ("I only lead to things within my range... no position"): the fairy should
+  head up to 100 m in the direction to go.
+- Style: new instructions (spoken, one short sentence, answer only what was asked, round distances,
+  never describe screen positions, mention only the thing asked about) and a Navi persona (bright,
+  quick, "Look!"/"Hey!" now and then); five example exchanges fixed the remaining extras. The main
+  thing's screen position is no longer in the facts (kept only to tell several candidates apart).
+  Max answer 300 tokens. The fairy moves only when asked: the automatic "fly to what I describe" is gone.
+- Places: the bridge's open-world positions are global map coordinates (tile x 256 + position),
+  the same as the game's place tables: nearest grace from Caelid came out as Caelem Ruins at 88 m.
+  `games/eldenring/places.py` gives every Site of Grace and map landmark a world position (legacy
+  dungeons through WORLD_MAP_LEGACY_CONV_PARAM_ST; first try mapped Stormveil to area 34 and called it
+  "the other world": only conversion rows into areas 60/61 are used now). `adapter.locate(name)`
+  also accepts items (Moonveil -> Gael Tunnel). Forsaken Ruins 151 m west, Stormveil 1.9 km west.
+- Fairy guide mode: flies ahead toward the place, up to 100 m in front of the player (not held by
+  the 75 m leash), hovering 4 m above the ground under it (a downward ray every 20 frames), at least
+  18 px on screen; within 15 m it shows the spot and the app says "Here we are: <place>!".
+  Agent tool guide_to(place). Map data now loads in the background at start-up (1.9 s), so a first
+  "lead me to" doesn't wait for it (it took 3.5 s to the first word before).
+- Live with real Haiku calls in the user's game: "Can you see something in front of me?" -> "Yes! A
+  Large Putrid Corpse, about 46 metres ahead." (9 words, 0.7 s); "What about those things over
+  there?" -> "Two Rotten Putrid Corpses, about 42 and 50 metres to the right."; "What is it weak to?"
+  -> "Fire, mainly! It takes extra damage from everything, too."; "Lead me to the Forsaken Ruins." ->
+  "This way! About 150 metres west, slightly downhill." (fairy guiding). 31 offline tests pass.
+
+## 2026-10-09: the fairy's own voice (Kokoro, pitched up, sparkle, panned)
+- User: the Windows voice sounds like bland generic TTS; wants it more like Navi.
+- `voice/fairy_voice.py`: Kokoro neural voice (kokoro-onnx 0.6.1, int8 model 92 MB + voices 28 MB
+  from the kokoro-onnx v1.0 release, in .local/voice/, `Get-VoiceModel.bat`), on the CPU. Each
+  sentence is made at speed/pitch and played back pitch times faster: pitch up 1.25x (about 4
+  semitones) at normal speaking speed. A two-note sparkle (G6, C7) before each answer. Played through
+  sounddevice, so it is panned (gently, at most 60 %) to the fairy's screen position. Same interface as
+  the Windows speaker, which stays the fallback ('voice_engine': 'windows' or the model missing).
+- Measured: 54 voices (15 English female); a 4.5 s line takes about 2 s to make; streamed answer:
+  sparkle and first words 0.6 s after the text started, stop cuts off at once.
+- Samples for the user to choose from: runtime/voice_samples/ (af_bella, af_sky, af_heart, af_nicole
+  with the fairy effect, and af_bella plain). Default af_bella; settings: fairy_voice, voice_pitch,
+  voice_speed, voice_chime.
+
+## 2026-10-09: fairy voice tuned against a Navi reference
+- User liked the Kokoro samples ("way better") and sent a reference recording of Navi (1.6 s, three
+  short lines, read from their Downloads folder, not copied into the project) and asked for samples
+  with the actual effects.
+- Measured: Navi's pitch is about 558 Hz (lines 0.1-0.3 s long); the first samples were only about
+  250 Hz (pitch 1.25x on Kokoro voices that speak around 200 Hz). Brightness was already similar.
+- New method 'world' (default): the WORLD vocoder (pyworld 0.3.5) sets the pitch to 550 Hz and makes the
+  voice smaller (formants x1.3) separately, so it stays clear; 'speedup' (pitch and size together)
+  kept. Kokoro only speaks at 0.5-2.0x speed: the 2.4x speed-up sample failed until speed was clamped.
+- Samples (tests/voice_lab.py, runtime/voice_samples/v2): speed-up 1.6/2.0/2.4x (316/393/471 Hz);
+  WORLD bella at 545 Hz with voice size 1.15/1.3/1.45, heart 533 Hz, sky 516 Hz, nicole (breathy, the
+  pitch measure misreads it). Real voice code with WORLD: first sound 0.6 s, as before.
+- Settings: voice_method, voice_pitch_hz (550), voice_size (1.3), voice_speed (1.12), fairy_voice.
+
+## 2026-10-09: fairy voice: "blowing into the mic" noise removed; heart voice chosen
+- User's picks: B4 (af_heart, size 1.3), then B3 (af_bella, size 1.45). Both sometimes sounded "like
+  blowing into the mic": in B4 at the end of "giant", around "dog", after "ahead" and in "it's weak to
+  fire", not in "hey listen".
+- Cause, measured (tests/voice_noise_lab.py): the dio pitch tracker misjudged voiced sounds, and WORLD
+  filled them with noise; 4.5 % of B4's energy was rumble below 300 Hz (1.1 % in B3), where a 550 Hz
+  voice has nothing.
+- Fix in `fairy_voice.world_shift`: harvest pitch tracker (rumble 4.5 % -> 0.8 %), breath noise in
+  voiced frames x0.3, high-pass at 280 Hz (rumble -> 0 %), and a gate that keeps the result no louder
+  than the original voice at each moment (gaps between words 2 dB quieter: -31.7 -> -33.8 dB).
+  Processing 0.46 -> 1.22 s for a 4.5 s line; in the streamed voice the first sound still comes 0.6 s
+  after the answer starts. Default and the user's settings: af_heart, size 1.3, 550 Hz.
+- Before/after samples: runtime/voice_samples/v3 (v4_what_the_game_plays = exactly the game's voice).
+
+## 2026-10-09: fairy voice a little lower (550 -> 500 Hz)
+- User: the cleaned-up samples (v2-v4 for both voices) are "pretty good" but a little too high.
+- Samples with the game's own processing at 500, 470 and 440 Hz for af_heart 1.3 and af_bella 1.45
+  (runtime/voice_samples/v4; measured 500/462/429 and 490/462/429 Hz). Default and the user's setting
+  now 500 Hz, waiting for their pick.
+
+## 2026-10-09: fairy voice set to 440 Hz
+- User: bella_1.45_440Hz and heart_1.3_440Hz are both "pretty good", "way better" than before. Default
+  and the user's setting: af_heart, size 1.3, 440 Hz (bella 1.45 at 440 Hz is the alternative).
+
+## 2026-10-09: Navi-trained voices looked into; heart 440 Hz built in
+- User asked whether a TTS trained on Navi's voice exists. Found one fan-made RVC v2 voice converter
+  ("Navi [Legend of Zelda] (RVC V2) (650 Epochs)", voice-models.com), trained on about two seconds
+  of ripped lines and described by its uploader as unfinished; it would need PyTorch and two more
+  models (0.5-1 GB), a pickle file to load safely, and is a grey area (Nintendo audio, the voice
+  actor's performance). Not downloaded. Offered instead: real Navi exclamations from the user's own
+  recording before the answer. The user chose to keep heart_1.3_440Hz for now.
+- Checked the whole app starts with FairyVoice af_heart, 'world', 440 Hz, size 1.3 (the default and
+  the user's settings); a test line started playing 0.94 s after being sent (a whole sentence at
+  once; streamed answers start sooner), no errors. 31 offline tests pass.

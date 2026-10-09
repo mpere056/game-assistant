@@ -35,7 +35,6 @@ from .core.spend import SpendCapReached
 from .games import adapter_for
 
 ROOT = Path(__file__).resolve().parents[1]
-DEICTIC = re.compile(r'\b(that|this|it|those|these|there)\b', re.I)
 FPS = 60
 
 
@@ -61,8 +60,15 @@ class App:
             self.overlay.start()
         self.speaker = None
         if self.cfg['speak_answers']:
-            from .voice.tts import Speaker
-            self.speaker = Speaker(self.cfg['voice'], int(self.cfg['voice_rate']))
+            from .voice import fairy_voice
+            if self.cfg['voice_engine'] == 'fairy' and fairy_voice.available():
+                self.speaker = fairy_voice.FairyVoice(
+                    self.cfg['fairy_voice'], float(self.cfg['voice_pitch']), float(self.cfg['voice_speed']),
+                    bool(self.cfg['voice_chime']), method=self.cfg['voice_method'],
+                    pitch_hz=float(self.cfg['voice_pitch_hz']), size=float(self.cfg['voice_size']))
+            else:  # Windows' own voice: no download needed
+                from .voice.tts import Speaker
+                self.speaker = Speaker(self.cfg['voice'], int(self.cfg['voice_rate']))
         self.agent = Agent(self.adapter, companion=self.companion)
         self.cmd_ctx = commands.Context(self.adapter, self.companion,
                                         stop_speech=self.speaker.stop if self.speaker else (lambda: None))
@@ -86,6 +92,15 @@ class App:
             self.q.put(('voice_state', f'voice input unavailable: {e}'))
         if self.companion:
             threading.Thread(target=self._fairy_loop, name='fairy', daemon=True).start()
+        if hasattr(self.adapter, 'warm_up'):  # load game data now, not on the first question
+            threading.Thread(target=self._warm_up, name='warm up', daemon=True).start()
+
+    def _warm_up(self) -> None:
+        for _ in range(120):  # until a character is in the world (up to about 10 minutes)
+            self.adapter.warm_up()
+            if getattr(self.adapter, '_places', None) is not None:
+                return
+            time.sleep(5)
 
     # ---- window ----
 
@@ -163,7 +178,6 @@ class App:
                         self.speaker.say(reply)
                 self.q.put(('meta', '\n(instant, no cost)\n'))
             else:
-                self._point_if_deictic(question)
                 if self.speaker:
                     self.speaker.stop()
 
@@ -195,18 +209,6 @@ class App:
             f.write(json.dumps(record) + '\n')
         self.q.put(('done', ''))
 
-    def _point_if_deictic(self, question: str) -> None:
-        """'What is that?': the fairy flies to the thing at the crosshair while answering."""
-        if not self.companion or not DEICTIC.search(question):
-            return
-        try:
-            snap = self.adapter.snapshot()
-            res = lookat.resolve(snap, self.adapter.raycast)
-            if res.kind in ('entity', 'target') and res.best and res.confidence >= 0.6:
-                self.companion.show(entity_id=res.best.entity.id, seconds=6)
-        except (GameNotRunning, TimeoutError, RuntimeError):
-            pass
-
     # ---- the fairy (its own thread) ----
 
     def _fairy_loop(self) -> None:
@@ -223,8 +225,17 @@ class App:
             self.companion.speaking = bool(self.speaker and self.speaker.speaking)
             view = self.companion.update(snap, start - last)
             self.last_view = view
+            while self.companion.events:  # e.g. arrived somewhere it was guiding to
+                event = self.companion.events.pop(0)
+                if event.startswith('arrived:'):
+                    line = f"Here we are: {event.split(':', 1)[1]}!"
+                    self.q.put(('meta', '\n' + line + '\n'))
+                    if self.speaker:
+                        self.speaker.say(line)
             last = start
             in_front = snap.screen is not None and (snap.screen.focused or _own_window_in_front())
+            if view.visible and snap.screen and hasattr(self.speaker, 'pan'):  # the voice comes from the fairy
+                self.speaker.pan = ((view.screen_x - snap.screen.x) / max(1, snap.screen.width)) * 2 - 1
             if view.visible and in_front:
                 self.overlay.show(view.screen_x, view.screen_y, view.size_px, view.opacity, view.speaking)
             else:

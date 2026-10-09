@@ -48,6 +48,18 @@ class CompanionTests(unittest.TestCase):
         self.assertTrue(v.waiting)
         self.assertLessEqual(dist(v.pos, (0.0, 1.75, 0.0)), LEASH + 0.5)
 
+    def test_guide_flies_ahead_and_announces_arrival(self):
+        c = Companion()
+        run(c, snap(), 1)
+        c.guide((0.0, 0.0, 600.0), 'Far Ruins')
+        v = run(c, snap(), 12)
+        self.assertEqual(v.mode, 'guide')
+        self.assertFalse(v.waiting)
+        self.assertGreater(v.pos[2], 90)                      # well beyond the 75 m leash
+        self.assertLessEqual(v.pos[2], 100.5)                 # but never more than 100 m ahead
+        v = run(c, snap(player=(0.0, 0.0, 590.0)), 1)          # the player arrives
+        self.assertIn('arrived:Far Ruins', c.events)
+
     def test_hidden_in_menus(self):
         c = Companion()
         run(c, snap(), 1)

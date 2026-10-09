@@ -13,6 +13,16 @@
   keeps the bridge, including the assistant ray block). The live tests above ran before the move;
   after the move only the offline tests and a live read of the bridge (title screen) were run.
 
+**2026-10-09, latest: the fairy's voice.** Kokoro neural voice af_heart at 440 Hz, voice size 1.3,
+breath-noise fix, sparkle, panned to the fairy; picked by the user from samples. In the app it starts
+speaking about 0.6 s after an answer starts streaming. Not yet heard in game.
+
+**2026-10-09, later: Navi-style answers, no flying unless asked, guiding to far places.** Tested
+against the running game with real Haiku calls (not yet played by the user):
+"Can you see something in front of me?" -> "Yes! A Large Putrid Corpse, about 46 metres ahead.";
+"Lead me to the Forsaken Ruins." -> "This way! About 150 metres west, slightly downhill." (the fairy
+guides, up to 100 m ahead). 31 offline tests pass.
+
 **2026-10-09: first game test of the whole assistant went well** (questions, the fairy; leash raised
 to 75 m on request). Phases 2, 2b, 3 and part of 4 were built and tested without the game first. 27 offline tests
 pass; the demo scene and live API checks pass. Nothing new has run in Elden Ring yet.
