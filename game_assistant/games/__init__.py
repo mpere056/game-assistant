@@ -8,6 +8,7 @@ from ..core.interface import GameAdapter
 # name -> "module:class"
 ADAPTERS = {
     'eldenring': 'game_assistant.games.eldenring.adapter:EldenRingAdapter',
+    'demo': 'game_assistant.games.demo.adapter:DemoAdapter',  # a pretend scene for trying the assistant
 }
 
 

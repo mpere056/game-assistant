@@ -2,22 +2,26 @@
 
 Needs the bridge from https://github.com/mpere056/attack-on-elden-ring (a build with the assistant
 ray block), with Elden Ring started through its Play-EldenRing.bat (me3 loads aoer_host.dll, which
-creates the bridge). See docs/games/eldenring.md. Works whether or not AoTTG2 is linked: state, entities and rays are published whenever
-a character is in the world. Layout: host/include/bridge_protocol.h in that repository.
+creates the bridge). See docs/games/eldenring.md. Works whether or not AoTTG2 is linked: state,
+entities and rays are published whenever a character is in the world. Layout: host/include/bridge_protocol.h in that repository.
 """
 from __future__ import annotations
 
 import json
 import mmap
 import struct
+import threading
 import time
 from pathlib import Path
 
-from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_PLAYER, CAP_RAYCAST, Camera, Entity,
-                              GameNotRunning, Player, RayHit, Snapshot, Vec3, cross, normalize, sub)
+from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN, CAP_SEARCH, Camera, Entity,
+                              GameNotRunning, Player, RayHit, Screen, Snapshot, Vec3, cross, normalize, sub)
+from .memory import Memory
+from .knowledge import EldenRingKnowledge
+from .params import read_graces, read_npc_params
 
 ROOT = Path(__file__).resolve().parents[3]
-KNOWLEDGE_FILE = ROOT / '.local' / 'eldenring' / 'npcs.json'  # phase 2, extracted from game data
+NPC_DUMP = ROOT / '.local' / 'eldenring' / 'npc_params.json'   # what was read from memory, for checking
 
 SHM_NAME = 'Local\\AoER_bridge_v1'
 SHM_SIZE = 8 * 1024 * 1024
@@ -34,7 +38,8 @@ OFF_RAYS_ARR = OFF_RAYS + 0x20
 OFF_HITS_ARR = OFF_RAYS + 0x20 + MAX_RAYS * 24
 
 # ErmcGameState.flags
-CAMERA_VALID, PLAYER_VALID, PLAYER_DEAD, HOST_BUSY = 1 << 0, 1 << 1, 1 << 7, 1 << 8
+CAMERA_VALID, PLAYER_VALID, WINDOW_VALID, WINDOW_FOCUSED = 1 << 0, 1 << 1, 1 << 2, 1 << 5
+PLAYER_DEAD, HOST_BUSY = 1 << 7, 1 << 8
 # ErmcEntity.kind
 ENT_LARGE, ENT_SMALL, ENT_OTHER = 1, 2, 3
 
@@ -66,11 +71,23 @@ def _rotate(q: tuple[float, float, float, float], v: Vec3) -> Vec3:
 
 class EldenRingAdapter:
     game = 'Elden Ring'
-    capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE})
+    capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN})
+    # Wikis the assistant may search for attack patterns, strategies, lore and quests.
+    web_sources = ('eldenring.wiki.fextralife.com', 'eldenring.fandom.com')
+    # Words that help speech recognition hear game terms (Whisper's initial prompt).
+    vocabulary = ('Elden Ring. Tarnished, Site of Grace, Torrent, runes, Flask of Crimson Tears, katana, '
+                  'Moonveil, Rivers of Blood, Golden Seed, Sacred Tear, Smithing Stone, Ash of War, Spirit Ash, '
+                  'Margit, Godrick, Rennala, Radahn, Rykard, Morgott, Malenia, Mohg, Maliketh, Ranni, Melina, '
+                  'Limgrave, Liurnia, Caelid, Altus Plateau, Leyndell, Stormveil, Raya Lucaria, Volcano Manor, '
+                  'Haligtree, Farum Azula, Siofra, Ainsel, Nokron, Weeping Peninsula, Scadutree. '
+                  'What is that weak to? Where can I find it?')
 
     def __init__(self) -> None:
         self._m: mmap.mmap | None = None
-        self._knowledge: dict | None = None
+        self._npcs: dict[int, dict] | None = None
+        self.kb = EldenRingKnowledge()
+        self._ray_lock = threading.Lock()  # one ray request at a time (fairy loop and agent share it)
+        self._graces_tried = False
 
     # ---- connection ----
 
@@ -102,6 +119,8 @@ class EldenRingAdapter:
         player_pos = struct.unpack_from('<3f', s, 0x48)
         player_quat = struct.unpack_from('<4f', s, 0x54)
         stage = struct.unpack_from('<I', s, 0x7C)[0]
+        wx, wy, ww, wh = struct.unpack_from('<4i', s, 0x64)
+        screen = Screen(wx, wy, ww, wh, bool(flags & WINDOW_FOCUSED)) if flags & WINDOW_VALID and ww > 0 and wh > 0 else None
 
         in_world = bool(flags & PLAYER_VALID) and not flags & HOST_BUSY
         camera = None
@@ -118,7 +137,8 @@ class EldenRingAdapter:
             player = Player(player_pos, facing, state)
 
         return Snapshot(self.game, frame, in_world, player, camera, self._entities(m) if in_world else (),
-                        f'{stage:#x}' if stage else None)
+                        f'{stage:#x}' if stage else None, screen=screen,
+                        menu=bool(flags & HOST_BUSY) or None)  # loading is known; menus are not detected yet
 
     def _entities(self, m: mmap.mmap) -> tuple[Entity, ...]:
         blob = _seqlock_read(m, OFF_ENTITIES,
@@ -143,8 +163,9 @@ class EldenRingAdapter:
 
     def raycast(self, rays: list[tuple[Vec3, Vec3]], timeout: float = 2.0) -> list[RayHit]:
         out: list[RayHit] = []
-        for i in range(0, len(rays), MAX_RAYS):
-            out += self._cast_batch(rays[i:i + MAX_RAYS], timeout)
+        with self._ray_lock:
+            for i in range(0, len(rays), MAX_RAYS):
+                out += self._cast_batch(rays[i:i + MAX_RAYS], timeout)
         return out
 
     def _cast_batch(self, rays, timeout) -> list[RayHit]:
@@ -174,8 +195,69 @@ class EldenRingAdapter:
 
     # ---- knowledge ----
 
+    def _load_npcs(self) -> dict[int, dict]:
+        """NpcParam rows read live from the game's memory, once per session."""
+        if self._npcs is None:
+            self._npcs = read_npc_params(Memory(self._map()))
+            NPC_DUMP.parent.mkdir(parents=True, exist_ok=True)
+            NPC_DUMP.write_text(json.dumps({str(k): v for k, v in self._npcs.items()}), 'utf-8')
+        return self._npcs
+
     def knowledge(self, type_id: int) -> dict | None:
-        """Facts by NpcParam id from the extracted game data (phase 2). None until that exists."""
-        if self._knowledge is None:
-            self._knowledge = json.loads(KNOWLEDGE_FILE.read_text('utf-8')) if KNOWLEDGE_FILE.exists() else {}
-        return self._knowledge.get(str(type_id))
+        """Facts about a character type (NpcParam id): numbers from the game, name from the lists."""
+        row = self._load_npcs().get(type_id)
+        if row is None:
+            return None
+        return npc_facts(row, self.kb.npc_name(type_id))
+
+    def search(self, kind: str, query: str) -> dict:
+        if not self._graces_tried:  # map tiles -> nearby graces, for open-world item locations
+            self._graces_tried = True
+            try:
+                self.kb.set_graces(read_graces(Memory(self._map())))
+            except (GameNotRunning, RuntimeError):
+                pass
+        out = self.kb.search(kind, query)
+        if kind == 'enemy':
+            for r in out.get('results', []):
+                try:
+                    facts = self.knowledge(r['type_ids'][0]) if r.get('type_ids') else None
+                except (GameNotRunning, RuntimeError):
+                    facts = None
+                if facts:
+                    r['stats_of_first_variant'] = {k: v for k, v in facts.items() if k not in ('name', 'name_note')}
+        return out
+
+
+STATUS = [('poison', 'resist_poison'), ('scarlet rot', 'resist_scarlet_rot'), ('bleed', 'resist_bleed'),
+          ('frost', 'resist_frost'), ('sleep', 'resist_sleep'), ('madness', 'resist_madness'),
+          ('death blight', 'resist_death_blight')]
+DAMAGE = [('standard', 'taken_standard'), ('slash', 'taken_slash'), ('strike', 'taken_strike'),
+          ('pierce', 'taken_pierce'), ('magic', 'taken_magic'), ('fire', 'taken_fire'),
+          ('lightning', 'taken_lightning'), ('holy', 'taken_holy')]
+IMMUNE = 999  # Elden Ring's "never builds up" value
+
+
+def npc_facts(row: dict, name: str | None) -> dict:
+    """Plain facts from one NpcParam row. Damage numbers are the share of each damage type the
+    character takes (100 % = normal); status numbers are the buildup needed to trigger it.
+    These are the base values: area scaling and special effects can change them in play."""
+    taken = {k: round(row[f] * 100) for k, f in DAMAGE}
+    usual = sorted(taken.values())[len(taken) // 2]  # the median
+    status = {k: row[f] for k, f in STATUS}
+    facts = {
+        'name': name,
+        'base_hp': row['hp'],
+        'runes': row['runes'],
+        'damage_taken_percent': taken,
+        # A weakness is a damage type clearly above this enemy's own usual (some take extra from everything).
+        'weak_to': [k for k, v in taken.items() if v >= 110 and v >= usual + 15],
+        'resists': [k for k, v in taken.items() if v <= 80],
+        'takes_extra_from_everything': usual >= 110,
+        'status_buildup_needed': {k: v for k, v in status.items() if v < IMMUNE},
+        'immune_to': [k for k, v in status.items() if v >= IMMUNE],
+        'note': 'base values from the game data; area scaling and buffs can change them in play',
+    }
+    if not name:
+        facts['name_note'] = 'no name for this type in the names list (run Get-GameData.bat if it is missing); say you do not know its name'
+    return facts

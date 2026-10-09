@@ -1,2 +1,8 @@
 # Python 3.12. Install into the project-local environment with Setup.bat.
 anthropic==1.12.1
+# Voice: Windows voices (SAPI) for speech, microphone, local speech recognition.
+pywin32==312
+sounddevice==0.5.6
+faster-whisper==1.2.1
+# Only for the visual checks in tests/ (screenshots): not needed to play.
+pillow==12.3.0

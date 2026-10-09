@@ -30,13 +30,18 @@ class SpendCapReached(RuntimeError):
     pass
 
 
+WEB_SEARCH_USD = 0.01  # $10 per 1,000 searches
+
+
 def cost(model: str, usage) -> float:
-    """USD for one response's `usage` (an API usage object or a dict)."""
+    """USD for one response's `usage` (an API usage object or a dict), web searches included."""
     get = (lambda k: getattr(usage, k, None)) if not isinstance(usage, dict) else usage.get
     inp = (get('input_tokens') or 0) + (get('cache_read_input_tokens') or 0) + (get('cache_creation_input_tokens') or 0)
     out = get('output_tokens') or 0
+    stu = get('server_tool_use')
+    searches = (stu.get('web_search_requests') if isinstance(stu, dict) else getattr(stu, 'web_search_requests', 0)) or 0
     pin, pout = PRICES[model]
-    return (inp * pin + out * pout) / 1e6
+    return (inp * pin + out * pout) / 1e6 + searches * WEB_SEARCH_USD
 
 
 class SpendGuard:

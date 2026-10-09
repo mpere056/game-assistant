@@ -7,9 +7,9 @@ adapter per game, and the rest is shared.
 
 **Games:** Elden Ring (connected). Minecraft planned next. Others possible later.
 
-**Status:** phase 1 done. The Elden Ring adapter passes its live tests, the look-at resolver names
-what is at the crosshair from geometry alone, and Claude Haiku 5.5 answers in about half a second.
-Phase 2 (asking questions in a chat window) is next. See [docs/STATUS.md](docs/STATUS.md).
+**Status:** phase 1 done (the Elden Ring adapter passes its live tests). Built and tested without
+the game, waiting on a game test: questions (phase 2), voice (2b), the fairy companion (3) and route
+planning with "lead the way" (4). See [docs/STATUS.md](docs/STATUS.md).
 
 ## How it works
 
@@ -20,13 +20,21 @@ Phase 2 (asking questions in a chat window) is next. See [docs/STATUS.md](docs/S
 - **Facts come from the game's own data**, never from a model's memory. When a lookup finds
   nothing, it says so.
 - **A $3/hour spending cap** guards every hosted call.
-- **Voice** (push-to-talk, local speech recognition and speech) comes after text works.
+- **A fairy companion**: a small glowing fairy floating around your character, like Navi in Zelda.
+  It's what you talk to; it flies to what it's telling you about, goes where you send it and leads
+  the way. Drawing an enemy's aggro and tackling it come in phase 5.
+- **Voice**: hold F9 and speak; it answers aloud. Speech recognition and the voice both run on your
+  PC, free.
 
 Full plan: [docs/PLAN.md](docs/PLAN.md). Game adapter interface: [docs/ADAPTER.md](docs/ADAPTER.md).
 
 ## Setup
 
-1. Python 3.12. Run `Setup.bat`: it creates `.venv` and installs the Anthropic SDK.
+1. Python 3.12. Run `Setup.bat`: it creates `.venv`, installs the packages (Anthropic SDK, voice:
+   pywin32, sounddevice, faster-whisper) and gets the game data lists (`Get-GameData.bat`). The
+   speech model (about 145 MB) downloads on the first start of the assistant.
+4. Optional: settings (fairy colour and size, leash, voice, talk key, microphone) in
+   `.local/settings.json`, created on the first start.
 2. An Anthropic API key from the [Claude Console](https://platform.claude.com) (API Keys page),
    saved outside the project: `setx ANTHROPIC_API_KEY "sk-ant-..."`, then open a new window.
    Never put the key in a file in this project.
@@ -37,10 +45,13 @@ Full plan: [docs/PLAN.md](docs/PLAN.md). Game adapter interface: [docs/ADAPTER.m
 
 | Command | What it does |
 |---------|--------------|
+| `Assistant.bat` | The assistant: chat window, the fairy over the game, voice (hold F9). `Chat.bat` does the same |
+| `Assistant.bat demo` | A pretend scene over your desktop to try the fairy, voice and chat without a game |
+| `Get-GameData.bat` | Downloads the community name lists (enemy names, item locations, graces, shops) into `.local/` |
 | `Check-Adapter.bat` | Live adapter tests for a game (default Elden Ring); all PASS = connected |
 | `Check-Adapter.bat --look` | Live readout of what the look-at resolver sees |
 | `Measure-Haiku.bat` | Measures Claude Haiku 5.5's speed from your PC (about 20 tiny calls, under a cent) |
-| `Run-Tests.bat` | Offline tests of the shared core |
+| `Run-Tests.bat` | Offline tests (no game, no API key needed) |
 
 ## Rules
 

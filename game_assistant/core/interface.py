@@ -104,6 +104,16 @@ class RayHit:
 
 
 @dataclass(frozen=True)
+class Screen:
+    """Where the game's picture is on the desktop (client area, physical pixels)."""
+    x: int
+    y: int
+    width: int
+    height: int
+    focused: bool        # the game window has the keyboard focus
+
+
+@dataclass(frozen=True)
 class Snapshot:
     game: str
     frame: int           # increases while the game runs
@@ -113,6 +123,8 @@ class Snapshot:
     entities: tuple[Entity, ...]
     area: str | None     # zone or map id as text, if known
     target_id: int | None = None  # the game's own target (lock-on, interaction), if known
+    screen: Screen | None = None  # for overlays (the fairy); None if the game doesn't report it
+    menu: bool | None = None      # a menu or loading screen is up (None: the game can't tell)
 
 
 # Capability names an adapter may list. The core checks these before using a part.
@@ -122,6 +134,8 @@ CAP_ENTITIES = 'entities'
 CAP_RAYCAST = 'raycast'
 CAP_TARGET = 'target'          # the game's own lock-on / interaction target
 CAP_KNOWLEDGE = 'knowledge'    # names and facts by type id
+CAP_SCREEN = 'screen'          # Snapshot.screen is filled (overlays can be drawn)
+CAP_SEARCH = 'search'          # find enemies, items and places by name (search())
 CAP_ACTIONS = 'actions'        # phase 3
 CAP_PLACES = 'places'          # named places / fast travel (phase 3)
 
@@ -138,6 +152,10 @@ class GameAdapter(Protocol):
 
     def knowledge(self, type_id: int) -> dict | None:
         """Facts about an entity type from the game's own data (name, resistances...), or None."""
+
+    def search(self, kind: str, query: str) -> dict:
+        """Find an 'enemy', 'item' or 'place' by name: exact facts (where items are found, which
+        enemies match, where places are). Only for adapters listing CAP_SEARCH."""
 
 
 class GameNotRunning(RuntimeError):
