@@ -2,7 +2,9 @@
 
 ## Project
 Game Assistant: an AI assistant the user talks to while playing, which answers questions from the
-game's own data and later acts in the game. One shared core, one adapter per game. Elden Ring
+game's own data and later acts in the game. It appears as a fairy companion (like Navi in Zelda)
+floating around the player: an overlay drawn over the game, plus an in-world body per game for
+drawing aggro and attacking. One shared core, one adapter per game. Elden Ring
 first (through the Attack on Elden Ring bridge), Minecraft planned next.
 
 ## Hard rules, never break these
@@ -14,6 +16,8 @@ first (through the Attack on Elden Ring bridge), Minecraft planned next.
 4. **Do not touch anything outside this project folder** unless the user explicitly names the path.
    Game installs are read-only. Each game's bridge lives in its own repository.
 5. **Offline single-player only.** Never play online, never circumvent, patch or probe anti-cheat.
+   The assistant never writes game memory itself; game effects (the fairy's in-world body, damage,
+   aggro) are requests carried out by the game's bridge, only when the player asked for them.
 6. **Never put credentials in the repo.** The API key lives in the user's environment
    (`ANTHROPIC_API_KEY`), never in a file here.
 7. **Every hosted model call goes through the spending guard** (`game_assistant/core/spend.py`,

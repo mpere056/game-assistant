@@ -15,8 +15,10 @@ skills, navigation) only talks to that interface, so it runs unchanged on every 
 | Target | the game's own lock-on or interaction target | not read yet | phase 2 |
 | Raycast | segments through the game's collision: hit point and surface normal | `CSPhysWorld::CastRay` through the assistant's own ray block (`AOER_OFF_ASSIST_RAYS`) | yes |
 | Knowledge | facts by type id: name, resistances, drops; item names | game data extracted to `.local/eldenring/` | phase 2 |
-| Places | named places, fast-travel points, current area | area id now; graces (BonfireWarpParam) later | phase 3 |
-| Actions | named game actions mapped to the game's input; fast travel | synthetic keyboard input; AoTTG2's input path while linked | phase 3 |
+| Places | named places, fast-travel points, current area | area id now; grace tiles and positions read (BonfireWarpParam) | phase 4 |
+| Actions | named game actions mapped to the game's input; fast travel | synthetic keyboard input; AoTTG2's input path while linked | phase 4 |
+| Screen | the game window's position and size on the desktop, and whether a menu or loading screen is up (the fairy overlay hides then) | state block: `winX/Y/W/H`; menus not detected yet | phase 3 |
+| Companion body | the fairy's in-world character: spawn and remove, place at a position each frame, ignored by or visible to enemies, strike an entity (damage plus hit reaction), draw an entity's attention | Attack on Elden Ring bridge (to build: spawn, NoDead, hide and pin like the stand-in; the damage queue; the "attract attention" throw) | phase 5 |
 | Capabilities | which parts this game has | listed in the adapter | yes |
 
 Later, for games without a single character to steer, two optional parts are added when the first
@@ -32,8 +34,9 @@ turns** (turn-based games).
   means look-at uses geometry only).
 - Names and facts come only from the game's own data through `knowledge()`, never from a model's
   memory.
-- An adapter only reads state, casts rays and (from phase 3) sends input. It never changes game
-  memory on the assistant's behalf.
+- An adapter only reads state, casts rays and sends input. Game effects that need the game itself
+  (the fairy's body, its damage and aggro) are requests to the game's bridge, which carries them out;
+  the assistant never writes game memory. Offline single-player only.
 
 ## Adapter tests (the gate before the assistant may use a game)
 

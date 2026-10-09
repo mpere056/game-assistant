@@ -113,14 +113,23 @@ def resolve(snap: Snapshot, raycast: Raycast | None = None) -> LookResult:
     cands = sorted((c for c in (_candidate(cam, e) for e in living) if c), key=lambda c: (c.off_deg, c.distance))
     hidden: list[Candidate] = []
     if cands and raycast is not None:
+        # Two rays per candidate, to the middle of the body and to the upper chest, each stopping
+        # short of the body: an enemy behind a low ridge or rock still counts as visible.
         rays = []
         for c in cands:
-            # Stop short of the body so the ray tests only what is between.
-            to = sub(c.entity.center, cam.pos)
-            stop = max(0.0, c.distance - max(c.entity.radius, 0.3))
-            rays.append((cam.pos, add(cam.pos, scale(normalize(to), stop))))
-        for c, h in zip(cands, raycast(rays)):
-            c.visible = not (h.hit and h.distance is not None and h.distance < c.distance - max(c.entity.radius, 0.3) - VISIBILITY_MARGIN)
+            e = c.entity
+            for p in (e.center, add(e.center, (0.0, e.height * 0.3, 0.0))):
+                to = sub(p, cam.pos)
+                stop = max(0.0, length(to) - max(e.radius, 0.3))
+                rays.append((cam.pos, add(cam.pos, scale(normalize(to), stop))))
+        hits = raycast(rays)
+        for i, c in enumerate(cands):
+            clear = 0
+            for h in hits[2 * i:2 * i + 2]:
+                seg = length(sub(h.end, h.start))
+                if not (h.hit and h.distance is not None and h.distance < seg - VISIBILITY_MARGIN):
+                    clear += 1
+            c.visible = clear > 0
         hidden = [c for c in cands if c.visible is False]
         cands = [c for c in cands if c.visible is not False]
 
