@@ -109,5 +109,22 @@ class SpendTests(unittest.TestCase):
             self.assertEqual(SpendGuard(cap=1.0, ledger=p).last_hour(), 0)
 
 
+
+class ForgivingAimTests(unittest.TestCase):
+    def test_enemy_a_bit_off_centre_still_counts(self):
+        # 10 m ahead, 3 m to the side: about 13 degrees off the crosshair from its edge
+        r = lookat.resolve(snap(ent(1, 3.0, 10)), no_walls)
+        self.assertEqual(r.kind, 'entity')
+        self.assertTrue(0.35 <= r.confidence < 0.9)
+
+    def test_enemy_beats_friendly_at_similar_angle(self):
+        r = lookat.resolve(snap(ent(1, 1.2, 10, hostile=False), ent(2, -1.6, 10)), no_walls)
+        self.assertEqual(r.best.entity.id, 2)
+
+    def test_far_off_to_the_side_is_not_what_you_look_at(self):
+        r = lookat.resolve(snap(ent(1, 10.0, 6)), no_walls)
+        self.assertNotEqual(r.kind, 'entity')
+
+
 if __name__ == '__main__':
     unittest.main()
