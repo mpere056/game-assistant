@@ -20,8 +20,12 @@ from .interface import Camera, Entity, RayHit, Snapshot, Vec3, add, dot, length,
 
 # Tuning (starting values; measure with the adapter tests and adjust).
 MAX_ENTITY_DISTANCE = 80.0   # metres; Elden Ring's bridge publishes characters within 80 m
-CONE_DEG = 6.0               # how far outside a body the crosshair may be and still count
-TIE_DEG = 1.0                # two candidates closer than this to the crosshair are ambiguous
+CONE_DEG = 20.0              # how far outside a body the crosshair may be and still count (2026-10-09:
+                             # 6 degrees was too strict; players don't aim exactly when asking)
+SURE_DEG = 4.0               # within this of a body: as sure as if the crosshair were on it
+TIE_DEG = 1.5                # two candidates scoring closer than this are ambiguous
+HOSTILE_BONUS_DEG = 3.0      # an enemy wins over a friendly character this far off
+DISTANCE_DEG_PER_M = 0.06    # a closer candidate wins small differences (1 degree per ~17 m)
 SURFACE_RAY = 300.0          # metres, the ray straight ahead when no entity is aimed at
 VISIBILITY_MARGIN = 0.5      # metres; a wall hit this close to the body does not hide it
 
@@ -83,6 +87,11 @@ def _candidate(cam: Camera, e: Entity) -> Candidate | None:
     return Candidate(e, d, off, (x, y))
 
 
+def _score(c: Candidate) -> float:
+    """Lower is a better match: degrees off the crosshair, adjusted for kind and distance."""
+    return c.off_deg + c.distance * DISTANCE_DEG_PER_M - (HOSTILE_BONUS_DEG if c.entity.hostile else 0.0)
+
+
 def surface_kind(normal: Vec3 | None) -> str | None:
     if normal is None:
         return None
@@ -110,7 +119,7 @@ def resolve(snap: Snapshot, raycast: Raycast | None = None) -> LookResult:
                 c.visible = True
                 return LookResult('target', 1.0, best=c)
 
-    cands = sorted((c for c in (_candidate(cam, e) for e in living) if c), key=lambda c: (c.off_deg, c.distance))
+    cands = sorted((c for c in (_candidate(cam, e) for e in living) if c), key=_score)
     hidden: list[Candidate] = []
     if cands and raycast is not None:
         # Two rays per candidate, to the middle of the body and to the upper chest, each stopping
@@ -135,11 +144,11 @@ def resolve(snap: Snapshot, raycast: Raycast | None = None) -> LookResult:
 
     if cands:
         best, others = cands[0], cands[1:3]
-        if best.off_deg == 0.0:
+        if best.off_deg <= SURE_DEG:
             confidence = 0.9
         else:
-            confidence = max(0.3, 0.9 - 0.6 * best.off_deg / CONE_DEG)
-        if others and others[0].off_deg - best.off_deg < TIE_DEG and abs(others[0].distance - best.distance) < 3.0:
+            confidence = max(0.35, 0.9 - 0.5 * (best.off_deg - SURE_DEG) / (CONE_DEG - SURE_DEG))
+        if others and _score(others[0]) - _score(best) < TIE_DEG and abs(others[0].distance - best.distance) < 3.0:
             confidence = min(confidence, 0.5)  # two things right at the crosshair: ask which one
         return LookResult('entity', round(confidence, 2), best=best, others=others, hidden=hidden[:3])
 

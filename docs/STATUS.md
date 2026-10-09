@@ -20,7 +20,7 @@ pass; the demo scene and live API checks pass. Nothing new has run in Elden Ring
 - Phase 2, questions: Haiku agent with look_at, nearby_characters, character_info,
   search_game_data and wiki web search; enemy stats and grace tiles read from the game's memory
   through its param repository; names and item locations from the Paramdex lists.
-- Phase 2b, voice: hold F9, faster-whisper base.en on the CPU with an Elden Ring vocabulary hint
+- Phase 2b, voice: used for a whole game test on 2026-10-09 ("working great"). Hold F9, faster-whisper base.en on the CPU with an Elden Ring vocabulary hint
   (exact on a test sentence, 0.9 s); answers spoken by Windows' Zira sentence by sentence.
 - Phase 3, the fairy: overlay window (glow and wings, 0.1 ms per frame in the demo), companion
   controller (follow off the crosshair, show, go, leash 75 m, hidden when the game is not in front or

@@ -139,3 +139,13 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   25 m leash. They want at least 75 m.
 - Leash raised to 75 m (default, the user's .local/settings.json, docs). The fairy grows small far
   away (10 px minimum) and the look-at and entity lists reach 80 m, so 75 m stays usable.
+
+## 2026-10-09: look-at forgives loose aiming; voice confirmed in game
+- User: the whole previous game test was done by voice (push-to-talk), "working great". But "what
+  is that?" sometimes missed an enemy unless it was right at the centre of the screen.
+- Look-at: an entity now counts up to 20 degrees outside its body (was 6); within 4 degrees it is as
+  sure as dead centre, then confidence falls to 0.35 at 20. Ranking: degrees off, plus 1 degree per
+  ~17 m of distance, minus 3 degrees for enemies (so an enemy wins over a friendly character at a
+  similar angle). Two candidates within 1.5 points of each other still make it ask which one.
+- Live check: a Giant Dog 54 m away, 5.7 degrees off the crosshair -> found, confidence 0.85.
+  30 offline tests pass (3 new).
