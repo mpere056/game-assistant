@@ -262,9 +262,7 @@ class App:
                 if event.startswith('action:'):  # a ladder, lift, jump or drop just ahead on the route
                     line = ACTION_LINES.get(event.split(':', 1)[1])
                     if line:
-                        self.q.put(('meta', '
-' + line + '
-'))
+                        self.q.put(('meta', '\n' + line + '\n'))
                         if self.bubble:
                             self.bubble.bubble_say(line)
                         if self.speaker:
