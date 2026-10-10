@@ -15,6 +15,7 @@ locate) needs it and keeps the last few hundred in memory.
 """
 from __future__ import annotations
 
+import collections
 import json
 import math
 import threading
@@ -49,7 +50,13 @@ DROP_OUT = (0.8, 1.6, 2.5)   # metres beyond the edge where the landing is looke
 STEP_UP = 1.0
 STEP_ACROSS = 3.5      # boundary edges at most this far apart (middle to middle) ...
 STEP_FACING = 0.5      # ... and facing each other (cosine), at most STEP_UP apart in height
-WALK, ENTRANCE, DROP, STEP = 0, 1, 2, 3  # link kinds
+WALK, ENTRANCE, DROP, STEP, LADDER, LIFT, JUMP, DOOR = 0, 1, 2, 3, 4, 5, 6, 7  # link kinds
+# The game's own special edges (Havok user edges in the navmesh files), by their type number. Measured
+# over all 670: type 8 = ladders (410: ends 2.2 m apart, 3-61 m apart in height, cost = height),
+# type 0 = lifts (198: ends straight above each other, 22-150 m), type 4 = jumps (31: ~2 m, one way),
+# type 1 = doors (11: 3.3 m, level, door-sized). Type 2 (21: 1-14 m across, +-13 m) is not understood
+# yet and left out.
+USER_KINDS = {8: LADDER, 0: LIFT, 4: JUMP, 1: DOOR}
 
 
 # ---- building (once, after extraction) ----
@@ -122,12 +129,20 @@ def build(conversions: list[dict] | None = None, progress=print) -> dict:
             links.setdefault(bj, []).append((fj, bi, fi, a2, b2, STEP))
             n_steps += 1
     progress(f'  {n_steps} steps (gaps up to {STEP_ACROSS} m at the same level, both ways)')
+    n_user = collections.Counter()
+    for e in index:
+        for lk in _user_links(wn.block(e['name']), num[e['name']]):
+            links.setdefault(num[e['name']], []).append(lk)
+            n_user[lk[5]] += 1
+    progress(f'  game special edges: {n_user[LADDER]} ladder, {n_user[LIFT]} lift, {n_user[JUMP]} jump, '
+             f'{n_user[DOOR]} door links')
     # Pass 3: one ready-to-search file per block.
     for e in index:
         b = wn.block(e['name'])
         _save_block(b, num[e['name']], links.get(num[e['name']], []))
     INDEX.write_text(json.dumps({'blocks': index}), encoding='utf-8')
-    return {'blocks': len(index), 'entrance_links': n_gaps, 'drops': n_drops, 'steps': n_steps}
+    return {'blocks': len(index), 'entrance_links': n_gaps, 'drops': n_drops, 'steps': n_steps,
+            'ladders': n_user[LADDER], 'lifts': n_user[LIFT], 'jumps': n_user[JUMP], 'doors': n_user[DOOR]}
 
 
 def _join_all(cand: list[tuple]) -> dict[int, list[tuple]]:
@@ -343,6 +358,50 @@ def _step_links(wn: WorldNavmesh, index: list[dict], num: dict, e: dict) -> list
         for k in j[ok].tolist():
             links.append((int(W[i]), int(F[i]), int(W[k]), int(F[k]), int(A[i]), int(B[i]), int(A[k]), int(B[k])))
     return links
+
+
+def _user_links(b: Block, bid: int) -> list[tuple]:
+    """Links for the game's special edges: the face under each end (box foot), joined in the edge's
+    direction (3 both ways, 1 A to B, 2 B to A). The portal is the from-face's edge nearest its end."""
+    from ...core.navmesh import locate_in
+    if not len(b.user):
+        return []
+    n = b.n_faces
+    counts = np.diff(b.face_start)
+    owner = np.repeat(np.arange(n), counts)
+    pts = b.v[b.face_vidx]
+    lo = np.full((n, 3), np.inf)
+    hi = np.full((n, 3), -np.inf)
+    np.minimum.at(lo, owner, pts)
+    np.maximum.at(hi, owner, pts)
+
+    def poly(f):
+        return b.v[b.face_vidx[b.face_start[f]:b.face_start[f + 1]]]
+
+    def face_at(end, half):
+        r = locate_in(lo, hi, poly, (end[0], end[1] - half[1], end[2]), 3.0, 3.0, 4.0)
+        return r[0] if r else None
+
+    def portal(f, end):
+        idx = b.face_vidx[b.face_start[f]:b.face_start[f + 1]]
+        k = len(idx)
+        best = min(range(k), key=lambda i: float(np.linalg.norm((b.v[idx[i]] + b.v[idx[(i + 1) % k]]) / 2 - end)))
+        return int(idx[best]), int(idx[(best + 1) % k])
+    out = []
+    for u in b.user:
+        kind = USER_KINDS.get(int(u[1]))
+        if kind is None:
+            continue
+        a_end, b_end = u[7:10], u[10:13]
+        fa, fb = face_at(a_end, u[13:16]), face_at(b_end, u[16:19])
+        if fa is None or fb is None or fa == fb:
+            continue
+        direction = int(u[5])
+        if direction in (1, 3):
+            out.append((fa, bid, fb, *portal(fa, a_end), kind))
+        if direction in (2, 3):
+            out.append((fb, bid, fa, *portal(fb, b_end), kind))
+    return out
 
 
 def _save_block(b: Block, bid: int, links: list[tuple]) -> None:

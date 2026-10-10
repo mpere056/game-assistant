@@ -67,6 +67,12 @@ class Block:
             self.bnd_join = (np.abs(mid[:, 0]) > BORDER) | (np.abs(mid[:, 2]) > BORDER)
         else:
             self.bnd_join = np.ones(len(la), bool)  # a dungeon may join the world anywhere
+        # The game's own special edges (ladders, lifts, jumps, doors), ends moved to world coordinates.
+        u = z['user'] if 'user' in z.files and z['user'].ndim == 2 and z['user'].shape[1] == 19 else np.zeros((0, 19))
+        self.user = u.astype(np.float64)
+        if len(self.user):
+            self.user[:, 7:10] += offset
+            self.user[:, 10:13] += offset
         self.lo = self.v.min(axis=0) if len(v) else np.zeros(3)
         self.hi = self.v.max(axis=0) if len(v) else np.zeros(3)
         self.n_faces = len(F)

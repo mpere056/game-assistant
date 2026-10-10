@@ -537,3 +537,22 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   Stormveil Castle reached (995 m, through an entrance link), 7.8 s; Agheel Lake North 265 m;
   Fort Haight West and Lake-Facing Cliffs ~1 km: best part after 3 s (~200 m short, continued while
   moving).
+
+## 2026-10-10: ladders, lifts, jumps and doors from the game's own special edges
+- User: add jumps, ladders and lifts.
+- The navmesh files hold 670 Havok user edges (75 blocks; Stormveil 50): two boxes (ends), a type
+  number, costs, direction. The converter now keeps them all (19 values; a first try said 20 and one
+  block with exactly 20 edges reshaped "fine" into nonsense: re-converted). By type, over all of them:
+  8 = ladders (410: ends 2.2 m apart, 3-61 m in height, cost = height, both ways), 0 = lifts (198:
+  straight above each other, 22-150 m), 4 = jumps (31: ~2 m, one way), 1 = doors (11: 3.3 m, level),
+  2 = unknown (21: 1-14 m across, +-13 m; left out). Ends sit ~1 m above the mesh under their box
+  (median 0.4-1.4 m from the box foot; 46 of 1,276 ends found no face).
+- Graph links: 736 ladder, 336 lift, 30 jump, 20 door (directions as the game marks them); extra
+  search cost ladder +5, lift +20, jump +3, door +1 m; no ray checks (the game authored them).
+- Routes report ladders, lifts, jumps and drops; the companion raises action:<what> once within 8 m and
+  Navi says "Climb the ladder!", "Take the lift!", "Jump across here!", "Drop down here!".
+  A test caught that the companion wouldn't plan at all without raycasting even with the navmesh
+  planner: fixed.
+- Checked offline (bottom to top of real ones): Stormveil ladder 14.6 m: 15 m route via the ladder
+  (250 m walk without it); Stormveil lift 116 m: reached via the lift (unreachable without);
+  m15 ladder 21 m and m13 lift 82 m: reached only with them. 51 tests pass.

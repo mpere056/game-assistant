@@ -170,7 +170,9 @@ answers never wait), with a 3 s budget: a long trip sets off on the best part so
 rest while moving. Drops, steps and entrances on a route are checked with live rays first; blocked
 ones are banned and the route re-planned. Next: learn links from where the player actually walks.
 
-Not yet: jumps, ladders, lifts and doors (Havok "user edges" are in the files, not used yet); what
+Ladders, lifts, jumps and doors (the game's own special edges, built 2026-10-10) are part of the graph;
+Navi says "Climb the ladder!" or "Take the lift!" as you reach them. Not yet: one unknown kind of special
+edge (21 of them); what
 two face markings mean (one marks evergaol arenas); underground areas without a world conversion;
 faster mesh building for long routes; the DLC (not installed).
 

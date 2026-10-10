@@ -60,6 +60,26 @@ class CompanionTests(unittest.TestCase):
         v = run(c, snap(player=(0.0, 0.0, 590.0)), 1)          # the player arrives
         self.assertIn('arrived:Far Ruins', c.events)
 
+    def test_navmesh_route_announces_a_ladder_once_when_near(self):
+        from game_assistant.core.nav import Route
+        c = Companion()
+        c.plan_async = False
+
+        def route_fn(start, goal):
+            r = Route([start, (0.0, 0.0, 50.0), (0.0, 12.0, 52.0), goal], True, 0)
+            r.actions = [('ladder', (0.0, 0.0, 50.0))]
+            return r
+        c.route_fn = route_fn
+        run(c, snap(), 1)
+        c.guide((0.0, 12.0, 200.0), 'Tower Top')
+        run(c, snap(), 3)
+        self.assertEqual(c.route_source, 'navmesh')
+        self.assertNotIn('action:ladder', c.events)
+        run(c, snap(player=(0.0, 0.0, 45.0)), 1)               # 5 m from the ladder
+        self.assertEqual(c.events.count('action:ladder'), 1)
+        run(c, snap(player=(0.0, 0.0, 46.0)), 2)
+        self.assertEqual(c.events.count('action:ladder'), 1)   # said once
+
     def test_standing_above_the_place_is_not_arriving(self):
         c = Companion()
         run(c, snap(), 1)
