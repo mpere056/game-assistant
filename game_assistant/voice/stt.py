@@ -28,8 +28,10 @@ def key_code(name: str) -> int:
 
 class PushToTalk:
     def __init__(self, on_text: Callable[[str], None], key: str = 'F9', model: str = 'base.en', microphone: str = '',
-                 on_state: Callable[[str], None] = lambda s: None, vocabulary: str = ''):
+                 on_state: Callable[[str], None] = lambda s: None, vocabulary: str = '',
+                 on_press: Callable[[], None] = lambda: None):
         self.on_text = on_text
+        self.on_press = on_press      # called on its own thread when the key goes down (screen grab)
         self.on_state = on_state      # 'loading', 'ready', 'listening', 'thinking', or an error text
         self.vk = key_code(key)
         self.model_name = model
@@ -79,6 +81,7 @@ class PushToTalk:
                 time.sleep(0.02)
                 continue
             self.on_state('listening')
+            threading.Thread(target=self.on_press, name='on talk key', daemon=True).start()  # never delays the mic
             chunks = []
             try:
                 with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32', device=self._device(),

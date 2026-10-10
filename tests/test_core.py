@@ -128,3 +128,52 @@ class ForgivingAimTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EarlyScreenTest(unittest.TestCase):
+    """The picture taken when the talk key goes down is used once, if fresh; otherwise a new grab."""
+
+    def _agent(self):
+        from game_assistant.core import agent as agent_mod
+        a = agent_mod.Agent.__new__(agent_mod.Agent)  # no API client needed for this
+        a.grabs = 0
+
+        def grab():
+            a.grabs += 1
+            return [{'type': 'text', 'text': f'grab {a.grabs}'}]
+        a.grab_screen = grab
+        return a, agent_mod
+
+    def test_early_picture_used_once(self):
+        a, _ = self._agent()
+        a.capture_screen()
+        self.assertEqual(a.tool_look_at_screen({}), [{'type': 'text', 'text': 'grab 1'}])
+        self.assertEqual(a.tool_look_at_screen({}), [{'type': 'text', 'text': 'grab 2'}])
+
+    def test_stale_or_failed_picture_is_replaced(self):
+        a, mod = self._agent()
+        a._early_screen = (time.monotonic() - mod.EARLY_SCREEN_MAX_AGE - 1, [{'type': 'text', 'text': 'old'}])
+        self.assertEqual(a.tool_look_at_screen({}), [{'type': 'text', 'text': 'grab 1'}])
+        a._early_screen = (time.monotonic(), {'error': 'not focused'})
+        self.assertEqual(a.tool_look_at_screen({}), [{'type': 'text', 'text': 'grab 2'}])
+
+
+class BubbleTest(unittest.TestCase):
+    def test_render_and_tip(self):
+        from game_assistant.ui import bubble
+        w, h, data, tip = bubble.render("That's a Spiritspring! Jump in on Torrent.", 24, 400, 'bl')
+        self.assertEqual(len(data), w * h * 4)
+        self.assertLess(tip[0], w / 2)            # bottom-left tail
+        self.assertGreater(tip[1], h * 0.8)
+        w2, h2, _, tip2 = bubble.render('word ' * 200, 24, 400, 'tr')
+        self.assertLess(h2, 24 * 1.3 * (bubble.MAX_LINES + 3))  # long answers keep their last lines
+        self.assertGreater(tip2[0], w2 / 2)
+        self.assertLess(tip2[1], h2 * 0.2)
+
+    def test_stays_inside_the_game_window(self):
+        from game_assistant.ui import bubble
+        bounds = (100, 100, 800, 600)
+        self.assertEqual(bubble.choose_tail((300, 80), (400, 400), bounds), 'bl')
+        self.assertEqual(bubble.choose_tail((300, 80), (880, 120), bounds), 'tr')
+        x, y = bubble.position((300, 80), (20, 78), (890, 110), bounds)
+        self.assertTrue(100 <= x and x + 300 <= 900 and 100 <= y and y + 80 <= 700)

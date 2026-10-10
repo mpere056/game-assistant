@@ -14,6 +14,8 @@ DEFAULTS = {
     'fairy': True,                    # show the fairy companion over the game
     'fairy_color': [120, 214, 255],   # R, G, B of its glow
     'fairy_scale': 1.0,               # its size on screen (1 = normal)
+    'speech_bubble': True,            # show Navi's words in a bubble next to it, in the game
+    'bubble_scale': 1.0,              # the bubble's text size and width (1 = normal)
     'leash_m': 75.0,                  # never further than this from your character
     'speak_answers': True,            # read answers aloud
     'voice_engine': 'fairy',          # 'fairy' (Kokoro neural voice, Get-VoiceModel.bat) or 'windows'
