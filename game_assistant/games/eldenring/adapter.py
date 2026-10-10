@@ -8,6 +8,7 @@ entities and rays are published whenever a character is in the world. Layout: ho
 from __future__ import annotations
 
 import json
+import math
 import mmap
 import struct
 import threading
@@ -21,7 +22,6 @@ from .memory import Memory
 from .knowledge import EldenRingKnowledge
 from .params import read_graces, read_legacy_conversions, read_map_points, read_npc_params
 from .places import TILE, PlaceIndex, compass, place_words
-from .navmesh import WorldNavmesh
 from .wiki import Wiki
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -95,11 +95,11 @@ class EldenRingAdapter:
         self._graces_tried = False
         self._places: PlaceIndex | None = None
         self.wiki = Wiki()
-        self._navmesh: WorldNavmesh | None = None
-        self._mesh_cache: tuple | None = None   # (area, block names, NavMesh) of the last route
+        self._router = None  # the route planner's own process (core/route_worker.py), started when needed
+        self._banned_links: set = set()  # drops/entrances a live ray found blocked (this session)
         self._route_lock = threading.Lock()
-        if any((Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'navmesh').glob('m*.npz')):
-            self.capabilities = self.capabilities | {CAP_NAVMESH}  # Get-GameData extracted the navmeshes
+        if (Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'navgraph' / 'index.json').exists():
+            self.capabilities = self.capabilities | {CAP_NAVMESH}  # Get-GameData built the walkable world
 
     # ---- connection ----
 
@@ -238,54 +238,75 @@ class EldenRingAdapter:
     def _place_index(self) -> PlaceIndex:
         if self._places is None:
             mem = Memory(self._map())
-            self._places = PlaceIndex(read_graces(mem), read_map_points(mem), read_legacy_conversions(mem),
+            conv = read_legacy_conversions(mem)
+            self._places = PlaceIndex(read_graces(mem), read_map_points(mem), conv,
                                       self.kb.lists['BonfireWarpParam'], self.kb.lists['WorldMapPointParam'])
+            try:  # kept for building the walkable world graph without the game (navgraph.py)
+                from .navgraph import save_conversions
+                save_conversions(conv)
+            except OSError:
+                pass
         return self._places
 
     # ---- routes over the game's own navmesh ----
 
-    def route(self, start: Vec3, goal: Vec3):
-        """A walkable route from start to goal (snapshot coordinates) over the game's navmesh, or None.
-        Tries the tiles around both ends first (300 m margin), then a wider area (900 m) for routes that
-        go around something big. The mesh of the last route is kept: re-planning nearby is quick."""
+    def route(self, start: Vec3, goal: Vec3, budget_s: float = 3.0):
+        """A walkable route from start toward goal (snapshot coordinates) over the game's own navmesh,
+        searched in the planner's own process (navgraph.WorldGraph, loaded block by block), or None.
+        The result has waypoints, reaches_goal, length_m and timed_out: when the time budget runs out
+        it is the best part of the way so far, and the caller plans on from its end while moving."""
         from ...core.nav import Route
-        with self._route_lock:
-            snap = self.snapshot()
-            if not snap.player or not snap.area:
-                return None
-            idx = self._place_index()
-            pos = snap.player.pos
-            me = idx.player_world(int(snap.area, 16), pos)
-            if me is None:
-                return None
-            area = me[0]
-            off = (me[1] - pos[0], me[2] - pos[1], me[3] - pos[2])
-            s = (start[0] + off[0], start[1] + off[1], start[2] + off[2])
-            g = (goal[0] + off[0], goal[1] + off[1], goal[2] + off[2])
-            if self._navmesh is None:
-                self._navmesh = WorldNavmesh(idx.conv)
-            for margin in (300.0, 900.0):
-                lo = (min(s[0], g[0]) - margin, min(s[2], g[2]) - margin)
-                hi = (max(s[0], g[0]) + margin, max(s[2], g[2]) + margin)
-                names = self._navmesh.blocks_in(area, lo, hi)
-                if not names:
-                    return None
-                c = self._mesh_cache
-                if c and c[0] == area and set(names) <= c[1]:
-                    mesh = c[2]
-                else:
-                    built = self._navmesh.mesh(area, lo, hi)
-                    if built is None:
-                        return None
-                    mesh = built[0]
-                    self._mesh_cache = (area, set(built[1]), mesh)
-                r = mesh.route(s, g)
-                if r is not None and (r.reaches_goal or margin == 900.0):
-                    pts = [(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints]
-                    route = Route(pts, r.reaches_goal, 0)
-                    route.length_m = r.length
-                    return route
+        from ...core.route_worker import RouteWorker
+        snap = self.snapshot()
+        if not snap.player or not snap.area:
             return None
+        idx = self._place_index()
+        pos = snap.player.pos
+        me = idx.player_world(int(snap.area, 16), pos)
+        if me is None:
+            return None
+        off = (me[1] - pos[0], me[2] - pos[1], me[3] - pos[2])
+        s = (start[0] + off[0], start[1] + off[1], start[2] + off[2])
+        g = (goal[0] + off[0], goal[1] + off[1], goal[2] + off[2])
+        with self._route_lock:
+            if self._router is None or not self._router.alive:
+                self._router = RouteWorker('game_assistant.games.eldenring.navgraph:WorldGraph')
+            for _ in range(4):  # drops and entrances on the route are checked in the game first
+                r = self._router.route(s, g, budget_s=budget_s, timeout=budget_s + 20,
+                                       attrs={'area': me[0], 'banned': set(self._banned_links)})
+                if r is None:
+                    return None
+                blocked = self._blocked_links(r.special or [], off)
+                if not blocked:
+                    break
+                self._banned_links |= blocked
+        route = Route([(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints], r.reaches_goal, 0)
+        route.length_m, route.timed_out = r.length, r.timed_out
+        return route
+
+    def _blocked_links(self, special: list, off: Vec3) -> set:
+        """Special links (drops, steps, dungeon entrances) that a ray shows are blocked by a wall or a
+        rock: from the edge toward the landing at chest height (and knee height for steps)."""
+        rays, keys = [], []
+        for kind, pa, pb, frm, to, land in special:
+            mid = ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1], (pa[2] + pb[2]) / 2 - off[2])
+            lx, lz = land[0] - off[0] - mid[0], land[2] - off[2] - mid[2]
+            d = math.hypot(lx, lz)
+            if d < 0.3:
+                continue
+            reach = {2: 2.5, 3: 1.5}.get(kind, min(d, 9.0))  # drop, step, entrance
+            for lift in ((0.5, 1.2) if kind == 3 else (1.2,)):  # steps: low rocks and fences too
+                a = (mid[0], mid[1] + lift, mid[2])
+                b = (mid[0] + lx / d * reach, mid[1] + lift, mid[2] + lz / d * reach)
+                rays.append((a, b))
+                keys.append((frm, to))
+        if not rays:
+            return set()
+        try:
+            hits = self.raycast(rays)
+        except (GameNotRunning, TimeoutError, RuntimeError):
+            return set()  # can't check now: use the route as planned
+        return {k for k, h in zip(keys, hits) if h.hit and h.normal and abs(h.normal[1]) < 0.6}
 
     def _describe(self, pl, me, snap) -> dict:
         r = {'name': pl.name, 'region': pl.region, 'kind': pl.kind}

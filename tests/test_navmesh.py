@@ -86,3 +86,53 @@ class NavMeshTests(unittest.TestCase):
         f, p, d = m.locate((5, 0, 4))  # 2 m beside the corridor
         self.assertAlmostEqual(p[2], 2.0)
         self.assertAlmostEqual(d, 2.0)
+
+
+class _WithDrop:
+    """A grid_mesh source plus one-way special links {(from face, to face): (portal a, portal b)}."""
+
+    def __init__(self, mesh, links):
+        self.m, self.links = mesh, links
+
+    def locate(self, p, **kw):
+        return self.m.locate(p, **kw)
+
+    def neighbours(self, f):
+        extra = [(t, a, b, 2) for (fr, t), (a, b) in self.links.items() if fr == f]
+        return self.m.neighbours(f) + extra
+
+    def centre(self, f):
+        return self.m.centre(f)
+
+    def cost(self, f):
+        return self.m.cost(f)
+
+    def closest_on(self, f, p):
+        return self.m.closest_on(f, p)
+
+
+class SearchTests(unittest.TestCase):
+    def test_time_budget_gives_a_partial_route_toward_the_goal(self):
+        from game_assistant.core.navmesh import search
+        m = grid_mesh([(i, j) for i in range(150) for j in range(150)], size=2.0)
+        r = search(m, (1, 0, 1), (299, 0, 299), budget_s=0.0)  # stops at the first time check
+        self.assertTrue(r.timed_out)
+        self.assertFalse(r.reaches_goal)
+        self.assertGreater(r.length, 5)  # it still made progress
+        full = search(m, (1, 0, 1), (299, 0, 299), budget_s=30)
+        self.assertTrue(full.reaches_goal)
+        self.assertFalse(full.timed_out)
+
+    def test_drop_is_one_way(self):
+        from game_assistant.core.navmesh import search
+        # A ledge (y = 4) and the ground (y = 0), not joined; a drop from ledge cell 4 to ground cell 4.
+        cells = [(i, 0) for i in range(5)] + [(i, 2) for i in range(5)]
+        m = grid_mesh(cells, levels={(i, 0): 4.0 for i in range(5)})
+        ledge = m.locate((9, 4, 1))[0]
+        ground = m.locate((9, 0, 5))[0]
+        src = _WithDrop(m, {(ledge, ground): ((8, 4, 2), (10, 4, 2))})
+        down = search(src, (1, 4, 1), (1, 0, 5))
+        self.assertTrue(down.reaches_goal)
+        self.assertEqual(len(down.special), 1)
+        up = search(src, (1, 0, 5), (1, 4, 1))
+        self.assertFalse(up.reaches_goal)  # no way back up

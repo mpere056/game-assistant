@@ -497,3 +497,43 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   ready-made voxel grid and time-limited, segmented planning. User liked "plan for about a second,
   start on the best partial route, plan further while moving" -> planned next, with joining the
   blocks once at extraction time and movement types from the navmesh's user edges.
+
+## 2026-10-10: Baritone-style planning (whole-world graph, lazy loading, time budget, own process)
+- User: Navi must answer instantly; waiting a little before navigation starts is fine.
+- Measured the old per-route mesh: 9 tiles build in 0.6 s; 3.0 of 3.3 s was joining two dungeon
+  blocks' 34-40k edges, which found nothing: dungeons sit 50-90 m from the open-world mesh.
+- games/eldenring/navgraph.py builds once (Get-GameData) a whole-world graph in .local/eldenring/
+  navgraph: per block ready-to-search arrays + links: 43,062 tile/block joins; 13,125 entrance links
+  (dungeon threshold gaps, measured 5.8-6.4 m at a cave mouth; edges must face each other); 1.6 M
+  drops (one way, 0.8-6 m down, 0.8/1.6/2.5 m beyond an edge) and steps (same level 0.8 m beyond an
+  edge: a seam or thin cut). ~7-8 min.
+- core/navmesh.search: any Source; A* with a time budget returning the best partial route (timed_out)
+  or, when the faces run out, the nearest walkable point; special links reported. NavMesh is now one
+  Source; WorldGraph loads blocks on demand (LRU 300).
+- core/route_worker.py: searches run in their own process at below-normal priority (a search on a
+  thread would compete with the fairy loop and answer streaming under Python's GIL); a dead worker is
+  noticed within 0.25 s. adapter.route uses it with a 3 s budget; drops, steps and entrances on a
+  route are checked with live rays (knee/chest) and banned + re-planned if blocked (up to 4 times).
+  The companion sets off on a timed-out route and plans the rest from its end (up to 8 pieces).
+- Measured from the earlier spot near Stormhill: Stormhill Evergaol 545 m, 0.98 s cold / 0.25 s warm;
+  a 1 km trip: 3.1 s for 1,162 m ending 18 m short (timed out: continued while moving).
+- Open: the player now stands on a cave-mouth ledge that the graph says is enclosed (896 faces: the
+  ledge and the cave; no same-level ground within 3 m, no drop within 6 m). How the player got there
+  is unknown (a bigger drop? a jump?). Idea: learn links from the player's own movement.
+- 50 tests pass (new: time budget, one-way drop).
+- User (3 screenshots): the "ledge" is a cave entrance: a walkable rock passage from the cave out to
+  the forest at ground level. Measured: the cave's mesh ends ~12 m before the outside ground; the
+  passage has only one 17-face piece, 2.4-2.8 m from the outside ground at the same level.
+- Point-sampled steps (0.8 m, then 0.8/1.6/2.5 m) missed it; edge-to-edge matching (boundary edges
+  facing each other, <= 3.5 m apart, <= 1 m in height) found 5 pairs (2.5-3.3 m). Steps are now
+  edge-to-edge, both ways (4.58 M); drops stay sampled (517 k). Special links cost extra in the search
+  (entrance +2, drop +4, step +8 m) so they're used only when needed; steps are ray-checked at knee and
+  chest height.
+- Graph files: 2.1 GB with coordinates per link -> 730 MB with vertex numbers and 32-bit floats.
+  Build ~15 min. The dungeon map shifts are saved by the adapter (legacy_conversions.json, 196 rows) so
+  the graph can be built without the game; Get-GameData.bat navmesh now builds it after extraction.
+- From the cave entrance (adapter.route: worker + live checks): passage outside->inside connected;
+  Stormhill Evergaol 604 m, 1.7 s; Gatefront Ruins 169 m and Church of Elleh 166 m, 0.02-0.12 s;
+  Stormveil Castle reached (995 m, through an entrance link), 7.8 s; Agheel Lake North 265 m;
+  Fort Haight West and Lake-Facing Cliffs ~1 km: best part after 3 s (~200 m short, continued while
+  moving).
