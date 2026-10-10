@@ -240,3 +240,101 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
 - Checked the whole app starts with FairyVoice af_heart, 'world', 440 Hz, size 1.3 (the default and
   the user's settings); a test line started playing 0.94 s after being sent (a whole sentence at
   once; streamed answers start sooner), no errors. 31 offline tests pass.
+
+## 2026-10-09: faster voice (streamed pieces), the fairy flies instead of jumping, a trail
+- User (game test): answers much better, but the voice takes longer than the Windows voice, and after a
+  quick first sentence ("Hey!", "Slash and fire!") there were a few seconds of silence. When sent
+  somewhere the fairy "almost teleports", so they lose track of it; wants it faster than them but
+  followable, with a short trail.
+- Voice timing measured per 4 s sentence: Kokoro 1.35 s, harvest 0.61 s, rest 0.3 s (2.3 s): a short
+  first sentence finished long before the next was ready. Kokoro fp32 model: no faster (1.24 vs 1.28 s;
+  deleted again). dio with short gaps bridged: rumble 0.4 % (harvest 0 %, old dio 1.4-4.5 %) at a third
+  of the time. Two Kokoro sessions of 4 threads each: two halves of a sentence in 0.99 s vs 1.3 s whole.
+- FairyVoice rewritten: the sparkle plays the moment text arrives; sentences are cut into pieces (at
+  commas and and/but/so/or/then when longer than 7 words; a long sentence's first clause goes as soon
+  as its comma arrives); two workers (4 threads each, leaving the rest of the CPU to the game) make
+  pieces in parallel; pieces play in order through one continuous output stream; short phrases cached.
+  Streamed at Haiku's pace: sparkle 0.0 s, first words 0.46-0.90 s after the text starts, silence
+  mid-answer 0.42-0.71 s in total (was several seconds).
+- Fairy movement: the "teleport" was a bug: the warp rule snapped it to any target more than 60 m from
+  the fairy (guide targets are 100 m ahead). Now it only snaps back if it is 180 m from the player.
+  Travel at 10 m/s (running is about 6), at least 1.3x the player's speed (Torrent), acceleration capped
+  at 14 m/s^2. New test: a 70 m trip starts gently, never exceeds 10.5 m/s.
+- Trail: ten small wingless glows at the fairy's places in the last 0.32 s, shrinking and fading, shown
+  only while it moves faster than 90 px/s (each its own layered window). Seen working in a capture.
+- 32 offline tests pass; the app starts with the new voice (a test line: 0.26 s of silence in it).
+
+## 2026-10-09: longer trail (2 s)
+- User: voice and movement "much better"; wants more of a trail, about 2 s instead of a third of one.
+- Trail: 30 dots sampled every 1/15 s over 2 s (was 10 over 0.32 s), each shown only if the fairy was
+  moving faster than 90 px/s at that moment, smaller and fainter with age. Checked with the real overlay
+  (no screenshot): 17 dots while flying 600 px in 1.5 s; after it stopped, 11 dots at 1.0 s, 2 at
+  1.7 s, none at 2.5 s, so the trail fades instead of vanishing. 32 offline tests pass.
+
+## 2026-10-09: trail fixed when turning; guiding stays in sight; off-screen marker
+- User: the longer trail is "kinda messed up" when turning around; still sometimes hard to follow the
+  fairy while guiding (maybe beyond 70 m, behind terrain or the other side of a hill).
+- Trail: it was kept in screen positions, so turning the camera smeared it across the screen. Now the
+  companion keeps world positions (30 samples over 2 s, only where it moved faster than 2.5 m/s) and
+  projects them through the current camera every frame; the overlay only draws the dots it is given.
+- Guiding: instead of always 100 m ahead, it takes the furthest spot toward the goal (up to 100 m, in
+  10 m steps, at least 15 m) that the camera can see: one batch of downward rays for the ground and one
+  of sight rays, every 15 frames, smoothed. Hovers 6 m above the ground (was 4), at least 24 px on
+  screen (was 18), and fades only to 50 % behind terrain while travelling (25 % while following).
+- Off-screen marker: when it is travelling and outside the picture (or behind the camera), a pulsing
+  glow sits just inside the screen's edge in its direction (camera-space direction behind the camera,
+  where the projection doesn't apply; the first version returned infinity there).
+- Tests: 3 new (trail drawn where it is in the world after the camera turns; a 30 m ridge at 40 m keeps
+  the guiding fairy between 14 and 40 m; marker when behind). 35 pass. Demo scene, counting the overlay's
+  windows: following 1 fairy / 0 dots; flying off to the side 11 dots + marker; behind the camera the
+  marker only; back again fairy + 12 dots.
+
+## 2026-10-09: guiding follows walkable ground (no more leading over cliffs)
+- User: easier to see now, but the fairy crossed a cliff edge (screenshot at a cliff in Caelid); it
+  should guide with the terrain in mind.
+- Measured: the assistant ray block answers about 12,000 rays/s (2,601 rays in 0.22 s).
+- nav.py: two scales (`Profile`): LOCAL (2 m cells, 30 m, as before) and WIDE (5 m cells, 150 m around
+  the player, 3,721 downward rays). Steps may rise up to 3.5 m or drop up to 4.5 m per 5 m cell (x1.4
+  diagonally); bigger changes are cliffs. The goal end is the reachable cell nearest the goal (flood
+  fill), so a goal across a cliff still gets the closest walkable approach. Rays go out in chunks of
+  256 so a background plan never holds the ray block long.
+- Guide mode: plans a WIDE route on a background thread, flies along it (as far as the player can see,
+  up to 100 m, heights from the route's own floor), re-plans near the end of a partial route (50 m), when
+  the player is 25 m off it, or every 12 s; straight-line fallback until the first plan is ready.
+- Test (new): plateau with a 30 m cliff and a ramp to one side: the route stays on the ramp beside the
+  cliff and the fairy heads for it. 36 tests pass.
+- Live: from the user's spot toward the Forsaken Ruins (216 m away): planned in 0.55 s with 4,843 rays,
+  47 waypoints, 281 m of winding route, biggest rise 2.3 m and drop 1.4 m between waypoints; it ends
+  short (the ruins are past the 150 m area), to be re-planned on the way.
+
+## 2026-10-09: "nearest grace" fixed; guiding when walled in
+- User: guiding gave "really weird directions": on a cliff above water, the fairy wanted them to go
+  forward (screenshot: fairy high up by a tower).
+- Cause (chat log): "take me to the nearest Site of Grace" had no way to sort by distance, so the
+  agent searched by name and guided to the First Mt. Gelmir Campsite, 4 km north-west. The nearest
+  grace was Smoldering Church, 36 m south-east. While planning (and if planning fails) the fairy also
+  flew a straight line, taking "ground" heights from the tower top.
+- Fix: `places.nearest()`, `adapter.nearest_places(kind)`, agent tool nearest_places, and guide_to
+  understands "nearest site of grace / landmark". Live: "Take me to the nearest Site of Grace." ->
+  "This way! The Smoldering Church is about 36 metres south-east, just behind you." (route complete).
+- Water: a downward ray over the water ahead hit a flat surface 78 m below, with no attribute bits to
+  tell water from ground (attr 0); the cliff (an 88 m drop 5 m ahead) already keeps routes away.
+- Far goals (over 250 m): plan with WIDE (5 m, 150 m) and a new FAR profile (8 m cells, 300 m, 5,625
+  rays, 0.8 s live) and keep the route that gets closer. From the user's spot only 790 of 3,535 WIDE
+  cells were reachable without a big drop (a walled-in cliff top), so no route got closer to Mt. Gelmir:
+  now the fairy says "I can't find a way to walk toward <place> from here" once, instead of pointing
+  over the edge. While no route exists it waits 15 m ahead toward the goal (straight line only when
+  it cannot look at the ground at all, which an existing test caught). 36 tests pass.
+- Known limit: 5-8 m cells can read a steep but walkable slope as a cliff.
+
+## 2026-10-10: arrival checks height
+- User: guided to the nearest grace (Rear Gael Tunnel Entrance), the fairy said "here we are" while
+  they stood on the ground above it; the grace was lower down, in the tunnel (about 67 m below).
+- Arrival now needs within 15 m across AND within 6 m in height. Right above or below the place, the
+  fairy flies down (or up) to the real spot for 6 s and says "It's right below us, about 67 metres
+  down! There must be a way down nearby." Nearest-place ordering uses 3D distance, and places more
+  than 15 m higher or lower carry a height_note the agent mentions ("down in the tunnel").
+- New test (above a place is not arriving); 37 pass. Live after the user had walked down: Rear Gael
+  Tunnel Entrance 11 m south, 1 m lower; Gael Tunnel 129 m, "about 59 m above you".
+- Known limit: routes are planned on the top surface (downward rays), so the fairy can't lead into a
+  cave or tunnel; it says where the place is and leaves the way down to the player.

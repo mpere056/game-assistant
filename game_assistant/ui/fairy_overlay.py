@@ -4,6 +4,12 @@ A transparent, click-through, always-on-top layered window of our own; it never 
 rendering. Sprites (several sizes, four wing positions) are drawn once at start-up with soft,
 per-pixel alpha; each frame only moves the window, picks a sprite and sets its overall opacity.
 Runs on its own thread (a window needs a message loop); other threads only call show()/hide().
+
+While the fairy moves it leaves a trail: up to TRAIL_DOTS smaller, dimmer glows (no wings), each in
+its own small window. The companion keeps the trail in the world and projects it through the camera
+every frame (a trail kept in screen positions smeared across the screen when the camera turned), and
+hands the dots over with show(). When the fairy is off-screen, a pulsing marker sits at the screen's
+edge in its direction.
 """
 from __future__ import annotations
 
@@ -28,6 +34,8 @@ SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 1, 2, 0x10
 SIZES = [12, 16, 20, 26, 32, 40, 50, 62, 76, 96]
 FLAPS = [1.0, 0.72, 0.42, 0.72]          # wing length per frame
 COLOR = (120, 214, 255)                  # Navi-like light blue (R, G, B)
+TRAIL_DOTS = 30                          # windows for trail dots (the companion decides where)
+EDGE_SIZE = 32                           # the off-screen marker's size, px
 
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 
@@ -82,18 +90,18 @@ def _smooth(e0: float, e1: float, x: float) -> float:
     return t * t * (3 - 2 * t)
 
 
-def draw_sprite(n: int, flap: float, color=COLOR) -> bytes:
+def draw_sprite(n: int, flap: float, color=COLOR, wings: bool = True) -> bytes:
     """Premultiplied BGRA pixels (top-down) of an n x n fairy: a white-hot core in a soft coloured
     glow, with two translucent wings."""
     out = bytearray(n * n * 4)
     c = (n - 1) / 2
     core = n * 0.11
     glow = n * 0.22
-    wings = []
-    for side in (-1, 1):
+    wing_shapes = []
+    for side in ((-1, 1) if wings else ()):
         wx, wy = c + side * n * 0.2, c - n * 0.08
         ang = math.radians(35 * side)
-        wings.append((wx, wy, n * 0.21 * flap, n * 0.1, math.cos(ang), math.sin(ang)))
+        wing_shapes.append((wx, wy, n * 0.21 * flap, n * 0.1, math.cos(ang), math.sin(ang)))
     for y in range(n):
         for x in range(n):
             dx, dy = x - c, y - c
@@ -102,7 +110,7 @@ def draw_sprite(n: int, flap: float, color=COLOR) -> bytes:
             whiteness = 1.0 - _smooth(0.0, core * 1.6, d)
             a_core = 1.0 - _smooth(core * 0.8, core * 1.4, d)
             a_wing = 0.0
-            for wx, wy, ra, rb, ca, sa in wings:
+            for wx, wy, ra, rb, ca, sa in wing_shapes:
                 ux, uy = x - wx, y - wy
                 rx, ry = ux * ca + uy * sa, -ux * sa + uy * ca
                 q = (rx / max(ra, 0.5)) ** 2 + (ry / max(rb, 0.5)) ** 2
@@ -140,9 +148,16 @@ class FairyOverlay:
             self._thread = threading.Thread(target=self._run, name='fairy overlay', daemon=True)
             self._thread.start()
 
-    def show(self, x: float, y: float, size_px: float, opacity: float, speaking: bool = False) -> None:
+    def show(self, x: float, y: float, size_px: float, opacity: float, speaking: bool = False,
+             trail=(), edge=None) -> None:
+        """The fairy at (x, y); trail = [(x, y, size, opacity)]; edge = (x, y) for the off-screen marker."""
         with self._lock:
-            self._want = (x, y, size_px, opacity, speaking)
+            self._want = ((x, y, size_px, opacity, speaking), list(trail), edge)
+
+    def show_parts(self, main=None, trail=(), edge=None) -> None:
+        """Like show(), but the fairy itself may be hidden (off-screen) while its trail or marker show."""
+        with self._lock:
+            self._want = (main, list(trail), edge)
 
     def hide(self) -> None:
         with self._lock:
@@ -166,10 +181,15 @@ class FairyOverlay:
         wc = WNDCLASSEXW(cbSize=ctypes.sizeof(WNDCLASSEXW), lpfnWndProc=self._proc, hInstance=inst,
                          lpszClassName='GameAssistantFairy')
         user32.RegisterClassExW(ctypes.byref(wc))
-        hwnd = user32.CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                                      'GameAssistantFairy', 'Fairy', WS_POPUP, 0, 0, 32, 32, None, None, inst, None)
-        if not hwnd:
-            raise OSError(f'could not create the overlay window ({ctypes.get_last_error()})')
+        style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+        # The trail windows first, so the fairy itself (created last) sits above them.
+        trail_wins = [user32.CreateWindowExW(style, 'GameAssistantFairy', 'Fairy trail', WS_POPUP, 0, 0, 16, 16,
+                                             None, None, inst, None) for _ in range(TRAIL_DOTS)]
+        edge_win = user32.CreateWindowExW(style, 'GameAssistantFairy', 'Fairy marker', WS_POPUP, 0, 0, 16, 16,
+                                          None, None, inst, None)
+        hwnd = user32.CreateWindowExW(style, 'GameAssistantFairy', 'Fairy', WS_POPUP, 0, 0, 32, 32, None, None, inst, None)
+        if not hwnd or not edge_win or not all(trail_wins):
+            raise OSError(f'could not create the overlay windows ({ctypes.get_last_error()})')
         screen = user32.GetDC(None)
         sprites = {}
         for n in SIZES:
@@ -182,24 +202,81 @@ class FairyOverlay:
                 ctypes.memmove(bits, data, len(data))
                 gdi32.SelectObject(dc, bmp)
                 sprites[(n, k)] = dc
+            dc = gdi32.CreateCompatibleDC(screen)  # the trail's dot: the glow without wings
+            bi = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER), biWidth=n, biHeight=-n, biPlanes=1, biBitCount=32)
+            bits = ctypes.c_void_p()
+            bmp = gdi32.CreateDIBSection(screen, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
+            data = draw_sprite(n, 0.0, self.color, wings=False)
+            ctypes.memmove(bits, data, len(data))
+            gdi32.SelectObject(dc, bmp)
+            sprites[(n, 'dot')] = dc
         self.ready.set()
         shown = False
+        trail_shown = [False] * TRAIL_DOTS
+        edge_shown = False
+        frame = 0
         msg = wt.MSG()
         t0 = time.perf_counter()
+
+        def place(win, n, key, x, y, opacity):
+            pos = wt.POINT(int(x - n / 2), int(y - n / 2))
+            sz = wt.SIZE(n, n)
+            src = wt.POINT(0, 0)
+            blend = BLENDFUNCTION(0, 0, int(255 * max(0.0, min(1.0, opacity))), AC_SRC_ALPHA)
+            user32.UpdateLayeredWindow(win, screen, ctypes.byref(pos), ctypes.byref(sz), sprites[(n, key)],
+                                       ctypes.byref(src), 0, ctypes.byref(blend), ULW_ALPHA)
+
+        def hide_trail():
+            for i in range(TRAIL_DOTS):
+                if trail_shown[i]:
+                    user32.ShowWindow(trail_wins[i], SW_HIDE)
+                    trail_shown[i] = False
         while not self._stop:
             while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
             with self._lock:
                 want = self._want
-            if want is None or want[3] <= 0.02:
+            main, trail, edge = want if want is not None else (None, [], None)
+            if main is None and not trail and edge is None:
                 if shown:
                     user32.ShowWindow(hwnd, SW_HIDE)
                     shown = False
+                hide_trail()
+                if edge_shown:
+                    user32.ShowWindow(edge_win, SW_HIDE)
+                    edge_shown = False
                 time.sleep(0.03)
                 continue
-            x, y, size, opacity, speaking = want
             t = time.perf_counter() - t0
+            frame += 1
+            for i in range(TRAIL_DOTS):
+                if i < len(trail) and trail[i][3] > 0.02:
+                    tx, ty_, tsize, top = trail[i]
+                    tn = min(SIZES, key=lambda s_: abs(s_ - tsize))
+                    place(trail_wins[i], tn, 'dot', tx, ty_, top)
+                    if not trail_shown[i]:
+                        user32.ShowWindow(trail_wins[i], SW_SHOWNOACTIVATE)
+                        trail_shown[i] = True
+                elif trail_shown[i]:
+                    user32.ShowWindow(trail_wins[i], SW_HIDE)
+                    trail_shown[i] = False
+            if edge is not None:  # pulsing marker at the screen's edge: "it's over there"
+                en = min(SIZES, key=lambda s_: abs(s_ - EDGE_SIZE))
+                place(edge_win, en, 'dot', edge[0], edge[1], 0.55 + 0.35 * math.sin(t * 6.0))
+                if not edge_shown:
+                    user32.ShowWindow(edge_win, SW_SHOWNOACTIVATE)
+                    edge_shown = True
+            elif edge_shown:
+                user32.ShowWindow(edge_win, SW_HIDE)
+                edge_shown = False
+            if main is None or main[3] <= 0.02:
+                if shown:
+                    user32.ShowWindow(hwnd, SW_HIDE)
+                    shown = False
+                time.sleep(1 / 120)
+                continue
+            x, y, size, opacity, speaking = main
             if speaking:  # pulse and grow a little while it talks
                 size *= 1.15 + 0.1 * math.sin(t * 9.0)
                 opacity = min(1.0, opacity * (0.85 + 0.15 * math.sin(t * 9.0)))
@@ -214,6 +291,9 @@ class FairyOverlay:
             if not shown:
                 user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
                 shown = True
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            if frame % 30 == 0:  # stay above the game (it can take topmost back)
+                for w in trail_wins + [edge_win, hwnd]:
+                    user32.SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
             time.sleep(1 / 120)
-        user32.DestroyWindow(hwnd)
+        for w in trail_wins + [edge_win, hwnd]:
+            user32.DestroyWindow(w)

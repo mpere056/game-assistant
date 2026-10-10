@@ -227,6 +227,21 @@ class App:
             self.last_view = view
             while self.companion.events:  # e.g. arrived somewhere it was guiding to
                 event = self.companion.events.pop(0)
+                if event.startswith('level:'):
+                    _, name, dy = event.split(':', 2)
+                    dy = int(dy)
+                    line = (f"It's right below us, about {abs(dy)} metres down! There must be a way down nearby." if dy < 0
+                            else f"It's right above us, about {dy} metres up! There must be a way up nearby.")
+                    self.q.put(('meta', '\n' + line + '\n'))
+                    if self.speaker:
+                        self.speaker.say(line)
+                    continue
+                if event.startswith('no_way:'):
+                    line = f"Hmm, I can't find a way to walk toward {event.split(':', 1)[1]} from here. Let's try another way!"
+                    self.q.put(('meta', '\n' + line + '\n'))
+                    if self.speaker:
+                        self.speaker.say(line)
+                    continue
                 if event.startswith('arrived:'):
                     line = f"Here we are: {event.split(':', 1)[1]}!"
                     self.q.put(('meta', '\n' + line + '\n'))
@@ -236,8 +251,9 @@ class App:
             in_front = snap.screen is not None and (snap.screen.focused or _own_window_in_front())
             if view.visible and snap.screen and hasattr(self.speaker, 'pan'):  # the voice comes from the fairy
                 self.speaker.pan = ((view.screen_x - snap.screen.x) / max(1, snap.screen.width)) * 2 - 1
-            if view.visible and in_front:
-                self.overlay.show(view.screen_x, view.screen_y, view.size_px, view.opacity, view.speaking)
+            if in_front and (view.visible or view.trail or view.edge):
+                main = (view.screen_x, view.screen_y, view.size_px, view.opacity, view.speaking) if view.visible else None
+                self.overlay.show_parts(main, view.trail, view.edge)
             else:
                 self.overlay.hide()
             took = time.perf_counter() - start

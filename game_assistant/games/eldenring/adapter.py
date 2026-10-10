@@ -233,6 +233,33 @@ class EldenRingAdapter:
                                       self.kb.lists['BonfireWarpParam'], self.kb.lists['WorldMapPointParam'])
         return self._places
 
+    def _describe(self, pl, me, snap) -> dict:
+        r = {'name': pl.name, 'region': pl.region, 'kind': pl.kind}
+        if pl.world is None or me is None:
+            r['note'] = 'its map position is not known' if pl.world is None else 'your own map position is not known here'
+        elif pl.world[0] != me[0]:
+            r['note'] = 'it is in the other world (the Lands Between vs the Realm of Shadow)'
+        else:
+            dx, dy, dz = pl.world[1] - me[1], pl.world[2] - me[2], pl.world[3] - me[3]
+            p = snap.player.pos
+            r.update(distance_m=round((dx * dx + dz * dz) ** 0.5), compass=compass(dx, dz), height_diff_m=round(dy),
+                     position=(p[0] + dx, p[1] + dy, p[2] + dz))
+            if abs(dy) > 15:
+                r['height_note'] = (f'about {abs(round(dy))} m {"below" if dy < 0 else "above"} you: '
+                                    f'{"probably in a cave or tunnel, or down a cliff" if dy < 0 else "up a cliff or a tower"}')
+        return r
+
+    def nearest_places(self, kind: str = 'site of grace', limit: int = 5) -> dict:
+        """The places of a kind ('site of grace' or 'landmark') nearest the player, nearest first."""
+        snap = self.snapshot()
+        if not snap.in_world or not snap.player:
+            return {'error': 'no character in the world right now'}
+        idx = self._place_index()
+        me = idx.player_world(int(snap.area, 16) if snap.area else 0, snap.player.pos)
+        if me is None:
+            return {'error': 'your own map position is not known here (a place without a world-map conversion)'}
+        return {'kind': kind, 'results': [self._describe(pl, me, snap) for pl in idx.nearest(me, kind, limit)]}
+
     def locate(self, query: str) -> dict:
         """Where a named place is relative to the player, for guiding. The query may also be an item:
         then its first known location is used ("lead me to the Moonveil" -> Gael Tunnel)."""
@@ -258,19 +285,7 @@ class EldenRingAdapter:
                         break
                 if places:
                     break
-        out = []
-        for pl in places:
-            r = {'name': pl.name, 'region': pl.region, 'kind': pl.kind}
-            if pl.world is None or me is None:
-                r['note'] = 'its map position is not known' if pl.world is None else 'your own map position is not known here'
-            elif pl.world[0] != me[0]:
-                r['note'] = 'it is in the other world (the Lands Between vs the Realm of Shadow)'
-            else:
-                dx, dy, dz = pl.world[1] - me[1], pl.world[2] - me[2], pl.world[3] - me[3]
-                p = snap.player.pos
-                r.update(distance_m=round((dx * dx + dz * dz) ** 0.5), compass=compass(dx, dz), height_diff_m=round(dy),
-                         position=(p[0] + dx, p[1] + dy, p[2] + dz))
-            out.append(r)
+        out = [self._describe(pl, me, snap) for pl in places]
         res = {'query': query, 'results': out}
         if via:
             res['found_via_item'] = via
