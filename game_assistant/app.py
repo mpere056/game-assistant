@@ -30,7 +30,7 @@ from . import config
 from .core import commands, lookat
 from .core.agent import Agent
 from .core.companion import Companion
-from .core.interface import CAP_CAMERA, CAP_RAYCAST, CAP_SCREEN, GameNotRunning
+from .core.interface import CAP_CAMERA, CAP_NAVMESH, CAP_RAYCAST, CAP_SCREEN, GameNotRunning
 from .core.spend import SpendCapReached
 from .games import adapter_for
 
@@ -56,8 +56,13 @@ class App:
             make_dpi_aware()
             self.companion = Companion(self.adapter.raycast if CAP_RAYCAST in caps else None, float(self.cfg['leash_m']),
                                        float(self.cfg['fairy_scale']))
+            if CAP_NAVMESH in caps:  # the game's own walkable mesh (Get-GameData extracted it)
+                self.companion.route_fn = self.adapter.route
             self.overlay = FairyOverlay(tuple(self.cfg['fairy_color']))
+            self.overlay.bubble_scale = float(self.cfg['bubble_scale'])
             self.overlay.start()
+        # Navi's speech bubble in the game (the overlay draws it); None when switched off.
+        self.bubble = self.overlay if self.overlay and self.cfg['speech_bubble'] else None
         self.speaker = None
         if self.cfg['speak_answers']:
             from .voice import fairy_voice
@@ -87,7 +92,8 @@ class App:
             self.ptt = PushToTalk(on_text=lambda t: self.q.put(('voice', t)), key=self.cfg['push_to_talk_key'],
                                   model=self.cfg['speech_model'], microphone=self.cfg['microphone'],
                                   on_state=lambda s: self.q.put(('voice_state', s)),
-                                  vocabulary=getattr(self.adapter, 'vocabulary', ''))
+                                  vocabulary=getattr(self.adapter, 'vocabulary', ''),
+                                  on_press=self.agent.capture_screen)
         except Exception as e:  # voice input is optional
             self.q.put(('voice_state', f'voice input unavailable: {e}'))
         if self.companion:
@@ -174,6 +180,8 @@ class App:
                 record['local_command'] = True
                 if reply:
                     self.q.put(('text', reply))
+                    if self.bubble:
+                        self.bubble.bubble_say(reply)
                     if self.speaker:
                         self.speaker.say(reply)
                 self.q.put(('meta', '\n(instant, no cost)\n'))
@@ -183,10 +191,18 @@ class App:
 
                 def on_text(s: str) -> None:
                     self.q.put(('text', s))
+                    if self.bubble:
+                        self.bubble.bubble_add(s)
                     if self.speaker:
                         self.speaker.feed(s)
 
-                ans = self.agent.ask(question, on_text=on_text)
+                if self.bubble:
+                    self.bubble.bubble_think()
+                try:
+                    ans = self.agent.ask(question, on_text=on_text)
+                finally:
+                    if self.bubble:
+                        self.bubble.bubble_done()
                 if self.speaker:
                     self.speaker.flush()
                 spent = self.agent.guard.last_hour()
@@ -219,6 +235,7 @@ class App:
                 snap = self.adapter.snapshot()
             except (GameNotRunning, RuntimeError):
                 self.overlay.hide()
+                self.overlay.set_bounds(None)
                 time.sleep(1.0)
                 last = time.perf_counter()
                 continue
@@ -233,24 +250,32 @@ class App:
                     line = (f"It's right below us, about {abs(dy)} metres down! There must be a way down nearby." if dy < 0
                             else f"It's right above us, about {dy} metres up! There must be a way up nearby.")
                     self.q.put(('meta', '\n' + line + '\n'))
+                    if self.bubble:
+                        self.bubble.bubble_say(line)
                     if self.speaker:
                         self.speaker.say(line)
                     continue
                 if event.startswith('no_way:'):
                     line = f"Hmm, I can't find a way to walk toward {event.split(':', 1)[1]} from here. Let's try another way!"
                     self.q.put(('meta', '\n' + line + '\n'))
+                    if self.bubble:
+                        self.bubble.bubble_say(line)
                     if self.speaker:
                         self.speaker.say(line)
                     continue
                 if event.startswith('arrived:'):
                     line = f"Here we are: {event.split(':', 1)[1]}!"
                     self.q.put(('meta', '\n' + line + '\n'))
+                    if self.bubble:
+                        self.bubble.bubble_say(line)
                     if self.speaker:
                         self.speaker.say(line)
             last = start
             in_front = snap.screen is not None and (snap.screen.focused or _own_window_in_front())
             if view.visible and snap.screen and hasattr(self.speaker, 'pan'):  # the voice comes from the fairy
                 self.speaker.pan = ((view.screen_x - snap.screen.x) / max(1, snap.screen.width)) * 2 - 1
+            scr = snap.screen
+            self.overlay.set_bounds((scr.x, scr.y, scr.width, scr.height) if in_front else None)
             if in_front and (view.visible or view.trail or view.edge):
                 main = (view.screen_x, view.screen_y, view.size_px, view.opacity, view.speaking) if view.visible else None
                 self.overlay.show_parts(main, view.trail, view.edge)
@@ -283,7 +308,8 @@ class App:
         parts.append({'loading': 'voice: loading speech model...', 'ready': f'hold {self.cfg["push_to_talk_key"]} to talk',
                       'listening': 'listening...', 'thinking': 'hearing you...'}.get(state, state))
         if self.companion:
-            parts.append(f'fairy: {self.companion.mode}{" (waiting at the leash)" if self.companion.waiting else ""}, '
+            route = f' ({self.companion.route_source} route)' if self.companion.mode == 'guide' and self.companion.route else ''
+            parts.append(f'fairy: {self.companion.mode}{route}{" (waiting at the leash)" if self.companion.waiting else ""}, '
                          f'{self.fairy_ms:.1f} ms/frame')
             if self.overlay and self.overlay.error:
                 parts.append(f'overlay error: {self.overlay.error}')

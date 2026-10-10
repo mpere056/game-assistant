@@ -1,5 +1,13 @@
 # Status
 
+**2026-10-10, latest: walking routes from the game's own navmesh.** Elden Ring's navmeshes (what its
+enemies walk on) are extracted from the installed game into `.local/` (`Get-GameData.bat navmesh`,
+done on this PC: 695 blocks, 4.5 million faces) and Navi's guiding plans over them. Checked against the
+running game without playing: the way up to Stormhill Evergaol (546 m for 78 m straight, which the old
+planner couldn't find). Not yet tried in game by the user. Next: try it; user edges (jumps, ladders,
+lifts); faster planning of long routes; then phase 4b (the character walks the route).
+Also today: offline wiki, screen pictures of the game window only, the in-game speech bubble.
+
 **2026-10-08: phase 1 done.**
 
 - The shared core: interface, look-at resolver, $3/hour spending guard. 12 offline tests pass

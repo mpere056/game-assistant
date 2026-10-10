@@ -14,13 +14,15 @@ import threading
 import time
 from pathlib import Path
 
-from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_PLACES, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN,
+from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_NAVMESH, CAP_PLACES, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN,
                               CAP_SEARCH, Camera, Entity,
                               GameNotRunning, Player, RayHit, Screen, Snapshot, Vec3, cross, normalize, sub)
 from .memory import Memory
 from .knowledge import EldenRingKnowledge
 from .params import read_graces, read_legacy_conversions, read_map_points, read_npc_params
-from .places import PlaceIndex, compass, place_words
+from .places import TILE, PlaceIndex, compass, place_words
+from .navmesh import WorldNavmesh
+from .wiki import Wiki
 
 ROOT = Path(__file__).resolve().parents[3]
 NPC_DUMP = ROOT / '.local' / 'eldenring' / 'npc_params.json'   # what was read from memory, for checking
@@ -82,6 +84,7 @@ class EldenRingAdapter:
                   'Margit, Godrick, Rennala, Radahn, Rykard, Morgott, Malenia, Mohg, Maliketh, Ranni, Melina, '
                   'Limgrave, Liurnia, Caelid, Altus Plateau, Leyndell, Stormveil, Raya Lucaria, Volcano Manor, '
                   'Haligtree, Farum Azula, Siofra, Ainsel, Nokron, Weeping Peninsula, Scadutree. '
+                  'Spectral Steed Whistle, Spiritspring, inventory, Key Items, Stonesword Key, Kalé. '
                   'What is that weak to? Where can I find it?')
 
     def __init__(self) -> None:
@@ -91,6 +94,12 @@ class EldenRingAdapter:
         self._ray_lock = threading.Lock()  # one ray request at a time (fairy loop and agent share it)
         self._graces_tried = False
         self._places: PlaceIndex | None = None
+        self.wiki = Wiki()
+        self._navmesh: WorldNavmesh | None = None
+        self._mesh_cache: tuple | None = None   # (area, block names, NavMesh) of the last route
+        self._route_lock = threading.Lock()
+        if any((Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'navmesh').glob('m*.npz')):
+            self.capabilities = self.capabilities | {CAP_NAVMESH}  # Get-GameData extracted the navmeshes
 
     # ---- connection ----
 
@@ -233,6 +242,51 @@ class EldenRingAdapter:
                                       self.kb.lists['BonfireWarpParam'], self.kb.lists['WorldMapPointParam'])
         return self._places
 
+    # ---- routes over the game's own navmesh ----
+
+    def route(self, start: Vec3, goal: Vec3):
+        """A walkable route from start to goal (snapshot coordinates) over the game's navmesh, or None.
+        Tries the tiles around both ends first (300 m margin), then a wider area (900 m) for routes that
+        go around something big. The mesh of the last route is kept: re-planning nearby is quick."""
+        from ...core.nav import Route
+        with self._route_lock:
+            snap = self.snapshot()
+            if not snap.player or not snap.area:
+                return None
+            idx = self._place_index()
+            pos = snap.player.pos
+            me = idx.player_world(int(snap.area, 16), pos)
+            if me is None:
+                return None
+            area = me[0]
+            off = (me[1] - pos[0], me[2] - pos[1], me[3] - pos[2])
+            s = (start[0] + off[0], start[1] + off[1], start[2] + off[2])
+            g = (goal[0] + off[0], goal[1] + off[1], goal[2] + off[2])
+            if self._navmesh is None:
+                self._navmesh = WorldNavmesh(idx.conv)
+            for margin in (300.0, 900.0):
+                lo = (min(s[0], g[0]) - margin, min(s[2], g[2]) - margin)
+                hi = (max(s[0], g[0]) + margin, max(s[2], g[2]) + margin)
+                names = self._navmesh.blocks_in(area, lo, hi)
+                if not names:
+                    return None
+                c = self._mesh_cache
+                if c and c[0] == area and set(names) <= c[1]:
+                    mesh = c[2]
+                else:
+                    built = self._navmesh.mesh(area, lo, hi)
+                    if built is None:
+                        return None
+                    mesh = built[0]
+                    self._mesh_cache = (area, set(built[1]), mesh)
+                r = mesh.route(s, g)
+                if r is not None and (r.reaches_goal or margin == 900.0):
+                    pts = [(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints]
+                    route = Route(pts, r.reaches_goal, 0)
+                    route.length_m = r.length
+                    return route
+            return None
+
     def _describe(self, pl, me, snap) -> dict:
         r = {'name': pl.name, 'region': pl.region, 'kind': pl.kind}
         if pl.world is None or me is None:
@@ -248,6 +302,82 @@ class EldenRingAdapter:
                 r['height_note'] = (f'about {abs(round(dy))} m {"below" if dy < 0 else "above"} you: '
                                     f'{"probably in a cave or tunnel, or down a cliff" if dy < 0 else "up a cliff or a tower"}')
         return r
+
+    def where_am_i(self) -> dict:
+        """The player's surroundings by name: nearest grace and landmarks, region, and the wiki page
+        that best describes this spot."""
+        snap = self.snapshot()
+        if not snap.in_world or not snap.player:
+            return {'error': 'no character in the world right now'}
+        idx = self._place_index()
+        me = idx.player_world(int(snap.area, 16) if snap.area else 0, snap.player.pos)
+        if me is None:
+            return {'error': 'your map position is not known here (a place without a world-map conversion)'}
+        graces = [self._describe(pl, me, snap) for pl in idx.nearest(me, 'site of grace', 2)]
+        marks = [self._describe(pl, me, snap) for pl in idx.nearest(me, 'landmark', 3)]
+        for r in graces + marks:
+            r.pop('position', None)
+        page = None
+        if self.wiki.ok:  # the closest named place the wiki knows
+            for r in sorted(graces + marks, key=lambda r: r.get('distance_m', 1e9)):
+                if r.get('distance_m', 1e9) <= 400 and self.wiki.find_page(r['name']):
+                    page = r['name']
+                    break
+            if page is None:
+                region = next((r.get('region') for r in graces + marks if r.get('region')), None)
+                page = region if region and self.wiki.find_page(region) else None
+        world = 'the Realm of Shadow' if me[0] == 61 else 'the Lands Between'
+        return {'world': world, 'nearest_graces': graces, 'nearest_landmarks': marks, 'wiki_page_for_here': page}
+
+    def items_near_me(self, kind: str | None = None, limit: int = 8) -> dict:
+        """Pickups in the player's map square and the ones around it (open world), and in named
+        places within about 400 m. kind: weapon, armour, talisman, item, ash of war, spell."""
+        from .knowledge import ITEM_FILES, TAGGED, _norm
+        snap = self.snapshot()
+        if not snap.in_world or not snap.player:
+            return {'error': 'no character in the world right now'}
+        idx = self._place_index()
+        me = idx.player_world(int(snap.area, 16) if snap.area else 0, snap.player.pos)
+        if me is None:
+            return {'error': 'your map position is not known here'}
+        kinds = {}
+        for fname, k in ITEM_FILES.items():
+            for name in self.kb.lists[fname].values():
+                kinds.setdefault(_norm(name), k)
+        tx, tz = int(me[1] // TILE), int(me[3] // TILE)
+        found = []
+        for rid, text in self.kb.lists['ItemLotParam_map'].items():
+            m = TAGGED.match(text)
+            item = m.group('what') if m else text
+            k = kinds.get(_norm(item))
+            if k is None or (kind and k != kind):
+                continue
+            s_ = str(rid)
+            if not m and len(s_) == 10 and s_[0] in '12' and s_[1] == '0':  # open world: its map square
+                area, gx, gz = (60 if s_[0] == '1' else 61), int(s_[2:4]), int(s_[4:6])
+                if area != me[0] or max(abs(gx - tx), abs(gz - tz)) > 1:
+                    continue
+                cx, cz = (gx + 0.5) * TILE, (gz + 0.5) * TILE
+                d = ((cx - me[1]) ** 2 + (cz - me[3]) ** 2) ** 0.5
+                where = 'in this map square' if (gx, gz) == (tx, tz) else f'in the next map square, {compass(cx - me[1], cz - me[3])}'
+                found.append({'item': item, 'kind': k, 'where': where + ' (no exact spot in the data)', '_d': d})
+            elif m:
+                place = next((pl for w in place_words(m.group('where')) for pl in idx.find(w, 1)), None)
+                if place and place.world and place.world[0] == me[0]:
+                    d = ((place.world[1] - me[1]) ** 2 + (place.world[3] - me[3]) ** 2) ** 0.5
+                    if d <= 400:
+                        found.append({'item': item, 'kind': k, 'where': m.group('where'), 'distance_m': round(d),
+                                      'compass': compass(place.world[1] - me[1], place.world[3] - me[3]), '_d': d})
+        found.sort(key=lambda r: r['_d'])
+        seen, out = set(), []
+        for r in found:
+            if r['item'] not in seen:
+                seen.add(r['item'])
+                r.pop('_d')
+                out.append(r)
+            if len(out) >= limit:
+                break
+        return {'results': out, 'note': 'open-world pickups are only known by map square (256 m)'}
 
     def nearest_places(self, kind: str = 'site of grace', limit: int = 5) -> dict:
         """The places of a kind ('site of grace' or 'landmark') nearest the player, nearest first."""
