@@ -26,6 +26,16 @@ def get_eldenring() -> int:
             failed += 1
             print(f'  {name}.txt  FAILED: {e}')
     print(f'Saved to {er.DATA}' + (f' ({failed} failed)' if failed else ''))
+    from ..games.eldenring import wiki
+    try:  # the offline wiki (Fandom database dump, CC BY-SA), then its search index
+        wiki.DIR.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(wiki.DUMP_URL, timeout=120) as r:
+            wiki.DUMP_7Z.write_bytes(r.read())
+        stats = wiki.build()
+        print(f"  wiki: {stats['articles']:,} articles, {stats['aliases']:,} other names -> {wiki.DB}")
+    except Exception as e:
+        failed += 1
+        print(f'  wiki FAILED: {e}')
     return 1 if failed else 0
 
 
@@ -49,7 +59,14 @@ def get_voice() -> int:
     return 1 if failed else 0
 
 
-GAMES = {'eldenring': get_eldenring, 'voice': get_voice}
+def get_navmesh() -> int:
+    """Elden Ring's own navmeshes from the installed game (read-only), for walking routes: about
+    20 minutes once, 230 MB in .local/eldenring/navmesh/. See tools/get_navmesh.py."""
+    import subprocess
+    return subprocess.call([sys.executable, '-m', 'game_assistant.tools.get_navmesh', '--workers', '3'])
+
+
+GAMES = {'eldenring': get_eldenring, 'voice': get_voice, 'navmesh': get_navmesh}
 
 
 def main() -> int:

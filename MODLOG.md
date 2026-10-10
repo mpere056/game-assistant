@@ -338,3 +338,162 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   Tunnel Entrance 11 m south, 1 m lower; Gael Tunnel 129 m, "about 59 m above you".
 - Known limit: routes are planned on the top surface (downward rays), so the fairy can't lead into a
   cave or tunnel; it says where the place is and leaves the way down to the player.
+
+## 2026-10-10: plan: a second talk key for commands (auto-walk)
+- User: F9 stays "talk to Navi"; another key gives orders to the character ("go to the nearest site
+  of grace" and the character walks there on its own) while Navi still leads the way; Navi asks for
+  clarification when two places are about equally close or the order is vague.
+- Plan (docs/PLAN.md "Two talk keys"): F10 (`command_key`; F8 is the AoER bridge's switch key).
+  Command -> local rules or Haiku with a command prompt -> one action; ambiguity -> one spoken question
+  from Navi, answered on either key (10 s timeout); the same walkable route Navi guides along; an
+  auto-walk controller holds W/A/S/D toward the next waypoint relative to the camera; the planned
+  monitors (arrived with height, stuck, enemy near, fall, menu); instant takeover on any physical
+  movement key (injected input is told apart) or "stop". No jumps, ladders, lifts, swimming or Torrent
+  at first. New phase 4b; phase 4 is now the navigation and guiding part (built).
+
+## 2026-10-10: offline wiki, screen look, where am I / where is / items near me
+- User (screenshot of the chat): "Where's the Stormveil?" -> "the game data doesn't give its position";
+  "a weapon close by?" -> "I can't scan for loot nearby"; "how do I get up this cliff?" and "what's
+  that gust?" (a Spiritspring) unanswered. They want more data downloaded and indexed so Navi doesn't
+  search online, and questions like "what is there to do here?"; Spiritspring was an example of
+  "know what I'm looking at and answer".
+- Decisions: command key F10; auto-walk runs on long stretches; near enemies it keeps going, Navi warns.
+- Offline wiki (`games/eldenring/wiki.py`): the Elden Ring Fandom wiki's database dump (4 MB 7z, Feb
+  2026, CC BY-SA), unpacked with py7zr, parsed into 4,482 articles (Nightreign, unused content and
+  dialogue pages left out) with 2,667 other names, sections as plain text, infobox fields; SQLite FTS5
+  index (21 MB) in .local/eldenring/wiki/; lookups under 10 ms. Aspects map questions to sections
+  (fight -> Moveset/Phase/Strategy, here -> Sites of Grace/Bosses/NPCs/Notable Loot...). Table cell
+  attributes leaked into text; the fix first went in with a literal backspace (shell escaping of ),
+  found by checking the file's bytes.
+- New tools: wiki, where_am_i (nearest graces/landmarks + the wiki page for here), where_is (locate
+  without guiding), items_near_me (open-world pickups by map square; named places within 400 m),
+  look_at_screen (a JPEG of the game window, 1024 px, to Haiku; tool results may now be content blocks).
+- Live with real calls: "Where's Stormveil?" -> 1.5 km west, 208 m up; "a weapon close by?" ->
+  Moonveil, 145 m east in Gael Tunnel; "what is there to do around here?" -> Magma Wyrm, Moonveil,
+  Alexander, Somber Smithing Stones, Cross-Naginata; "how do I beat Margit?" -> moveset advice from
+  the wiki; no web searches; $0.0014-0.0024 each. 37 tests pass.
+- "What am I looking at": look_at_screen now sends the whole view plus the middle third zoomed, with
+  hints for easy-to-miss things (Spiritsprings, graces, lifts, fog walls, items, messages...), and the
+  prompt says to look before ever answering "just a wall". It only takes the picture when the game has
+  the keyboard focus: a live check with this chat over the game sent the chat window (Navi said so),
+  so a covered game now gets "click back into the game" instead. The Spiritspring itself is untested
+  until the game is in front.
+- The picture is now taken when the talk key goes down (on its own thread, so the microphone starts
+  at once), and look_at_screen uses it if the question comes within 30 s, once; otherwise it grabs
+  then. It shows what you were looking at when you started asking, and the grab is done by the time
+  Haiku asks. 39 tests pass.
+
+## 2026-10-10: Navi's speech bubble in the game
+- User: "make the text from navi appear in game as well... a cute chat bubble coming from navi with
+  the text streamed".
+- ui/bubble.py draws it with PIL at twice the size (smooth curves and text): white, light blue rim
+  (the fairy's colour), soft shadow, a tail toward the fairy; text wrapped to 30 % of the game width,
+  2.4 % of its height tall; long answers keep their last 6 lines. About 8 ms per drawing (37 ms before
+  the shadow blur and rim moved off the 2x picture).
+- One more layered click-through window in the overlay: "..." dots while Navi thinks, then the answer
+  typed in word by word as it streams (45 characters/s, faster if it falls behind), redrawn at most
+  every 40 ms; it follows the fairy smoothly, points at the edge marker when the fairy is off-screen,
+  flips left/below to stay inside the game window, stays 3 s + 0.05 s per character (max 12 s), fades
+  in 0.6 s. Arrivals and instant replies show too. Hidden whenever the game isn't in front.
+- Settings: speech_bubble (on), bubble_scale. Checked with a fake fairy and game window (window
+  state, not screenshots): thinking 80x69, the answer 399x91 at a 720p window, gone after ~8 s,
+  flipped inside the corner. 43 tests pass.
+
+## 2026-10-10: the Spiritspring stopped being recognised
+- User (screenshot, OBS running): "What is that in front of me? How do I use it?" -> an empty answer,
+  then "just a wall... a glowing blue light" twice with no new look. Asked whether OBS was the cause:
+  no.
+- Causes, from runtime/chat log and live checks:
+  1. MAX_TOKENS 300 includes adaptive thinking; thinking about the picture used it all -> empty
+     answer (stop_reason max_tokens). Now 1024, and an empty max_tokens answer says so.
+  2. The screen grab had Navi (the "glowing blue light") and the previous bubble over the gust.
+     Now ui/capture.py takes the game window's own pixels with PrintWindow(PW_CLIENTONLY |
+     PW_RENDERFULLCONTENT): no overlays, works even when the game is covered, ~30 ms. The first
+     match by client rect was the Discord overlay (a transparent window exactly over the game, so
+     the picture came back black and it fell back to the screen grab); layered, click-through and
+     tool windows are now skipped. The screen grab remains only as a fallback while focused.
+  3. Follow-up questions answered from the old picture in the history. Earlier pictures are now
+     replaced by "(picture removed)" (also saves ~1,200 tokens per request); earlier thinking blocks
+     are dropped with them, since they're signed against the conversation before them (400 error
+     otherwise).
+  4. On the clean picture Haiku said "waterfall": the hints now describe how a Spiritspring differs.
+  5. Then it hedged "the wiki didn't confirm it": wiki pages lost every {{template}}, including item
+     descriptions ({{Description|EN_line1=...}}), {{PAGENAME}}, {{ER}}, quotes and the drop, shop,
+     enemy and quest item tables. These are now expanded into text (about 3,000 descriptions came
+     back). Names match without accents ("Kale" -> Merchant Kalé, before: Mule). The index is built
+     beside the old one and swapped in at the next start, because the running assistant holds it.
+- Live: "What is that in front of me?" -> "a Spiritspring... jump into it on Torrent, it carries you
+  up the cliff". 43 tests pass.
+
+## 2026-10-10: "I can't see your inventory from here"
+- User: asked about the Spectral Steed Whistle with the inventory open; Navi said it couldn't see the
+  inventory. Log: it called search_game_data, not look_at_screen (the prompt only named scenery);
+  menus aren't detected from memory, and speech recognition heard "back proceed"/"Spectral Seed".
+- Now a word check (inventory, menu, map, equipment, key items, tab, "on my screen", "I have my X
+  open", "what does this say"...) attaches the picture to the question itself: no extra round trip
+  (1.4 s to the first word live). The prompt says menus can be read from the picture and never to
+  say it can't see the screen without looking. Pictures attached to questions are removed from the
+  history like tool pictures. Vocabulary: Spectral Steed Whistle, Spiritspring, inventory, Key Items,
+  Stonesword Key, Kalé.
+- Live (inventory closed at the time): "I have my inventory open. What can you see?" -> "I don't see
+  an inventory open... the game world"; "what is on my screen?" -> "A Spiritspring, just to your
+  right". 43 tests pass.
+
+## 2026-10-10: navigation from the game's own navmesh (research and first build)
+- User: guiding "is way better but not always working"; it must be reliable before commands make the
+  character walk. Screenshot: "lead me to the Crucible Knight" (Stormhill Evergaol, 106 m NW, 47 m up)
+  -> "I can't find a way".
+- Diagnosis (runtime grid pictures): the evergaol is on a plateau ringed by cliffs; the way up is
+  outside the raycast planner's 150 m grid, so its best was the cliff foot (62 m short). One run also
+  failed because 12 wall-check rounds ran out among tree trunks (now 40). Coarse wide grids (12 m
+  cells over 600 m) find "routes" but a 40 m cliff looks like three 10 m steps there; beyond ~300 m
+  most rays find no floor. Raycasting can't be made reliable for auto-walk.
+- User chose: the game's navmesh. First the archives were not decrypted (the action was blocked and
+  the user asked); the user then allowed decrypting the archives, any modding tool, and reading the
+  navmesh from memory.
+- Archive layer (games/eldenring/archive.py), format from Smithbox (MIT): Data0-3.bhd RSA public-key
+  decrypt (256 -> 255-byte blocks, pure Python pow; ~35 s once, cached decrypted in .local), BHD5 index,
+  64-bit name hash (x0x85), AES-128-ECB ranges (`cryptography` 50.0.2 added), DCX/KRAK via the game's
+  oo2core_6_win64.dll (data at 0x4C), BND4. Keys and file-name list are downloaded into .local, not
+  committed. 86,585 of 130,875 dictionary names found; 695 navmesh containers (304 more are DLC, not
+  installed). Mistakes on the way: the key text was sliced at an earlier mention of its name; the DCX
+  data offset formula was wrong (Oodle returned 0); a heredoc put a literal NUL into the source.
+- Navmesh files: /map/mAA/<block>/<block>.nvmhktbnd.dcx, a BND4 of Havok 2018 tagfiles: n* pieces
+  (detailed hkaiNavMesh + query tree + user edges), o* pieces (a coarser copy, probably for big
+  characters), 9xxxxx pieces (empty). Open-world tiles are one piece of 10-12k faces; tile-local
+  coordinates run -128..128 around the tile centre (world = tile * 256 + local). Check: the player
+  stood 2.08 m from the centre of the face under them (m60_42_37_00).
+- Havok reader: Soulstruct (Grimrukh, GPL-3.0, Python 3.13) in its own venv under .local/tools,
+  installed from GitHub (PyPI 1.5.0 lacks hkcdStaticAabbTree; and hk2018/__init__ never imports
+  _hkcd, so the converter registers those types itself). uv's 3.13 link failed; the venv is made from
+  the downloaded interpreter directly. tools/navmesh_convert.py (runs there) writes one .npz per block:
+  vertices, faces (+faceData), edges (opposite face, flags, edgeData). ~5-10 s per open-world tile.
+- tools/get_navmesh.py does it all (keys, tool venv, extract, convert in 3 workers). A first run was
+  stopped to add faceData; then two runs shared one temp folder and each deleted it under the other,
+  leaving 561 empty results: temp folders are now per run, the converter refuses a missing folder,
+  empties were deleted and re-converted.
+- core/navmesh.py (game-independent): locate the face under a point (or the nearest edge within 6 m),
+  A* over faces (climbing costs extra), simple stupid funnel, corners pushed 0.7 m off the wall along
+  the turn's bisector. Tests: L corridor (one corner, 0.7 m off it), open field (straight), a gap
+  (no route), two levels (the right one is chosen), off-mesh start.
+- games/eldenring/navmesh.py: blocks to world coordinates (tiles by their index, dungeons by the
+  game's conversion rows), joined where boundary edges of different blocks lie on each other (0.35 m
+  sideways, 1 m height, 0.3 m overlap). adapter.route() (CAP_NAVMESH when navmeshes are extracted)
+  plans in world coordinates with 300 m, then 900 m margins; the companion's guide mode uses it first,
+  raycasting as fallback; the status line shows which planner made the route.
+- First live try (only tile 42_37 converted then): start face 1.6 m from the player, evergaol face
+  0.2 m from its marker, no connection inside the one tile (the plateau), as expected.
+- Full extraction: 695 blocks, 4,525,403 faces, 232 MB, 874 s for the last 561 (3 workers). 150
+  open-world tiles are empty: their pieces are the 5 KB empty placeholder (sea at the map's edges).
+- Face data on tile 42_37 (drawn): 0x20000 = the Stormhill Evergaol arena (a 60 m circle); 0x1000000 =
+  small patches in ruins and a tower (unknown). Routes to a goal that can't be walked to now end at the
+  nearest reachable point (reaches_goal False) instead of failing.
+- adapter.route from the player near Stormhill: Stormhill Evergaol 546 m (78 m straight), 4.0 s
+  (mesh of 9 tiles + 9 dungeons, 173,139 faces, 609 joins; A* 0.15 s); Gatefront Ruins 111 m and
+  Church of Elleh 198 m, 0.03 s each (cached mesh); Stormveil Castle 712 m, stops 146 m short, 13 s
+  (the 900 m retry). Duplicate waypoints (< 0.3 m apart) are dropped. 48 tests pass.
+- User restarted the assistant and tried navmesh guiding in game: "things are working really well".
+- Compared with Baritone (Minecraft): same core (A* + steering + re-planning); its speed comes from the
+  ready-made voxel grid and time-limited, segmented planning. User liked "plan for about a second,
+  start on the best partial route, plan further while moving" -> planned next, with joining the
+  blocks once at extraction time and movement types from the navmesh's user edges.

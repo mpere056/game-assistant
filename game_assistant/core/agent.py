@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -17,11 +18,11 @@ import anthropic
 
 from . import lookat, nav
 from .companion import Companion
-from .interface import CAP_KNOWLEDGE, CAP_PLACES, CAP_RAYCAST, CAP_SEARCH, GameAdapter, GameNotRunning, dist, dot, normalize, sub
+from .interface import CAP_KNOWLEDGE, CAP_PLACES, CAP_RAYCAST, CAP_SCREEN, CAP_SEARCH, GameAdapter, GameNotRunning, dist, dot, normalize, sub
 from .spend import SpendGuard
 
 MODEL = 'claude-haiku-5-5'
-MAX_TOKENS = 300          # answers are short and spoken; this caps a runaway reply
+MAX_TOKENS = 1024         # thinking included: at 300, thinking about a picture used it all (an empty answer)
 MAX_TOOL_ROUNDS = 4
 MAX_HISTORY_MESSAGES = 60  # past this, start a fresh conversation (keeps every request small)
 
@@ -45,8 +46,21 @@ How to answer:
 - Facts are base values from the game data; mention that only if asked how exact they are.
 - For "where is X", "where do I find X", "what drops X": call search_game_data and give the one or two
   most useful places, not the whole list, unless asked for all.
-- web_search (if available) only for what the game data can't say: attack patterns, boss strategies,
-  lore, questlines, puzzles, or when search_game_data finds nothing. Say briefly it's from the wiki.
+- wiki: an offline copy of the Elden Ring wiki. Use it for attack patterns and boss strategies
+  (aspect fight), where to find things (location), what a place holds (here), questlines (quest),
+  mechanics and anything else the game data can't say. web_search only if the wiki has nothing.
+- "What is there to do here?", "where am I?": call where_am_i, then wiki with its wiki_page_for_here
+  and aspect "here". "Where is X?": where_is. "Anything good near me?": items_near_me.
+- look_at_screen shows you the game picture. Use it when the question is about something visible that
+  game_view_now doesn't cover: scenery, a structure, a gust or glow, an item on the ground, a sign, a
+  puzzle. Then name what you see and use the wiki for what it does ("that's a Spiritspring: ...").
+  For "what is that?" or "how do I get up/past this?", if the game facts only show ground or a wall
+  at the crosshair, always look_at_screen before answering: never answer "just a wall". Pictures
+  from earlier questions are gone: look again for each new question about what is visible. Navi
+  (the fairy) is not in the picture.
+- Menus: you can read the inventory, equipment, map and other menus from the picture (a picture comes
+  with the question when they mention one). Never say you can't see their screen or inventory
+  without having looked.
 - If what they mean is unclear (two enemies at the crosshair), ask one short question.
 - If a place has a height_note, mention it briefly ("it's down in the tunnel, about 60 metres below").
 - Round distances ("about 50 metres"). Directions are relative to the camera: ahead, left, right,
@@ -146,6 +160,49 @@ TOOLS = [
         },
     },
     {
+        'name': 'wiki',
+        'description': 'The offline Elden Ring wiki. topic: a page name (boss, enemy, item, place, NPC, mechanic). '
+                       'aspect: overview, location (where to find / how to get), fight (moveset, strategy), here '
+                       '(what a place holds: graces, bosses, NPCs, loot), walkthrough, quest, stats.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {'topic': {'type': 'string'},
+                           'aspect': {'type': 'string', 'enum': ['overview', 'location', 'fight', 'here', 'walkthrough',
+                                                                 'quest', 'stats']}},
+            'required': ['topic'],
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'where_am_i',
+        'description': "The player's surroundings by name: nearest Sites of Grace and landmarks with distance and "
+                       'direction, the world, and the wiki page that best describes this spot.',
+        'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+    },
+    {
+        'name': 'where_is',
+        'description': 'Where a named place (or the place an item is found) is from the player: distance, compass '
+                       'direction, height difference. Does not move you; use guide_to to lead the way.',
+        'input_schema': {'type': 'object', 'properties': {'place': {'type': 'string'}}, 'required': ['place'],
+                         'additionalProperties': False},
+    },
+    {
+        'name': 'items_near_me',
+        'description': 'Items, weapons, armour, talismans, spells and Ashes of War picked up near the player '
+                       '(open world: by map square; named places within about 400 m).',
+        'input_schema': {
+            'type': 'object',
+            'properties': {'kind': {'type': 'string', 'enum': ['weapon', 'armour', 'talisman', 'item', 'ash of war', 'spell']}},
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'look_at_screen',
+        'description': 'A picture of the game screen right now, for questions about something visible that the '
+                       'game facts do not cover (scenery, structures, effects like gusts or glows, items, signs).',
+        'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+    },
+    {
         'name': 'character_info',
         'description': 'Facts from the game data about a character type, by the type_id another tool returned: '
                        'name, base HP, damage taken per damage type, status buildup needed, immunities.',
@@ -158,6 +215,35 @@ TOOLS = [
     },
 ]
 
+
+# A picture taken when the talk key went down is used if the question arrives within this many
+# seconds (holding the key while talking, plus speech recognition).
+EARLY_SCREEN_MAX_AGE = 30.0
+
+# Questions about something on the screen that the game facts can't give (menus are not read from
+# memory yet): the picture goes with the question itself, which saves a round trip. Haiku chose not
+# to look when asked about an open inventory and said it couldn't see it.
+SCREEN_WORDS = re.compile(
+    r"\b(inventory|menu|map|equipment|equipped|key items?|items? tab|tab|status|stats|level up|"
+    r"on (my|the) screen|this (screen|menu|tab|page|item|message)|i have (the|my) \w+ open|"
+    r"what does (this|it) say|read (this|that))\b", re.I)
+
+LOOK_HINTS = """Picture 1: the whole game screen now. Picture 2: its middle third, zoomed (the crosshair is its centre).
+Name the most notable thing near the centre, as the game calls it. Elden Ring things that are easy to miss:
+- Spiritspring: a tall column of pale white mist or wind against a cliff, rising from a misty swirl on the ground. It
+  looks like a waterfall, but in Elden Ring a white misty column at a cliff foot is usually a Spiritspring (jump into it
+  on Torrent to be carried up the cliff). Say waterfall only if you see falling water landing in a pool or stream.
+- Site of Grace: a small golden light with gold rays pointing the way; Stake of Marika: a wooden stake with a faint glow.
+- Lift: a round stone platform with a pressure plate or a small pedestal; Waygate / Sending Gate: a glowing portal or archway.
+- Fog wall: a golden or white mist in a doorway (a boss or area); an Evergaol: a stone circle with a blue barrier.
+- Items on the ground: small white-gold glowing motes; messages: glowing orange writing on the ground; bloodstains: red pools.
+- Chests, Imp statues (need Stonesword Keys), Minor Erdtrees, ruins, churches, caves, catacomb doors, Divine Towers.
+Then use the wiki for what it does or how to use it. If nothing stands out, say what is there in a few words."""
+
+
+
+def _block_type(b) -> str | None:
+    return b.get('type') if isinstance(b, dict) else getattr(b, 'type', None)
 
 @dataclass
 class Answer:
@@ -195,7 +281,10 @@ class Agent:
                       if (t['name'] != 'search_game_data' or CAP_SEARCH in adapter.capabilities)
                       and (t['name'] != 'fairy' or companion is not None)
                       and (t['name'] != 'guide_to' or (companion is not None and CAP_PLACES in adapter.capabilities))
-                      and (t['name'] != 'nearest_places' or CAP_PLACES in adapter.capabilities)]
+                      and (t['name'] not in ('nearest_places', 'where_am_i', 'where_is', 'items_near_me')
+                           or CAP_PLACES in adapter.capabilities)
+                      and (t['name'] != 'wiki' or getattr(adapter, 'wiki', None) is not None)
+                      and (t['name'] != 'look_at_screen' or CAP_SCREEN in adapter.capabilities)]
         sources = getattr(adapter, 'web_sources', None)
         if sources:  # Anthropic's server-side web search, limited to the game's wikis ($0.01 per search)
             self.tools.append({'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 2,
@@ -329,23 +418,116 @@ class Agent:
             r.pop('position', None)  # internal
         return res
 
+    def tool_wiki(self, inp: dict) -> dict:
+        w = getattr(self.adapter, 'wiki', None)
+        if w is None or not w.ok:
+            return {'error': 'no offline wiki for this game (run Get-GameData.bat)'}
+        return w.lookup(str(inp.get('topic') or ''), inp.get('aspect') or 'overview')
+
+    def tool_where_am_i(self, _inp: dict) -> dict:
+        return self.adapter.where_am_i()
+
+    def tool_where_is(self, inp: dict) -> dict:
+        res = self.adapter.locate(str(inp.get('place') or ''))
+        for r in res.get('results', []):
+            r.pop('position', None)
+        return res
+
+    def tool_items_near_me(self, inp: dict) -> dict:
+        return self.adapter.items_near_me(inp.get('kind'))
+
+    def grab_screen(self) -> list | dict:
+        """Two JPEGs of the game window (only the game's own picture): the whole view, about 1024 px
+        wide, and the middle third at full detail, so small or faint things near the crosshair show."""
+        import base64
+        import io
+        from PIL import ImageGrab
+
+        from ..ui import capture
+        snap = self.adapter.snapshot()
+        scr = snap.screen
+        if scr is None:
+            return {'error': 'the game window position is unknown'}
+        # The game's own pixels: no fairy, no speech bubble, nothing covering it.
+        hwnd = capture.find_window(scr.x, scr.y, scr.width, scr.height)
+        img = capture.window_picture(hwnd) if hwnd else None
+        if img is None:  # a screen grab instead: only while the game is in front (never other windows)
+            if not scr.focused:
+                return {'error': 'the game is not the active window, so its picture would show other windows; '
+                                 'ask the player to click back into the game and ask again'}
+            img = ImageGrab.grab(bbox=(scr.x, scr.y, scr.x + scr.width, scr.y + scr.height), all_screens=True).convert('RGB')
+        w, h = img.size
+        centre = img.crop((w // 3, h // 3, w - w // 3, h - h // 3))
+        if centre.width > 768:
+            centre = centre.resize((768, round(centre.height * 768 / centre.width)))
+        if w > 1024:
+            img = img.resize((1024, round(h * 1024 / w)))
+
+        def block(im):
+            buf = io.BytesIO()
+            im.save(buf, 'JPEG', quality=82)
+            return {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg',
+                                                'data': base64.b64encode(buf.getvalue()).decode('ascii')}}
+        return [block(img), block(centre), {'type': 'text', 'text': LOOK_HINTS}]
+
+    def capture_screen(self) -> None:
+        """Take the picture now (the talk key went down), so look_at_screen shows what the player was
+        looking at when they started asking, and doesn't spend time grabbing it later."""
+        try:
+            pic = self.grab_screen()
+        except Exception as e:  # the game may be closed: look_at_screen will say so later
+            pic = {'error': f'the screen could not be captured: {e}'}
+        self._early_screen = (time.monotonic(), pic)
+
+    def tool_look_at_screen(self, _inp: dict):
+        early, self._early_screen = getattr(self, '_early_screen', None), None
+        if early and time.monotonic() - early[0] < EARLY_SCREEN_MAX_AGE and isinstance(early[1], list):
+            return early[1]
+        return self.grab_screen()
+
     def _run_tool(self, name: str, inp: dict) -> tuple[str, bool]:
         fn = {'nearest_places': self.tool_nearest_places, 'look_at': self.tool_look_at, 'nearby_characters': self.tool_nearby_characters,
               'character_info': self.tool_character_info, 'search_game_data': self.tool_search_game_data,
-              'fairy': self.tool_fairy, 'guide_to': self.tool_guide_to}.get(name)
+              'fairy': self.tool_fairy, 'guide_to': self.tool_guide_to, 'wiki': self.tool_wiki,
+              'where_am_i': self.tool_where_am_i, 'where_is': self.tool_where_is,
+              'items_near_me': self.tool_items_near_me, 'look_at_screen': self.tool_look_at_screen}.get(name)
         if fn is None:
             return f'unknown tool {name}', True
         try:
-            return json.dumps(fn(inp if isinstance(inp, dict) else {})), False
+            out = fn(inp if isinstance(inp, dict) else {})
+            return (out if isinstance(out, list) else json.dumps(out)), False  # a list: content blocks (an image)
         except (GameNotRunning, TimeoutError, RuntimeError) as e:
             return f'the game could not be read: {e}', True
 
     # ---- one question ----
 
+    def _drop_old_pictures(self) -> None:
+        """Pictures from earlier questions become a note: they are out of date (the model answered
+        from an old one instead of looking again), and each costs about 1,200 tokens per request."""
+        changed = False
+        for m in self.messages:
+            if m['role'] != 'user' or not isinstance(m['content'], list):
+                continue
+            if any(_block_type(b) == 'image' for b in m['content']):  # attached to a question
+                m['content'] = [b for b in m['content'] if _block_type(b) != 'image'] + [
+                    {'type': 'text', 'text': '(picture removed)'}]
+                changed = True
+            for block in m['content']:
+                if isinstance(block, dict) and block.get('type') == 'tool_result' and isinstance(block.get('content'), list):
+                    if any(c.get('type') == 'image' for c in block['content']):
+                        block['content'] = [{'type': 'text', 'text': '(picture removed)'}]
+                        changed = True
+        if changed:  # thinking blocks are signed against what came before them: earlier ones must go too
+            for m in self.messages:
+                if m['role'] == 'assistant' and isinstance(m['content'], list):
+                    kept = [b for b in m['content'] if _block_type(b) not in ('thinking', 'redacted_thinking')]
+                    m['content'] = kept or [{'type': 'text', 'text': '...'}]
+
     def ask(self, text: str, on_text: Callable[[str], None] = lambda s: None) -> Answer:
         ans = Answer()
         if len(self.messages) > MAX_HISTORY_MESSAGES:
             self.messages = []
+        self._drop_old_pictures()
         # Attach what is at the crosshair right now, so the most common questions ("what is that?")
         # need one model call instead of two. It costs about 150 input tokens.
         try:
@@ -359,7 +541,18 @@ class Agent:
                 view = json.dumps({'error': 'no character in the world right now (loading, menu or title screen)'})
         except (GameNotRunning, TimeoutError, RuntimeError) as e:
             view = json.dumps({'error': f'the game could not be read: {e}'})
-        self.messages.append({'role': 'user', 'content': f'<game_view_now>{view}</game_view_now>\n\n{text}'})
+        question = f'<game_view_now>{view}</game_view_now>\n\n{text}'
+        picture = None
+        if CAP_SCREEN in self.adapter.capabilities and SCREEN_WORDS.search(text):
+            try:
+                picture = self.tool_look_at_screen({})
+            except (GameNotRunning, TimeoutError, RuntimeError, OSError):
+                picture = None  # the model can still ask for one
+        if isinstance(picture, list):
+            ans.tools_used.append('picture')
+            self.messages.append({'role': 'user', 'content': picture + [{'type': 'text', 'text': question}]})
+        else:
+            self.messages.append({'role': 'user', 'content': question})
         t0 = time.perf_counter()
         for _ in range(MAX_TOOL_ROUNDS):
             warning = self.guard.check()  # raises SpendCapReached at the cap
@@ -384,6 +577,8 @@ class Agent:
                 break
             if msg.stop_reason == 'pause_turn':  # a long server-side web search: let it continue
                 continue
+            if msg.stop_reason == 'max_tokens' and not ans.text.strip():
+                ans.notice = 'The model ran out of room before answering; ask again.'
             if msg.stop_reason != 'tool_use':
                 break
             results = []

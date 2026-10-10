@@ -138,6 +138,7 @@ CAP_SCREEN = 'screen'          # Snapshot.screen is filled (overlays can be draw
 CAP_SEARCH = 'search'          # find enemies, items and places by name (search())
 CAP_ACTIONS = 'actions'        # phase 3
 CAP_PLACES = 'places'          # locate(name): where a named place is from the player, for guiding
+CAP_NAVMESH = 'navmesh'        # route(start, goal): a walkable route over the game's own navmesh
 
 
 class GameAdapter(Protocol):
@@ -159,6 +160,11 @@ class GameAdapter(Protocol):
 
     def nearest_places(self, kind: str = 'site of grace', limit: int = 5) -> dict:
         """The places of a kind nearest the player (same result shape as locate()). With CAP_PLACES."""
+
+    def route(self, start: Vec3, goal: Vec3):
+        """A walkable route over the game's own navmesh (in the snapshot's coordinates): an object
+        with waypoints, reaches_goal and length_m, or None (no navmesh here, or no walking way).
+        Only for adapters listing CAP_NAVMESH."""
 
     def search(self, kind: str, query: str) -> dict:
         """Find an 'enemy', 'item' or 'place' by name: exact facts (where items are found, which

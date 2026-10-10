@@ -32,7 +32,7 @@ from .interface import RayHit, Vec3
 Raycast = Callable[[list[tuple[Vec3, Vec3]]], list[RayHit]]
 
 KNEE, CHEST = 0.5, 1.4
-MAX_ROUNDS = 12
+MAX_ROUNDS = 40  # wall-check rounds; in a forest each round finds trunks on the new route (12 ran out)
 
 
 @dataclass(frozen=True)

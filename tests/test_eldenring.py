@@ -104,3 +104,24 @@ class FactsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WikiTextTest(unittest.TestCase):
+    def test_templates_become_words(self):
+        from game_assistant.games.eldenring.wiki import clean
+        text = ("'''{{PAGENAME}}''' is an [[Info Item]] in {{ER}}.\n"
+                "{{Description\n|EN_line1=\nJump while on horseback near a spiritspring.\n}}\n"
+                "{{Quote | speaker = Melina | text = I offer you an accord.}}\n"
+                "{{Drops table|row\n| name = [[Bloodhound Claws]]\n| quantity = 1\n| notes = Once\n}}\n"
+                "Deals {{dmg|fire}} damage. {{icon|hp|link=HP}}{{Fairuse}}")
+        out = clean(text, 'About Spiritspring Jumping')
+        self.assertIn('About Spiritspring Jumping is an Info Item in Elden Ring.', out)
+        self.assertIn('Jump while on horseback near a spiritspring.', out)
+        self.assertIn('"I offer you an accord." (Melina)', out)
+        self.assertIn('name: Bloodhound Claws, quantity: 1, notes: Once', out)
+        self.assertIn('Deals fire damage.', out)
+        self.assertNotIn('{{', out)
+
+    def test_names_ignore_accents(self):
+        from game_assistant.games.eldenring.wiki import _fold
+        self.assertEqual(_fold(' Kalé '), 'kale')

@@ -102,6 +102,10 @@ class Companion:
         self.trail: list[tuple[float, Vec3, bool]] = []  # (time, world position, moving fast), newest last
         self._sight_ahead: float | None = None  # guide mode: how far ahead the player can still see it
         self.plan_async = True        # plan routes on a background thread (tests plan inline)
+        # The game's own navmesh, when the adapter has one (adapter.route): exact walkable routes of
+        # any length. The raycast grids (nav.py) remain the fallback.
+        self.route_fn = None
+        self.route_source = ''        # 'navmesh' or 'raycast': which planner made the current route
         self.route: list[Vec3] | None = None    # guide mode: walkable waypoints toward the goal
         self.route_complete = False   # the route reaches the goal (else it ends as close as the area allows)
         self._route_time = 0.0
@@ -151,6 +155,18 @@ class Companion:
         gen = self._plan_gen
 
         def work():
+            if self.route_fn is not None:
+                try:
+                    route = self.route_fn(start, goal)
+                except Exception:
+                    route = None
+                if route is not None and len(route.waypoints) >= 2:
+                    if gen == self._plan_gen and self.mode == 'guide':
+                        self.route, self.route_complete = route.waypoints, route.reaches_goal
+                        self.route_source = 'navmesh'
+                        self._route_time = self.t
+                    self._planning = False
+                    return
             far = math.hypot(goal[0] - start[0], goal[2] - start[2]) > 250.0
             best, best_gain = None, -math.inf
             for profile in ((nav.WIDE, nav.FAR) if far else (nav.WIDE,)):
@@ -168,6 +184,7 @@ class Companion:
             if gen == self._plan_gen and self.mode == 'guide':
                 if best is not None and best_gain >= NO_PROGRESS:
                     self.route, self.route_complete = best.waypoints, best.reaches_goal
+                    self.route_source = 'raycast'
                 elif not self._said_no_way:  # walled in by cliffs or water: say so instead of pointing over them
                     self._said_no_way = True
                     self.route = None

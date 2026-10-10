@@ -10,6 +10,10 @@ its own small window. The companion keeps the trail in the world and projects it
 every frame (a trail kept in screen positions smeared across the screen when the camera turned), and
 hands the dots over with show(). When the fairy is off-screen, a pulsing marker sits at the screen's
 edge in its direction.
+
+Navi's words appear in a speech bubble next to it (ui/bubble.py): "..." while it thinks, then the
+answer typed in as it streams, word by word, and a fade a few seconds after the last word. The bubble
+stays inside the game window and points at the fairy (or its edge marker when it is off-screen).
 """
 from __future__ import annotations
 
@@ -36,6 +40,11 @@ FLAPS = [1.0, 0.72, 0.42, 0.72]          # wing length per frame
 COLOR = (120, 214, 255)                  # Navi-like light blue (R, G, B)
 TRAIL_DOTS = 30                          # windows for trail dots (the companion decides where)
 EDGE_SIZE = 32                           # the off-screen marker's size, px
+BUBBLE_FONT = 0.024                      # text height as a share of the game window's height
+BUBBLE_WIDTH = 0.3                       # widest line as a share of the game window's width
+BUBBLE_CHARS_PER_S = 45                  # typing speed; faster when the text runs ahead
+BUBBLE_LINGER = (3.0, 0.05, 12.0)        # seconds shown after the last word: base + per character, max
+BUBBLE_FADE = 0.6                        # seconds
 
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 
@@ -74,6 +83,8 @@ gdi32.CreateDIBSection.restype = wt.HBITMAP
 gdi32.CreateDIBSection.argtypes = [wt.HDC, ctypes.POINTER(BITMAPINFOHEADER), wt.UINT, ctypes.POINTER(ctypes.c_void_p),
                                    wt.HANDLE, wt.DWORD]
 gdi32.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+gdi32.DeleteObject.argtypes = [wt.HGDIOBJ]
+gdi32.DeleteDC.argtypes = [wt.HDC]
 kernel32.GetModuleHandleW.restype = wt.HMODULE
 
 
@@ -140,6 +151,9 @@ class FairyOverlay:
         self._thread: threading.Thread | None = None
         self.ready = threading.Event()
         self.error: str | None = None
+        self.bubble_scale = 1.0
+        self._bounds: tuple | None = None   # the game window (x, y, w, h) while it is in front
+        self._bubble = {'n': 0, 'text': '', 'thinking': False, 'done': None}
 
     # ---- called from any thread ----
 
@@ -162,6 +176,36 @@ class FairyOverlay:
     def hide(self) -> None:
         with self._lock:
             self._want = None
+
+    def set_bounds(self, bounds: tuple | None) -> None:
+        """The game window (x, y, width, height) while it is in front, or None: hides the bubble."""
+        with self._lock:
+            self._bounds = bounds
+
+    # Navi's speech bubble ('n' counts answers, so a new one starts typing from the beginning).
+    def bubble_think(self) -> None:
+        with self._lock:
+            self._bubble = {'n': self._bubble['n'] + 1, 'text': '', 'thinking': True, 'done': None}
+
+    def bubble_add(self, text: str) -> None:
+        with self._lock:
+            b = self._bubble
+            b['text'] += text
+            b['thinking'] = False
+
+    def bubble_done(self) -> None:
+        with self._lock:
+            self._bubble['thinking'] = False
+            self._bubble['done'] = time.perf_counter()
+
+    def bubble_say(self, text: str) -> None:
+        """A whole line at once (an arrival, an instant command's reply)."""
+        with self._lock:
+            self._bubble = {'n': self._bubble['n'] + 1, 'text': text, 'thinking': False, 'done': time.perf_counter()}
+
+    def bubble_clear(self) -> None:
+        with self._lock:
+            self._bubble = {'n': self._bubble['n'] + 1, 'text': '', 'thinking': False, 'done': None}
 
     def close(self) -> None:
         self._stop = True
@@ -188,7 +232,9 @@ class FairyOverlay:
         edge_win = user32.CreateWindowExW(style, 'GameAssistantFairy', 'Fairy marker', WS_POPUP, 0, 0, 16, 16,
                                           None, None, inst, None)
         hwnd = user32.CreateWindowExW(style, 'GameAssistantFairy', 'Fairy', WS_POPUP, 0, 0, 32, 32, None, None, inst, None)
-        if not hwnd or not edge_win or not all(trail_wins):
+        bubble_win = user32.CreateWindowExW(style, 'GameAssistantFairy', 'Fairy speech', WS_POPUP, 0, 0, 32, 32,
+                                            None, None, inst, None)
+        if not hwnd or not edge_win or not bubble_win or not all(trail_wins):
             raise OSError(f'could not create the overlay windows ({ctypes.get_last_error()})')
         screen = user32.GetDC(None)
         sprites = {}
@@ -226,6 +272,77 @@ class FairyOverlay:
             user32.UpdateLayeredWindow(win, screen, ctypes.byref(pos), ctypes.byref(sz), sprites[(n, key)],
                                        ctypes.byref(src), 0, ctypes.byref(blend), ULW_ALPHA)
 
+        bub = {'shown': False, 'key': None, 'dc': None, 'bmp': None, 'size': (0, 0), 'tip': (0, 0), 'n': -1,
+               'chars': 0.0, 'typed_at': 0.0, 'anchor': None, 'last_t': time.perf_counter(), 'rendered_at': 0.0}
+
+        def bubble_frame(main, edge, now):
+            """Type, draw, place and fade the speech bubble (one frame)."""
+            from . import bubble as art
+            with self._lock:
+                b = dict(self._bubble)
+                bounds = self._bounds
+            dt, bub['last_t'] = now - bub['last_t'], now
+            text = b['text'].strip()
+            if b['n'] != bub['n']:  # a new answer
+                bub.update(n=b['n'], chars=0.0, typed_at=now)
+            backlog = len(text) - bub['chars']
+            if backlog > 0:
+                bub['chars'] = min(len(text), bub['chars'] + dt * max(BUBBLE_CHARS_PER_S, backlog * 3))
+                bub['typed_at'] = now
+            opacity = 1.0
+            if b['done'] is not None and bub['chars'] >= len(text):
+                linger = min(BUBBLE_LINGER[2], BUBBLE_LINGER[0] + BUBBLE_LINGER[1] * len(text))
+                opacity = 1.0 - (now - max(b['done'], bub['typed_at']) - linger) / BUBBLE_FADE
+            if bounds is None or opacity <= 0 or (not text and not b['thinking']):
+                if bub['shown']:
+                    user32.ShowWindow(bubble_win, SW_HIDE)
+                    bub['shown'] = False
+                return
+            shown_text = text[:int(bub['chars'])]
+            if len(shown_text) < len(text):  # whole words only, so lines don't jump around
+                cut = shown_text.rfind(' ')
+                shown_text = shown_text[:cut] if cut > 0 else ''
+            bx, by, bw, bh = bounds
+            font_px = max(14, round(bh * BUBBLE_FONT * self.bubble_scale))
+            max_w = max(200, round(bw * BUBBLE_WIDTH * self.bubble_scale))
+            # Where it points: just above-right of the fairy, its edge marker, or low in the middle.
+            if main is not None:
+                target = (main[0] + main[2] * 0.3, main[1] - main[2] * 0.3)
+            elif edge is not None:
+                target = (edge[0], edge[1])
+            else:
+                target = (bx + bw / 2, by + bh * 0.78)
+            a = bub['anchor']
+            k = 1.0 if a is None or not bub['shown'] else min(1.0, dt / 0.15)  # follow smoothly: the fairy bobs
+            a = target if a is None else (a[0] + (target[0] - a[0]) * k, a[1] + (target[1] - a[1]) * k)
+            bub['anchor'] = a
+            dots = int(now * 4) % 3 if not shown_text else -1
+            tail = art.choose_tail(bub['size'], a, bounds) if bub['dc'] else 'bl'
+            key = (shown_text, dots, font_px, max_w, tail)
+            if key != bub['key'] and (now - bub['rendered_at'] > 0.04 or bub['dc'] is None):
+                w, h, data, tip = art.render(shown_text, font_px, max_w, tail, dots)
+                dc = gdi32.CreateCompatibleDC(screen)
+                bi = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER), biWidth=w, biHeight=-h, biPlanes=1,
+                                      biBitCount=32)
+                bits = ctypes.c_void_p()
+                bmp = gdi32.CreateDIBSection(screen, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
+                ctypes.memmove(bits, data, len(data))
+                gdi32.SelectObject(dc, bmp)
+                if bub['dc']:
+                    gdi32.DeleteDC(bub['dc'])
+                    gdi32.DeleteObject(bub['bmp'])
+                bub.update(dc=dc, bmp=bmp, size=(w, h), tip=tip, key=key, rendered_at=now)
+            x, y = art.position(bub['size'], bub['tip'], a, bounds)
+            pos = wt.POINT(x, y)
+            sz = wt.SIZE(*bub['size'])
+            src = wt.POINT(0, 0)
+            blend = BLENDFUNCTION(0, 0, int(255 * max(0.0, min(1.0, opacity))), AC_SRC_ALPHA)
+            user32.UpdateLayeredWindow(bubble_win, screen, ctypes.byref(pos), ctypes.byref(sz), bub['dc'],
+                                       ctypes.byref(src), 0, ctypes.byref(blend), ULW_ALPHA)
+            if not bub['shown']:
+                user32.ShowWindow(bubble_win, SW_SHOWNOACTIVATE)
+                bub['shown'] = True
+
         def hide_trail():
             for i in range(TRAIL_DOTS):
                 if trail_shown[i]:
@@ -238,6 +355,10 @@ class FairyOverlay:
             with self._lock:
                 want = self._want
             main, trail, edge = want if want is not None else (None, [], None)
+            try:
+                bubble_frame(main if main is not None and main[3] > 0.02 else None, edge, time.perf_counter())
+            except Exception as e:  # a broken bubble must not stop the fairy
+                self.error = f'speech bubble: {type(e).__name__}: {e}'
             if main is None and not trail and edge is None:
                 if shown:
                     user32.ShowWindow(hwnd, SW_HIDE)
@@ -292,8 +413,8 @@ class FairyOverlay:
                 user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
                 shown = True
             if frame % 30 == 0:  # stay above the game (it can take topmost back)
-                for w in trail_wins + [edge_win, hwnd]:
+                for w in trail_wins + [edge_win, hwnd, bubble_win]:
                     user32.SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
             time.sleep(1 / 120)
-        for w in trail_wins + [edge_win, hwnd]:
+        for w in trail_wins + [edge_win, hwnd, bubble_win]:
             user32.DestroyWindow(w)

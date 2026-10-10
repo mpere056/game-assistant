@@ -7,5 +7,7 @@ faster-whisper==1.2.1
 # The fairy's neural voice (model files: Get-VoiceModel.bat).
 kokoro-onnx==0.6.1
 pyworld==0.3.5
+# Reading navmeshes out of Elden Ring's archives (Get-GameData.bat navmesh): AES ranges.
+cryptography==50.0.2
 # Only for the visual checks in tests/ (screenshots): not needed to play.
 pillow==12.3.0

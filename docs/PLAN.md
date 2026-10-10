@@ -27,6 +27,21 @@ No Man's Sky, Persona 4, Hitman 2, Age of Empires IV, Bloons TD 6) are possibili
 One Haiku call with tools replaces a separate router and answering model: the tool it picks is
 the routing decision. DeepSeek stays a swappable alternative to compare on the same questions.
 
+## What Navi knows and sees (updated 2026-10-10)
+
+| Source | Gives | How |
+|--------|-------|-----|
+| The running game | exact enemy stats, positions, graces, landmarks, the player's place | read from memory through the bridge |
+| Community name lists (Paramdex) | names of enemies, items and where items are found, dropped or sold | `Get-GameData.bat`, `.local/` |
+| **Offline wiki** (Elden Ring Fandom wiki's database dump, CC BY-SA, about 4,500 articles) | what a place holds (graces, bosses, NPCs, loot), boss movesets and strategies, where to get items, questlines, mechanics (Spiritsprings...) | `Get-GameData.bat` downloads it and builds a local search index (SQLite full-text, lookups in milliseconds) |
+| **The screen**, on demand | what is visible but not in the game facts: scenery, structures, effects (a gust), items on the ground, signs | one picture of the game window to Haiku (about $0.0002), only when a question needs it |
+| The online wiki | last resort | web search, about $0.01 |
+
+Tools: look_at (crosshair facts), nearby_characters, character_info, search_game_data, wiki,
+where_am_i, where_is, nearest_places, items_near_me, look_at_screen, guide_to, fairy, web_search.
+Next for "what am I looking at": read nearby map objects (lifts, Spiritsprings, chests, statues) from the
+game's memory, so they are named exactly without a picture (research in the bridge).
+
 ## Runtime: how the pieces run together
 
 One program, `Assistant.bat` (`game_assistant/app.py`), with these threads:
@@ -124,6 +139,80 @@ window stays for typing and for a written record). Added 2026-10-08.
 - The game effects (spawning the body, damage, aggro) are done by the game's bridge on request, in
   offline single-player only. The assistant itself still never writes game memory.
 
+## Navigation from the game's own navmesh (added 2026-10-10)
+
+Raycasting the ground (nav.py) can't be made reliable enough for the character to walk itself: it
+sees 150-300 m at most, coarse cells make cliffs look climbable, far ground isn't loaded, and caves,
+bridges and water are invisible to it. Elden Ring ships the navmeshes its enemies use; we read those.
+
+1. **Extract once** (`Get-GameData.bat navmesh`, about 20 minutes, 230 MB in `.local/`): the map
+   blocks' navmesh containers are read out of the installed game's archives (read-only; archive
+   format and public keys from Smithbox, MIT), the Havok navmesh pieces are converted by Soulstruct
+   (GPL-3.0, its own Python 3.13 environment in `.local/tools`, never in this repository) into one
+   compact file per block: 695 blocks, 4.5 million faces (150 open-world tiles are sea: empty).
+2. **Plan** (`core/navmesh.py`, game-independent): the face under you, A* over faces, the funnel
+   algorithm for straight legs, corners kept 0.7 m off walls. A goal that can't be walked to (an
+   evergaol arena, behind a fog wall, up a lift) gives a route to the nearest walkable point.
+3. **Elden Ring layer** (`games/eldenring/navmesh.py`): open-world tiles and dungeons are put in
+   world coordinates and joined where their edges meet; `adapter.route(start, goal)`
+   (capability `navmesh`). Navi's guiding uses it first and raycasting only where there's no navmesh.
+
+Measured from the player near Stormhill (2026-10-10): Stormhill Evergaol 546 m walking for 78 m
+straight (the way up the plateau the raycast planner couldn't find), 4 s to plan; Gatefront Ruins and
+Church of Elleh 0.03 s; Stormveil Castle stops 146 m short (the castle meshes join the world only where
+they touch), 13 s.
+
+Next (user agreed 2026-10-10, after comparing with Minecraft's Baritone): join the blocks once at
+extraction time (no stitching per route), and plan with a time limit (~1 s): start on the best partial
+route toward the goal and plan further while moving, so even long trips start at once.
+
+Not yet: jumps, ladders, lifts and doors (Havok "user edges" are in the files, not used yet); what
+two face markings mean (one marks evergaol arenas); underground areas without a world conversion;
+faster mesh building for long routes; the DLC (not installed).
+
+## Two talk keys: ask Navi, or command your character (added 2026-10-10)
+
+| Key (setting) | What it is for | Who acts |
+|---------------|----------------|----------|
+| **F9** `push_to_talk_key` | Talk to Navi: questions, and Navi's own moves ("lead me to the nearest grace", "go to that") | Navi answers and flies; your character is yours |
+| **F10** `command_key` | Orders for your character: "go to the nearest site of grace", "walk to that ruin", "follow Navi", "stop" | your character walks on its own, and Navi leads the way along the same route |
+
+F8 is not used: the Attack on Elden Ring bridge uses it to switch between the games.
+
+**How a command runs**
+
+1. **Hear it.** The same push-to-talk and speech recognition as F9, tagged as a command.
+2. **Understand it.** Short, clear commands are handled on this PC ("stop", "follow Navi"). Anything
+   else goes to Haiku with a command prompt and the same game tools, which turns it into one action:
+   walk to a place, a thing at the crosshair, a character, or the nearest grace or landmark.
+3. **Ask when unsure, through Navi.** If two targets are about equally good (two graces within 15 % of
+   each other's distance, two enemies at the crosshair) or the order is vague ("go over there"), Navi
+   asks one short question out loud. The command waits; the next thing you say or type, on either key,
+   answers it. Ten seconds of silence cancels.
+4. **Plan the route.** The same walkable route as Navi's guiding (`nav.plan`, WIDE or FAR), re-planned
+   as you go. Navi flies ahead along that same route, so what you see and where you walk agree.
+5. **Walk.** The auto-walk controller (code, every frame) steers along the route by holding the game's
+   movement keys: it works out the direction to the next waypoint relative to the camera and holds the
+   matching W/A/S/D combination (eight directions); it runs (holds sprint) on long straight stretches,
+   which the user chose (setting `auto_walk_sprint`, on).
+   In Attack on Elden Ring's linked mode the same keys reach AoTTG2, which moves the character.
+6. **Watch.** The monitors from "Watching a running skill": arrived (15 m across and 6 m in height),
+   stuck (less than 0.5 m in 2 s: re-plan; twice: stop and say so), an enemy within 8 m of you or the
+   route (keep walking, as the user chose; Navi warns: "Careful, enemies ahead!"), a fall, a menu or
+   loading screen (pause).
+7. **You stay in charge.** Pressing any movement key yourself, saying or typing "stop" on either key,
+   or opening a menu stops the walk at once and releases every key it held. Physical key presses are
+   told apart from the controller's own (Windows marks injected input), so the takeover check can't
+   be fooled by the walk itself.
+
+**Why it fits:** the route planner, place lookups, nearest-place search, arrival rules, Navi's guiding
+and the monitors already exist or are planned; the new parts are the second key, the command prompt,
+the clarification turn, the keyboard steering and the takeover check. Commands are also where skills
+(phase 6) will start from ("sort my items" on F10 runs a skill).
+
+**Limits at first:** no jumping, climbing, ladders, lifts, swimming or riding Torrent; routes that need
+them are not found (Navi says so). Elden Ring must have the keyboard focus for its keys to work.
+
 ## Voice
 
 A wrapper around the same agent; the text window stays. Built 2026-10-09:
@@ -168,7 +257,8 @@ scene), but a phase counts as done only when its game gate passes.
 | 2 | "What am I looking at?": look-at resolver (built in phase 1), lock-on target, NpcParam names and resistances extracted from game data to `.local/eldenring/`, Haiku agent with fact tools, text chat window | Ask "what is that and what is it weak to?" near a known enemy: correct name, resistances match the game's data; time to first word measured | **Game test passed 2026-10-09** (user: "working really well"). Exact numbers from the game's memory; names, item locations, drops, shops and places from community lists; attack patterns, strategies and lore from a wiki search |
 | 2b | Voice (see above) | Spoken question and answer; frame rate unchanged | **Game test passed 2026-10-09** (a whole session by voice). Offline: Windows voice into Whisper exact with the game vocabulary, 0.9 s |
 | 3 | Fairy companion, look and movement: overlay renderer (projection, wall fading, hidden in menus), companion controller (float, follow, leash), fly to what it talks about, "go to X", "come back", instant "stop" | The fairy follows you for 10 minutes without blocking the crosshair or drifting off; "go to that enemy" flies to the right one and stays within the leash | **Built 2026-10-09**, tested offline and in the demo scene (follow, show, go, leash, menus, instant commands, the agent's fairy tool). First game test 2026-10-09: looks and moves well; leash raised to 75 m on request. Gate (10 minutes, crosshair, right target) still to confirm |
-| 4 | Navigation: raycast walkability grid, A*, the fairy leads the way along it, grace locations; then `goto()` (the character walks itself) and fast travel | The fairy leads you between two points around a wall and waits when you fall behind; then the character walks it alone; "stop" halts in under 100 ms | **Route planning and "lead the way" built 2026-10-09** (offline: around a wall in under 1,200 rays). Guiding to far places built 2026-10-09: every Site of Grace and map landmark (and legacy dungeons through the game's conversion table) gets a position relative to you; tested in game (Forsaken Ruins 151 m west, Stormveil Castle 1.9 km west). Not built: the character walking itself, fast travel |
+| 4 | Navigation, part 1: raycast walkability grid, A*, the fairy leads the way along it, places and nearest places, guiding to far places | The fairy leads you between two points around a wall and waits when you fall behind; guiding to a named or nearest place gets you there by a walkable way | **Route planning and "lead the way" built 2026-10-09** (offline: around a wall in under 1,200 rays). Guiding to far places built 2026-10-09: every Site of Grace and map landmark (and legacy dungeons through the game's conversion table) gets a position relative to you; tested in game (Forsaken Ruins 151 m west, Stormveil Castle 1.9 km west). **2026-10-10: routes from the game's own navmesh** (see "Navigation from the game's own navmesh"); not yet tried by the user in game. Not built: the character walking itself, fast travel |
+| 4b | Commands and auto-walk: the F10 command key, the command prompt, clarification questions through Navi, keyboard steering along the route with Navi leading, monitors (arrived, stuck, enemy, fall, menu), instant takeover | "Go to the nearest site of grace" on F10 walks there and stops within 15 m (and 6 m in height); a movement key or "stop" halts it in under 100 ms; two equally near graces make Navi ask which | not started |
 | 5 | Fairy in the world (Elden Ring bridge work, in Attack on Elden Ring): hidden, unkillable ally body pinned to the fairy; ignored-by-enemies / visible-to-enemies switch; draw aggro; tackle attack through the damage path | Invisible to enemies by default; on command one chosen enemy turns to it; a tackle damages that enemy with a hit reaction and the fairy backs off | not started; research steps below |
 | 6 | Skills: sandbox, skill library, skill writer (Sonnet 5.5), dry runs | One sentence makes a working skill, such as sorting items | not started |
 | 7 | Minecraft: new bridge (client mod) and adapter only; the fairy's look works unchanged | Questions, the fairy and `goto()` work with no change to the core | later |
@@ -210,6 +300,8 @@ Done in Attack on Elden Ring, step by step, each tested in game before the next:
 - Where Elden Ring keeps the lock-on target and the inventory in memory (start from fromsoftware-rs
   and Cheat Engine tables).
 - Which Minecraft version and mod loader to pin, when we get there.
+- Decided 2026-10-10: command key F10; auto-walk runs on long stretches; near enemies it keeps going
+  and Navi warns. Open: should it ever call Torrent?
 - The fairy's look: colour, size, a name? Its leash distance (75 m). Colour, size and leash are
   settings already (`.local/settings.json`).
 - Menus in Elden Ring: the fairy hides during loading screens and when the game is not in front, but

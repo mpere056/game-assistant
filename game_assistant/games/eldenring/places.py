@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from .knowledge import TAGGED, _matches, _norm, _rank
 
 OPEN_WORLDS = (60, 61)
-TILE = 256.0
+TILE = 256.0  # metres per map square
 
 
 @dataclass
