@@ -282,6 +282,11 @@ class EldenRingAdapter:
                 self._banned_links |= blocked
         route = Route([(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints], r.reaches_goal, 0)
         route.length_m, route.timed_out = r.length, r.timed_out
+        # Things to tell the player on the way: (what, where it starts) for ladders, lifts, jumps, drops.
+        from ...core.navmesh import LINK_NAMES
+        route.actions = [(LINK_NAMES[k], ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1],
+                                          (pa[2] + pb[2]) / 2 - off[2]))
+                         for k, pa, pb, *_ in (r.special or []) if k in (2, 4, 5, 6)]
         return route
 
     def _blocked_links(self, special: list, off: Vec3) -> set:
@@ -289,6 +294,8 @@ class EldenRingAdapter:
         rock: from the edge toward the landing at chest height (and knee height for steps)."""
         rays, keys = [], []
         for kind, pa, pb, frm, to, land in special:
+            if kind not in (1, 2, 3):  # ladders, lifts, jumps, doors come from the game itself
+                continue
             mid = ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1], (pa[2] + pb[2]) / 2 - off[2])
             lx, lz = land[0] - off[0] - mid[0], land[2] - off[2] - mid[2]
             d = math.hypot(lx, lz)

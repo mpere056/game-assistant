@@ -12,7 +12,9 @@ One .npz per map block, all its pieces together:
   faces     int32   (F, 4)   piece, first edge index, edge count, face data (Havok faceData)
   edges     int32   (E, 5)   vertex a, vertex b, opposite face (-1: boundary), flags, edge data
   pieces    str     (P,)     piece names (n31_03_00_00_000200 ...)
-  user      float32 (U, 7)   special edges: piece, face, x, y, z of start, ... (raw, for later study)
+  user      float32 (U, 19)  special edges (Havok user edges: ladders, jumps, lifts...): piece, type A,
+                             type B, cost A->B, cost B->A, direction (3 both ways), space, end A x y z,
+                             end B x y z, half size A x y z, half size B x y z
 Face and vertex indices in `faces`/`edges` are global within the file (piece offsets applied).
 """
 from __future__ import annotations
@@ -68,20 +70,26 @@ def convert(folder: Path, out: Path) -> dict:
         faces=np.asarray(faces, dtype=np.int64).astype(np.int32).reshape(-1, 4),
         edges=np.asarray(edges, dtype=np.int64).astype(np.int32).reshape(-1, 5),
         pieces=np.asarray(pieces),
-        user=np.asarray([u for u in user if u is not None], dtype=np.float32).reshape(-1, 7),
+        user=np.asarray([u for u in user if u is not None], dtype=np.float32).reshape(-1, 19),
     )
     return {'pieces': len(pieces), 'vertices': v_off, 'faces': f_off, 'edges': e_off, 'user_edges': len(user)}
 
 
 def _user_edge(piece: int, setup) -> tuple | None:
-    """Special edges (jumps, ladders, lifts?) are kept raw for now: where they start."""
+    """One special edge: its two ends (box centres from the boxes' transforms), types, costs, direction."""
     try:
-        a = setup.obbA if hasattr(setup, 'obbA') else None
-        pos = getattr(a, 'translation', None) if a is not None else None
-        if pos is None:
-            return (piece, -1, 0, 0, 0, 0, 0)
-        return (piece, -1, float(pos[0]), float(pos[1]), float(pos[2]), 0, 0)
-    except Exception:  # unknown layout: skip
+        def centre(obb):
+            t = list(obb.transform) if not hasattr(obb.transform, 'translation') else None
+            if t is not None and len(t) >= 15:
+                return float(t[12]), float(t[13]), float(t[14])
+            tr = obb.transform.translation
+            return float(tr[0]), float(tr[1]), float(tr[2])
+        a, b = centre(setup.obbA), centre(setup.obbB)
+        ha, hb = setup.obbA.halfExtents, setup.obbB.halfExtents
+        return (piece, int(setup.userDataA), int(setup.userDataB), float(setup.costAtoB), float(setup.costBtoA),
+                int(setup.direction), int(setup.space), *a, *b, float(ha[0]), float(ha[1]), float(ha[2]),
+                float(hb[0]), float(hb[1]), float(hb[2]))
+    except Exception:  # an unknown layout: skip it
         return None
 
 

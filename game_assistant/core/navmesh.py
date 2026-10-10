@@ -28,9 +28,11 @@ from typing import Protocol
 import numpy as np
 
 Vec3 = tuple[float, float, float]
-# Extra cost (metres) for special links, so the search only uses them when there is no normal way:
-# kind 1 a dungeon entrance gap, 2 a drop down a ledge, 3 a step across a gap in the mesh.
-LINK_PENALTY = {1: 2.0, 2: 4.0, 3: 8.0}
+# Extra cost (metres) for special links, so the search only uses them when they help:
+# 1 a dungeon entrance gap, 2 a drop down a ledge, 3 a step across a gap in the mesh,
+# 4 a ladder, 5 a lift (waiting for it), 6 a jump, 7 a door.
+LINK_PENALTY = {1: 2.0, 2: 4.0, 3: 8.0, 4: 5.0, 5: 20.0, 6: 3.0, 7: 1.0}
+LINK_NAMES = {1: 'entrance', 2: 'drop', 3: 'step', 4: 'ladder', 5: 'lift', 6: 'jump', 7: 'door'}
 
 
 @dataclass

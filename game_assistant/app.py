@@ -44,6 +44,10 @@ def _own_window_in_front() -> bool:
     return pid.value == os.getpid()
 
 
+ACTION_LINES = {'ladder': 'Climb the ladder!', 'lift': 'Take the lift!', 'jump': 'Jump across here!',
+                'drop': 'Drop down here!'}
+
+
 class App:
     def __init__(self, game: str):
         self.cfg = config.load()
@@ -254,6 +258,17 @@ class App:
                         self.bubble.bubble_say(line)
                     if self.speaker:
                         self.speaker.say(line)
+                    continue
+                if event.startswith('action:'):  # a ladder, lift, jump or drop just ahead on the route
+                    line = ACTION_LINES.get(event.split(':', 1)[1])
+                    if line:
+                        self.q.put(('meta', '
+' + line + '
+'))
+                        if self.bubble:
+                            self.bubble.bubble_say(line)
+                        if self.speaker:
+                            self.speaker.say(line)
                     continue
                 if event.startswith('no_way:'):
                     line = f"Hmm, I can't find a way to walk toward {event.split(':', 1)[1]} from here. Let's try another way!"
