@@ -162,9 +162,13 @@ straight (the way up the plateau the raycast planner couldn't find), 4 s to plan
 Church of Elleh 0.03 s; Stormveil Castle stops 146 m short (the castle meshes join the world only where
 they touch), 13 s.
 
-Next (user agreed 2026-10-10, after comparing with Minecraft's Baritone): join the blocks once at
-extraction time (no stitching per route), and plan with a time limit (~1 s): start on the best partial
-route toward the goal and plan further while moving, so even long trips start at once.
+**Baritone-style (built 2026-10-10):** a whole-world graph built once (`navgraph.py`, 730 MB in
+`.local/`): blocks joined at shared edges, dungeon entrances across their threshold gap, drops down
+ledges (one way, up to 6 m) and steps across gaps in the mesh (up to 3.5 m, same level). Blocks are
+loaded only when the search reaches them. Searches run in their own low-priority process (Navi's
+answers never wait), with a 3 s budget: a long trip sets off on the best part so far and plans the
+rest while moving. Drops, steps and entrances on a route are checked with live rays first; blocked
+ones are banned and the route re-planned. Next: learn links from where the player actually walks.
 
 Not yet: jumps, ladders, lifts and doors (Havok "user edges" are in the files, not used yet); what
 two face markings mean (one marks evergaol arenas); underground areas without a world conversion;

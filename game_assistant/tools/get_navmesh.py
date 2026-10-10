@@ -105,5 +105,19 @@ def main() -> None:
     sys.exit(1 if errors else 0)
 
 
+def build_graph() -> int:
+    """The walkable world graph (navgraph.py), about 15 minutes; needs the dungeon map shifts the
+    assistant saves the first time it runs with the game."""
+    from ..games.eldenring import navgraph
+    try:
+        print(navgraph.build())
+        return 0
+    except RuntimeError as e:
+        print(f'graph not built: {e}')
+        return 1
+
+
 if __name__ == '__main__':
+    if '--graph' in sys.argv:
+        sys.exit(build_graph())
     main()

@@ -55,9 +55,11 @@ class Block:
         a, b = E[edge_idx, 0], E[edge_idx, 1]
         inner = (opp >= 0) & (owner < opp)  # each shared edge once
         self.link_a, self.link_b = owner[inner], opp[inner].astype(np.int64)
+        self.link_va, self.link_vb = a[inner].astype(np.int64), b[inner].astype(np.int64)
         self.portal_a, self.portal_b = self.v[a[inner]], self.v[b[inner]]
         bnd = opp < 0
         self.bnd_face = owner[bnd]
+        self.bnd_va, self.bnd_vb = a[bnd].astype(np.int64), b[bnd].astype(np.int64)
         self.bnd_a, self.bnd_b = self.v[a[bnd]], self.v[b[bnd]]
         la, lb = v[a[bnd]], v[b[bnd]]
         if area in OPEN_WORLDS and name.endswith('_00'):  # tile borders only

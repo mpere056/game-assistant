@@ -63,7 +63,10 @@ def get_navmesh() -> int:
     """Elden Ring's own navmeshes from the installed game (read-only), for walking routes: about
     20 minutes once, 230 MB in .local/eldenring/navmesh/. See tools/get_navmesh.py."""
     import subprocess
-    return subprocess.call([sys.executable, '-m', 'game_assistant.tools.get_navmesh', '--workers', '3'])
+    code = subprocess.call([sys.executable, '-m', 'game_assistant.tools.get_navmesh', '--workers', '3'])
+    if code == 0:  # then the walkable world graph (links between blocks, drops, steps)
+        code = subprocess.call([sys.executable, '-m', 'game_assistant.tools.get_navmesh', '--graph'])
+    return code
 
 
 GAMES = {'eldenring': get_eldenring, 'voice': get_voice, 'navmesh': get_navmesh}

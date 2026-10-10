@@ -88,6 +88,9 @@ class _Target:
     path: list[Vec3] = field(default_factory=list)  # for 'lead'
 
 
+CONTINUE_PLANS = 8   # a long route is planned in up to this many time-limited pieces
+
+
 class Companion:
     def __init__(self, raycast: Raycast | None = None, leash: float = LEASH, scale: float = 1.0,
                  guide_ahead: float = GUIDE_AHEAD):
@@ -165,6 +168,19 @@ class Companion:
                         self.route, self.route_complete = route.waypoints, route.reaches_goal
                         self.route_source = 'navmesh'
                         self._route_time = self.t
+                    # A long way: the search stopped at its time limit with the best part so far.
+                    # Set off along it now and plan the rest from its end meanwhile (Baritone-style).
+                    for _ in range(CONTINUE_PLANS):
+                        if not getattr(route, 'timed_out', False) or gen != self._plan_gen or self.mode != 'guide':
+                            break
+                        try:
+                            route = self.route_fn(route.waypoints[-1], goal)
+                        except Exception:
+                            route = None
+                        if route is None or len(route.waypoints) < 2 or gen != self._plan_gen:
+                            break
+                        self.route = list(self.route) + list(route.waypoints[1:])
+                        self.route_complete = route.reaches_goal
                     self._planning = False
                     return
             far = math.hypot(goal[0] - start[0], goal[2] - start[2]) > 250.0
