@@ -48,6 +48,7 @@ How to answer:
 - web_search (if available) only for what the game data can't say: attack patterns, boss strategies,
   lore, questlines, puzzles, or when search_game_data finds nothing. Say briefly it's from the wiki.
 - If what they mean is unclear (two enemies at the crosshair), ask one short question.
+- If a place has a height_note, mention it briefly ("it's down in the tunnel, about 60 metres below").
 - Round distances ("about 50 metres"). Directions are relative to the camera: ahead, left, right,
   behind; for far places use the compass too. Never describe where things are on the screen.
 - Plain text, no markdown, no lists. Don't mention ids, refs or other internal numbers.
@@ -123,12 +124,24 @@ TOOLS = [
     {
         'name': 'guide_to',
         'description': 'Guide the player to a named place anywhere in this world (a Site of Grace, a ruin, a '
-                       'castle, a cave) or to where an item is found: you fly ahead toward it, up to 100 m in '
-                       'front of them, until they arrive. Returns its distance and compass direction.',
+                       'castle, a cave) or to where an item is found: you fly ahead along a walkable route until '
+                       'they arrive. Returns its distance and compass direction. For "the nearest grace", pass '
+                       'place "nearest site of grace" (or "nearest landmark").',
         'input_schema': {
             'type': 'object',
             'properties': {'place': {'type': 'string', 'description': 'Place or item name, e.g. "Forsaken Ruins".'}},
             'required': ['place'],
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'nearest_places',
+        'description': 'The Sites of Grace (or landmarks) nearest the player, nearest first, with distance and '
+                       'compass direction. Use for "nearest grace", "closest site of grace", "what is near me". '
+                       'Never answer "nearest" questions from search_game_data: it does not know distances.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {'kind': {'type': 'string', 'enum': ['site of grace', 'landmark']}},
             'additionalProperties': False,
         },
     },
@@ -181,7 +194,8 @@ class Agent:
         self.tools = [t for t in TOOLS
                       if (t['name'] != 'search_game_data' or CAP_SEARCH in adapter.capabilities)
                       and (t['name'] != 'fairy' or companion is not None)
-                      and (t['name'] != 'guide_to' or (companion is not None and CAP_PLACES in adapter.capabilities))]
+                      and (t['name'] != 'guide_to' or (companion is not None and CAP_PLACES in adapter.capabilities))
+                      and (t['name'] != 'nearest_places' or CAP_PLACES in adapter.capabilities)]
         sources = getattr(adapter, 'web_sources', None)
         if sources:  # Anthropic's server-side web search, limited to the game's wikis ($0.01 per search)
             self.tools.append({'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 2,
@@ -288,7 +302,11 @@ class Agent:
         place = str(inp.get('place') or '').strip()
         if not place or self.companion is None:
             return {'error': 'need a place name'}
-        found = self.adapter.locate(place)
+        low = place.lower()
+        if any(w in low for w in ('nearest', 'closest', 'nearby')) and hasattr(self.adapter, 'nearest_places'):
+            found = self.adapter.nearest_places('landmark' if 'landmark' in low else 'site of grace', limit=3)
+        else:
+            found = self.adapter.locate(place)
         if 'error' in found:
             return found
         for r in found.get('results', []):
@@ -305,8 +323,14 @@ class Agent:
         notes = [f"{r['name']}: {r.get('note')}" for r in found.get('results', [])][:3]
         return {'error': 'no reachable place with that name', 'details': notes or found.get('note')}
 
+    def tool_nearest_places(self, inp: dict) -> dict:
+        res = self.adapter.nearest_places(inp.get('kind') or 'site of grace', limit=5)
+        for r in res.get('results', []):
+            r.pop('position', None)  # internal
+        return res
+
     def _run_tool(self, name: str, inp: dict) -> tuple[str, bool]:
-        fn = {'look_at': self.tool_look_at, 'nearby_characters': self.tool_nearby_characters,
+        fn = {'nearest_places': self.tool_nearest_places, 'look_at': self.tool_look_at, 'nearby_characters': self.tool_nearby_characters,
               'character_info': self.tool_character_info, 'search_game_data': self.tool_search_game_data,
               'fairy': self.tool_fairy, 'guide_to': self.tool_guide_to}.get(name)
         if fn is None:

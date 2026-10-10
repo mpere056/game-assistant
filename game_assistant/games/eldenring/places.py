@@ -72,6 +72,21 @@ class PlaceIndex:
             return (area, pos[0], pos[1], pos[2])
         return self.to_world(area, (zone >> 16) & 0xFF, (zone >> 8) & 0xFF, pos)
 
+    def nearest(self, me: tuple[int, float, float, float], kind: str | None = None, limit: int = 5) -> list[Place]:
+        """Places in the player's world, nearest first (horizontal distance)."""
+        pool = [p for p in self.places if p.world and p.world[0] == me[0] and (kind is None or p.kind == kind)]
+        # Height counts too: a grace 67 m down in a tunnel is further than it looks on the map.
+        pool.sort(key=lambda p: math.sqrt((p.world[1] - me[1]) ** 2 + (p.world[3] - me[3]) ** 2 + (p.world[2] - me[2]) ** 2))
+        seen, out = set(), []
+        for p in pool:
+            key = (_norm(p.name), p.kind)
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+            if len(out) >= limit:
+                break
+        return out
+
     def find(self, query: str, limit: int = 5) -> list[Place]:
         hits = [p for p in self.places if _matches(query, p.name) or _matches(query, f'{p.region} {p.name}')]
         uniq = {}

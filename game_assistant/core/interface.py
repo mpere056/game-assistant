@@ -157,6 +157,9 @@ class GameAdapter(Protocol):
         """Where a named place (or an item's location) is from the player: results with name, region,
         distance_m, compass and position (in the snapshot's coordinates). Only with CAP_PLACES."""
 
+    def nearest_places(self, kind: str = 'site of grace', limit: int = 5) -> dict:
+        """The places of a kind nearest the player (same result shape as locate()). With CAP_PLACES."""
+
     def search(self, kind: str, query: str) -> dict:
         """Find an 'enemy', 'item' or 'place' by name: exact facts (where items are found, which
         enemies match, where places are). Only for adapters listing CAP_SEARCH."""

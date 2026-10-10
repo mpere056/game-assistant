@@ -88,11 +88,12 @@ window stays for typing and for a written record). Added 2026-10-08.
 | Ability | How | Phase |
 |---------|-----|-------|
 | Floats beside and around you, bobbing and drifting like Navi; never blocks the crosshair | Code (companion controller) every frame | 3 |
+| Flies at about 10 m/s (faster than running, slow enough to follow by eye; keeps up on Torrent), with a fading trail of about 2 s while it moves | Companion speed and acceleration caps; trail windows in the overlay | 3 |
 | Shows what it is talking about: flies to the thing at the crosshair or the enemy it describes, then comes back | Look-at resolver and entity positions | 3 |
 | "Go to X": flies to an enemy, an item spot, a grace or a place, but never further than the leash (75 m) and stays in view; if X is further it waits at the edge and points | Code; X comes from look-at, nearby characters or search_game_data | 3 |
 | Glows or pulses while it speaks; its voice comes from where it is on screen (stereo pan) | Voice wrapper (phase 2b), then panned from its screen position | 2b + 3 |
 | "Lead the way" to something nearby: flies ahead along a route you can walk, stopping when you fall behind | Navigation (walkability grid and A*) | 4 |
-| "Take me to the Forsaken Ruins" (or to an item: "take me to the Moonveil"): flies ahead toward a place anywhere in this world, up to 100 m in front of you, hovering like a beacon, and says when you arrive | Place positions from the game's own map tables, converted to your position | 4 (built) |
+| "Take me to the Forsaken Ruins" (or to an item: "take me to the Moonveil"): flies ahead toward a place anywhere in this world, along a route you can walk (planned 150 m at a time from the ground itself, around cliffs), as far ahead as you can still see it (up to 100 m, never behind a hill), hovering like a beacon, and says when you arrive; a marker at the screen edge shows where it is when it is off-screen | Place positions from the game's own map tables, converted to your position | 4 (built) |
 | Normally invisible to enemies; on command visible to them like a player, to draw an enemy's aggro | An in-world body through the game's bridge | 5 |
 | Attacks on command: a tackle (dash in, hit, back off) that damages the enemy | In-world body plus the bridge's damage path | 5 |
 
@@ -136,8 +137,9 @@ A wrapper around the same agent; the text window stays. Built 2026-10-09:
   sets pitch and size separately, cleaned of breath noise (harvest pitch tracking, less breath,
   280 Hz high-pass, a gate), with a sparkle before each answer and panned to where the fairy is on
   screen. Chosen by ear by the user from several rounds of samples (Navi measures about 558 Hz; 440
-  sounded best). Each sentence is spoken as soon as it has streamed (first sound about 0.6 s after the
-  answer starts). Windows' own voice stays as the fallback (`voice_engine: windows`).
+  sounded best). The sparkle plays the moment an answer starts; the text is spoken in pieces (sentences, cut
+  at commas when long) made by two workers in parallel and played in order through one continuous
+  stream: first words about 0.5-0.9 s after the text starts, under a second of silence mid-answer. Windows' own voice stays as the fallback (`voice_engine: windows`).
 - **Interrupt:** a new question, "stop" or "quiet" cuts speech off at once.
 - **Looked into, not used (2026-10-09):** the only Navi-trained voice found is a fan-made RVC voice
   converter trained on about two seconds of game audio and unfinished; heavy (PyTorch), a grey area

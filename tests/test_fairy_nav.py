@@ -60,6 +60,107 @@ class CompanionTests(unittest.TestCase):
         v = run(c, snap(player=(0.0, 0.0, 590.0)), 1)          # the player arrives
         self.assertIn('arrived:Far Ruins', c.events)
 
+    def test_standing_above_the_place_is_not_arriving(self):
+        c = Companion()
+        run(c, snap(), 1)
+        c.guide((0.0, -67.0, 300.0), 'Deep Tunnel')
+        run(c, snap(player=(0.0, 0.0, 295.0)), 1)              # right above it, 67 m up
+        self.assertNotIn('arrived:Deep Tunnel', c.events)
+        self.assertIn('level:Deep Tunnel:-67', c.events)
+
+    def test_flies_to_far_targets_instead_of_jumping(self):
+        c = Companion()
+        start = run(c, snap(), 1).pos
+        c.go(point=(0.0, 2.0, 70.0))
+        v = run(c, snap(), 0.5)
+        self.assertLess(dist(v.pos, start), 6.0)            # half a second in: still close, accelerating
+        speeds = []
+        for _ in range(240):                                # 4 seconds
+            before = c.pos
+            v = c.update(snap(), 1 / 60)
+            speeds.append(dist(v.pos, before) * 60)
+        self.assertLessEqual(max(speeds), 10.5)             # never faster than the travel speed
+        self.assertGreater(max(speeds), 8.0)                # but clearly faster than a running player
+
+    def test_trail_stays_in_the_world_when_the_camera_turns(self):
+        from game_assistant.core.lookat import project
+        c = Companion()
+        run(c, snap(), 1)
+        c.go(point=(6.0, 2.0, 30.0))
+        run(c, snap(), 1.5)
+        self.assertGreater(len(c.trail), 10)
+        turned = Camera((0.0, 3.0, -4.0), (0.5, -0.2, 0.84), (0.86, 0.0, -0.51), (0.1, 0.98, 0.17), 48.0, 16 / 9)
+        s2 = Snapshot('test', 1, True, Player((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 'alive'), turned, (), None, screen=SCREEN)
+        v = c.update(s2, 1 / 60)
+        newest_dot = v.trail[0]
+        _, pos, _ = c.trail[-2]                                # the trail point that dot is drawn from
+        x, y, depth = project(turned, pos)
+        self.assertAlmostEqual(newest_dot[0], (x + 1) / 2 * 1920, delta=1.0)  # drawn where it is in the world now
+        self.assertAlmostEqual(newest_dot[1], (1 - y) / 2 * 1080, delta=1.0)
+
+    def test_guide_stays_where_the_player_can_see_it(self):
+        def hill(rays):  # flat ground; a 30 m high ridge at z = 40 that hides everything behind it
+            out = []
+            for a, b in rays:
+                if (a[2] - 40) * (b[2] - 40) < 0:
+                    k = (40 - a[2]) / (b[2] - a[2])
+                    p = tuple(a[i] + (b[i] - a[i]) * k for i in range(3))
+                    if p[1] <= 30:
+                        out.append(RayHit(a, b, True, p, (0.0, 0.0, -1.0)))
+                        continue
+                if a[1] > 0 >= b[1]:
+                    k = a[1] / (a[1] - b[1])
+                    out.append(RayHit(a, b, True, tuple(a[i] + (b[i] - a[i]) * k for i in range(3)), (0.0, 1.0, 0.0)))
+                    continue
+                out.append(RayHit(a, b, False))
+            return out
+        c = Companion(raycast=hill)
+        run(c, snap(), 1)
+        c.guide((0.0, 0.0, 500.0), 'Behind The Ridge')
+        v = run(c, snap(), 8)
+        self.assertLess(v.pos[2], 40)       # waits on this side of the ridge, in sight
+        self.assertGreater(v.pos[2], 14)    # but still well ahead
+
+    def test_edge_marker_when_it_is_behind_you(self):
+        c = Companion()
+        run(c, snap(), 1)
+        c.go(point=(0.0, 2.0, -40.0))       # behind the camera
+        v = run(c, snap(), 6)
+        self.assertFalse(v.visible)
+        self.assertIsNotNone(v.edge)
+        self.assertTrue(0 <= v.edge[0] <= 1920 and 0 <= v.edge[1] <= 1080)
+
+    def test_guide_goes_around_a_cliff_not_over_it(self):
+        def ground(x, z):  # a plateau ending in a 30 m cliff at z = 40; a ramp down at x 30-45
+            if z < 40:
+                return 0.0
+            if 30 <= x <= 45 and z <= 100:
+                return -30.0 * (z - 40) / 60
+            return -30.0
+
+        def world(rays):
+            out = []
+            for a, b in rays:
+                if abs(a[0] - b[0]) < 1e-6 and abs(a[2] - b[2]) < 1e-6 and a[1] > b[1]:  # straight down
+                    h = ground(a[0], a[2])
+                    ramp = 30 <= a[0] <= 45 and 40 <= a[2] <= 100
+                    n = (0.0, 0.894, -0.447) if ramp else (0.0, 1.0, 0.0)
+                    out.append(RayHit(a, b, True, (a[0], h, a[2]), n) if b[1] <= h <= a[1] else RayHit(a, b, False))
+                else:
+                    out.append(RayHit(a, b, False))  # no walls; sight is clear
+            return out
+
+        c = Companion(raycast=world)
+        c.plan_async = False
+        run(c, snap(), 1)
+        c.guide((0.0, -30.0, 140.0), 'Below The Cliff')
+        v = run(c, snap(), 6)
+        self.assertIsNotNone(c.route)
+        below_edge = [q for q in c.route if 42 <= q[2] <= 88]  # beside the 30 m cliff (lower down, small drops are fine)
+        self.assertTrue(below_edge, c.route)
+        self.assertTrue(all(28 <= q[0] <= 47 for q in below_edge), c.route)  # down the ramp only
+        self.assertGreater(v.pos[0], 15)                                     # leading toward the ramp
+
     def test_hidden_in_menus(self):
         c = Companion()
         run(c, snap(), 1)
