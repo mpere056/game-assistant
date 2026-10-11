@@ -844,3 +844,106 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   Over to you."
 - 127 tests pass (new: the session's phrases, "the next one", no step toward a drop, only safe ways, roll
   away from a drop, no roll when every way drops, runaway handed to the walk).
+
+## 2026-10-11: orders from the field; a walk log
+- Committed the combat work (PR #11). The user reported orders still misunderstood and paths still
+  struggling (with a screenshot that did not come through).
+- Orders that went wrong (runtime/chat-20261011.jsonl): "now the next one please" (no verb: nothing);
+  "there was a boar around here, can you kill that too?" (nearest enemy, not the boar); "kill this enemy
+  in front of me" (a Springhare behind, the nearest hostile); "kill all of the soldiers around here"
+  (nothing, twice). Now: "the next one / another one / one more" alone fights the kind last fought; a kind
+  named anywhere in the order fills in "that / it" (whole words only: "here" must not match "Deer");
+  "this / that / in front" prefers the nearest match within 30 degrees of where the camera looks; "all"
+  fights them one after another (the next of that kind within 60 m after each kill: "Got it! Next
+  Godrick Soldier!", then "That's all of them!").
+- Walks had no log, so a bad path could not be traced. runtime/walk-<date>.jsonl now has, twice a second
+  and at each event: state, events, position, goal, keys, camera heading, progress along the route, the
+  player's animation; and each new route in full (waypoints, complete or partial, ladder/lift/jump
+  actions). Tests write to neither log.
+- 133 tests pass (new: the four session orders, whole-word mentions, the walk log).
+- Screenshot session (15:21-15:22, chat + the new walk log): "How many soldiers ... around here?" (Navi:
+  three Godrick Soldiers), then "Can you kill all of them from me?": the order alone has no kind, so it
+  fought "any enemy", then went on to an Eagle 35 m up a cliff (walk log: goal y 150.5, player 116; 18 m
+  on the map, so the walk went straight at it: unstick, stuck, gave up). "Oh no, not the Eagle, all the
+  soldiers." had no verb: the model asked a question.
+- Now: questions and Navi's answers of the last minute give "them / those / all of them" a kind ("that /
+  it" stays what the player looks at); an order without a verb within 90 s of an attack order that names
+  a kind is a correction ("not the X" excluded); "any enemy" and "all of them" skip characters more than
+  8 m above or below the player; a walk to a character goes straight at it only within 4 m of its height
+  (else along the route). 138 tests pass (new: the screenshot session, a character far above).
+
+## 2026-10-11: bullets: hits after the swing window
+- "Kill all of them" sweep (user): every soldier in the area killed, one hit taken. Combat log: a Godrick
+  Soldier's 3003008; the forward roll was pressed at 1.02 s and came out (27120), covering the swing
+  window 1.167-1.233 s and carrying the player into the soldier (gap 2.3 -> 0.5 m); the hit landed after
+  the roll (between 1.28 and 1.57 s). The same attack hit the same way in the fourth fight. The game data
+  has a bullet for 3003008 at 1.2 s (a separate hitbox: a projectile or lingering sweep) the fighter
+  never read.
+- Now (adapter): bullets of attack animations (3XXX) count as hits for 0.3 s from launch, merged with
+  overlapping swing windows (3003008: 1.167-1.5 s; 3003009 1.067-1.367; the 3003007 throw 1.5-1.8);
+  bullets of other animations (the alert shout 3020021, flinch effects) are not hits. (combat) A hit
+  longer than 0.2 s outlasts the roll's invincibility: roll away (back-left/right), pressed so the
+  invincibility (~0.10-0.33 s after the press) is centred on it. 140 tests pass.
+
+## 2026-10-11: combos and multi-hit charges: roll away
+- Seventh session (user): the 3003008 bullet attack was dodged; two other hits. (1) A soldier's 3003000 ->
+  3003001: the first rolled forward (into it, gap 0.76 m), a second roll pressed 0.58 s into the first
+  only came out at ~0.95 s, after 3003001's hit. (2) A boar's charge 3000 (hits at 1.633, 2.133, 2.633 s):
+  the first rolled forward into it, then 3002 hit as it started (window 0.0-0.2 s, no warning).
+- Measured in the fight log: a roll pressed 0.50-0.65 s into a roll is buffered and comes out at
+  0.95-1.0 s; earlier presses are lost. So a hit within ~0.95 s of the one rolled can't get its own roll.
+- Now: the fighter knows the follow-up of a hit (a later window of the same attack, or the next attack of
+  a learned combo); when it comes sooner than 0.95 s, the roll goes away (back-left/right: out of reach,
+  out of a charge's line) instead of through. Combos are learned from what enemies near the player do
+  (attack A then straight into B: A's time at the switch), kept in .local/eldenring/chains.json; seeded
+  from today's log for the Godrick Soldier (3003000 -> 3003001 seen 20 times, switch at 0.92 s: rolled
+  away; 3003001 -> 3003002/3003003 and others leave time for a second roll: still rolled through). The
+  fight log now has the target's model. 144 tests pass.
+
+## 2026-10-11: orders in sequence
+- User (screenshot): "Alright, please kill the boar and then kill any remaining soldiers." -> "I don't see
+  any boar and then kill soldiers to attack."; the same with "...and then after you've killed the boar,
+  kill any soldiers around here": everything after "kill" was taken as the name.
+- Now: an order is split at "and then / then / after that / and" (when another order follows) and at
+  "and" between names of an attack ("kill the boar and the soldier"); a leading "after you've killed X,"
+  is dropped. The first part runs; the app runs the next when it is done (the target down, "all of them"
+  done, a walk arrived); stopping, taking over, low health or giving up clears the rest. "any / remaining
+  soldiers" (a plural) means all of them. 147 tests pass.
+
+## 2026-10-11: plans: general orders through the model, run by code
+- The user wants general comprehension rather than rules case by case, and orders like "go to the nearest
+  site of grace and kill any enemies you encounter along the way", "kill everything around here,
+  alternating soldiers then other things, until everything is dead", and a nine-part order (circles, a
+  line, a walk without fighting, wander until a soldier is met and kill it, ..., walk back).
+- Design: the model writes a plan in a small step language, code runs it (core/plan.py: go, fight, move,
+  wait, with engage / until_see / count / cycle / shape / seconds; agent.plan with one make_plan tool).
+  Orders with several parts or condition words go to the planner (app.needs_plan); a rule result of
+  "none" does too; simple orders keep the instant rules. A new order, or the player taking over, stops a
+  plan; low health or a walk that can't get through stops it with a line. Move steps use the ledge probes.
+  A wander wanders around where it began; an until_see search gives up after 5 minutes.
+- Live (Haiku, the running game): the three example orders gave the right plans in 1.3-1.7 s, e.g. the
+  nine-part one: move circle 10 s, move line, move circle 5 s, go Groveside Cave, move wander until_see
+  Godrick Soldier, fight found, go Gatefront Ruins until_see Godrick Soldier, fight found, go Groveside Cave.
+- 158 tests pass (new: tests/test_plan.py: the model's JSON checked, go with engage all and none, kill
+  everything alternating kinds, until_see then fight found then go back, circle then line timing, takeover,
+  unknown place skipped, routing, wander centre and search limit; an app-level plan run).
+
+## 2026-10-11: walls, the lock on the other soldier, shields, a walk after a pause
+- Eighth session (user, 16:35-16:37; combat and walk logs): (1) a soldier behind a wall: the fighter held
+  forward for 10 s at a constant 2.05 m, just out of reach; (2) one soldier fought well; (3) two soldiers:
+  most attacks dodged, 4 hits taken, one swing (into a shield): the game's lock was on one soldier while
+  the target was the other, so 15 openings went by with the camera 90+ degrees off the target (no swing),
+  and the target flipped 4 times in 3 s; the one swing went into 3002's "recovery" right as it chained
+  into 3000 (three hits); a hit from 3.7 m was outside the 3.2 m watched; a second soldier's hit came
+  ~0.4 s after the one being rolled (no second roll possible); (4) the walk to Groveside Cave gave up:
+  after a pause (window out of focus) the character stood 1.8 s with forward held, a false "stuck".
+- Combat: locked on to an enemy within 6 m: that one is the target at once; openings end where a learned
+  combo goes on (chains); another enemy's hit within 0.95 s of the one rolled: roll away; hits watched from
+  4 m; a ray from the chest to the target 10 times a second (with the ledge probes): no swing through a
+  wall; closing that gains < 0.25 m in 0.8 s (or a wall between) steps sideways 0.7 s, sides in turn, and
+  after 3 tries gives the target up ("I can't reach that one!"; "all of them" and plans go on with others
+  and don't pick it again); a swing at an idle enemy with no flinch within 0.7 s: it blocked (a shield):
+  only openings after its attacks from then on.
+- Walk: 2 s after a pause before "stuck" counts; a stuck walk also marks the spot 1.2 m ahead as one to
+  route around (props like the campfire are not in the navmesh).
+- 165 tests pass. Live: the line-of-sight ray to a soldier 38 m away was blocked by terrain 3.6 m out.

@@ -155,3 +155,134 @@ class AttackOrderTests(unittest.TestCase):
         self.assertEqual(r.handle('kill the deer').entity_id, 10)
         a = r.handle('Nice, kill the next one too.')
         self.assertEqual((a.kind, a.entity_id), ('walk', 10), a.say)
+
+
+class FieldAdapter(FakeAdapter):
+    """A field with a camera looking north: a Springhare close behind-right, a soldier ahead, another soldier
+    to the west, a boar far east."""
+    NAMES = {1: 'Godrick Soldier', 3: 'Springhare', 4: 'Boar'}
+
+    def __init__(self):
+        from game_assistant.core.interface import Entity
+        super().__init__([], entities=[
+            Entity(21, 3, 'c6', (4.0, 0.0, -3.0), (4.0, 0.5, -3.0), 0.3, 0.5, True, False),     # springhare 5 m
+            Entity(22, 1, 'c2', (0.0, 0.0, 15.0), (0.0, 1.0, 15.0), 0.5, 2.0, True, False),     # soldier ahead
+            Entity(23, 1, 'c2', (-12.0, 0.0, 0.0), (-12.0, 1.0, 0.0), 0.5, 2.0, True, False),   # soldier west
+            Entity(24, 4, 'c5', (38.0, 0.0, 0.0), (38.0, 1.0, 0.0), 0.8, 1.5, True, False)])    # boar east
+
+    def snapshot(self):
+        from game_assistant.core.interface import Camera, Player, Snapshot
+        cam = Camera((0.0, 2.0, -3.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 60, 16 / 9)
+        return Snapshot('test', 1, True, Player((0.0, 0.0, 0.0), None, 'alive'), cam, tuple(self.entities), None)
+
+    def knowledge(self, type_id):
+        return {'name': self.NAMES.get(type_id)}
+
+    def raycast(self, rays, timeout=2.0):
+        from game_assistant.core.interface import RayHit
+        return [RayHit(a, b, False) for a, b in rays]
+
+
+class SessionOrderTests(unittest.TestCase):
+    """Orders from runtime/chat-20261011.jsonl 14:37-15:11 that went wrong."""
+
+    def test_this_enemy_in_front_of_me_is_the_one_ahead(self):
+        # 15:10: went for a Springhare (nearest hostile, behind-right) instead of the soldier in front.
+        a = CommandResolver(FieldAdapter()).handle('Okay, can you kill this enemy in front of me?')
+        self.assertEqual((a.kind, a.entity_id, a.attack), ('walk', 22, 'fight'), a.say)
+
+    def test_a_kind_named_earlier_in_the_order(self):
+        # 15:09: "I think there was a boar around here. Can you kill that too?" went for the nearest enemy.
+        a = CommandResolver(FieldAdapter()).handle('I think there was a boar around here. Can you kill that too?')
+        self.assertEqual((a.kind, a.entity_id), ('walk', 24), a.say)
+
+    def test_the_next_one_without_a_verb(self):
+        # 14:37: "Alright, now the next one please." after a soldier: nothing happened.
+        r = CommandResolver(FieldAdapter())
+        r.handle('kill the nearest soldier')
+        a = r.handle('Alright, now the next one please.')
+        self.assertEqual((a.kind, a.attack, a.name), ('walk', 'fight', 'Godrick Soldier'), a.say)
+
+    def test_kill_all_of_them(self):
+        # 15:11: "can you kill all of the soldiers around here for me?" (twice): nothing.
+        for text in ['I mean, can you kill all of the soldiers around here for me?',
+                     "Alright, there's some more soldiers around here. Can you kill all of them for me?"]:
+            with self.subTest(text=text):
+                a = CommandResolver(FieldAdapter()).handle(text)
+                self.assertEqual((a.kind, a.attack, a.every), ('walk', 'fight', 'Godrick Soldier'), a.say)
+                self.assertIn(a.entity_id, (22, 23))
+
+    def test_mentions_are_whole_words(self):
+        # 'here' must not match 'Deer' (difflib would call them alike)
+        r = CommandResolver(FieldAdapter())
+        self.assertIsNone(r._mentioned('is there anything here'))
+
+
+class ScreenshotSessionTests(unittest.TestCase):
+    """15:21-15:22: "How many soldiers ... around here?" (Navi: three Godrick Soldiers), then "Can you kill
+    all of them from me?" fought "that enemy" and went on to an Eagle 35 m up a cliff; "Oh no, not the
+    Eagle, all the soldiers." was a question back."""
+
+    def _resolver(self):
+        from game_assistant.core.interface import Entity
+        a = FieldAdapter()
+        a.NAMES = {**FieldAdapter.NAMES, 5: 'Eagle'}
+        a.entities = list(a.entities) + [Entity(25, 5, 'c7', (3.0, 35.0, 4.0), (3.0, 35.5, 4.0), 0.5, 1.0, True,
+                                                False)]
+        return CommandResolver(a)
+
+    def test_them_means_what_was_just_talked_about(self):
+        r = self._resolver()
+        r.heard('How many soldiers do you see or do you know of that are around here?\n'
+                'Three Godrick Soldiers nearby. One is about 17 metres ahead, and the other two are about 40 '
+                'and 70 metres away.')
+        a = r.handle('Can you kill all of them from me?')
+        self.assertEqual((a.kind, a.attack, a.every), ('walk', 'fight', 'Godrick Soldier'), a.say)
+
+    def test_any_enemy_is_never_one_far_above(self):
+        r = self._resolver()
+        a = r.handle('kill all of them')            # nothing said before: any enemy, but not the Eagle up there
+        self.assertNotEqual(a.entity_id, 25)
+        self.assertIsNone(r.character('enemy', max_range=4.9))   # (only the Eagle is that near on the map)
+
+    def test_a_correction_without_a_verb(self):
+        r = self._resolver()
+        r.handle('kill the eagle')
+        a = r.handle('Oh no, not the Eagle, all the soldiers.')
+        self.assertEqual((a.kind, a.attack, a.every), ('walk', 'fight', 'Godrick Soldier'), a.say)
+        a = r.handle('kill the eagle')
+        b = r.handle('not the eagle all the soldiers')   # speech without the comma
+        self.assertEqual((b.kind, b.every), ('walk', 'Godrick Soldier'), b.say)
+
+    def test_that_is_still_what_the_player_looks_at(self):
+        r = self._resolver()
+        r.heard('Is there a boar around?\nA Boar about 38 metres to your left.')
+        a = r.handle('kill that')                    # singular: not the boar from the conversation
+        self.assertNotEqual(a.entity_id, 24)
+
+
+class SequenceOrderTests(unittest.TestCase):
+    """15:4x: "Alright, please kill the boar and then kill any remaining soldiers." -> "I don't see any boar
+    and then kill soldiers to attack." (the whole rest was taken as the name)."""
+
+    def test_splitting(self):
+        from game_assistant.core.walk_commands import split_orders
+        for text, want in [
+                ('Alright, please kill the boar and then kill any remaining soldiers',
+                 ['Alright, please kill the boar', 'kill any remaining soldiers']),
+                ("Please kill the boar and then after you've killed the boar, kill any soldiers around here, please",
+                 ['Please kill the boar', 'kill any soldiers around here, please']),
+                ('kill the boar then go to the nearest grace', ['kill the boar', 'go to the nearest grace']),
+                ('kill the boar and the soldier', ['kill the boar', 'kill the soldier']),
+                ('walk to the church and stand there', ['walk to the church and stand there']),
+                ('Kill all the soldiers around here, please', ['Kill all the soldiers around here, please'])]:
+            with self.subTest(text=text):
+                self.assertEqual(split_orders(text), want)
+
+    def test_the_boar_first_then_all_the_soldiers(self):
+        r = CommandResolver(FieldAdapter())
+        a = r.handle('Alright, please kill the boar and then kill any remaining soldiers.')
+        self.assertEqual((a.kind, a.entity_id, a.attack), ('walk', 24, 'fight'), a.say)
+        self.assertEqual(a.then, ['kill any remaining soldiers'])
+        b = r.handle(a.then[0])
+        self.assertEqual((b.kind, b.attack, b.every), ('walk', 'fight', 'Godrick Soldier'), b.say)

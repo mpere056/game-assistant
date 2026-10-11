@@ -52,6 +52,9 @@ ACTION_AT = 1.5       # metres from a ladder/lift/jump start to act on it
 # Walking to a character (and attacking it): steered at its live position every frame once within
 # CHASE_DIRECT metres; further away along the route, which the caller re-plans as it moves.
 CHASE_DIRECT = 20.0
+RESUME_GRACE = 2.0    # seconds after a pause (the game window out of focus) before "stuck" counts again
+CHASE_LEVEL = 4.0     # ...and no more than this many metres above or below (an Eagle 35 m up a cliff, 18 m
+                      # away on the map: straight at it walked into the cliff and got stuck)
 LOCK_RANGE = 12.0     # attack: lock on (the camera then follows the target by itself)
 ATTACK_REACH = 1.8    # attack: swing when this close to the target's body (metres from its edge)
 ATTACK_FACING = 30.0  # ...and the camera points within this many degrees of it
@@ -160,7 +163,10 @@ class AutoWalk:
             self._paused_why = why
             self.state = 'paused'
             self._stuck_since = None
+            self._resumed_at = None
             return Intent()
+        if self._paused_why is not None:   # back in the game: it takes a moment to take keys again
+            self._resumed_at = self.t
         self._paused_why = None
         p = snap.player.pos
         if self.target_id is not None:
@@ -224,7 +230,7 @@ class AutoWalk:
             self.events.append('arrived')
             self.stop()
             return Intent()
-        if _flat(p, e.pos) > CHASE_DIRECT and self.route:
+        if (_flat(p, e.pos) > CHASE_DIRECT or abs(e.pos[1] - p[1]) > CHASE_LEVEL) and self.route:
             return None if not taps else Intent(taps=tuple(taps))
         # Close: straight at it. Locked on, the camera follows by itself: don't fight it with the mouse.
         keys = set(min(DIRECTIONS, key=lambda d: abs(_wrap(err - d[0])))[1])
@@ -312,6 +318,12 @@ class AutoWalk:
 
     def _check_stuck(self, p: Vec3) -> bool:
         """True when the walk just gave up."""
+        resumed = getattr(self, '_resumed_at', None)
+        if resumed is not None and self.t - resumed < RESUME_GRACE:
+            # (16:37: back in the game after a pause, the character stood 1.8 s with forward held: a
+            # false "stuck" that used up one of the three tries before giving up)
+            self._stuck_since = None
+            return False
         if self._stuck_since is None:
             self._stuck_since, self._stuck_pos = self.t, p
             return False

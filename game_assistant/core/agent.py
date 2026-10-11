@@ -278,6 +278,41 @@ or ask_player when it is unclear (one short question, at most two options). Enem
 not places: never send the player to where an item is found instead. Use where_is or nearest_places
 first only to check a place name. Never answer with text alone."""
 
+PLAN_SYSTEM = """The player of {game} gave an order for their character: the character walks, moves and
+fights by itself, step by step, until the order is done. Turn the order into steps by calling make_plan once.
+Step kinds:
+- go: walk to `target`: a place name ('Groveside Cave', 'Gatefront Ruins'), 'nearest site of grace',
+  'nearest landmark', a character kind from the characters around ('Godrick Soldier'), 'found' (the
+  character an until_see found), 'crosshair' (what the player looks at), 'start' (where the order was
+  given: "come back here"). engage: 'none' (walk past enemies: "without fighting"), 'attackers' (fight only
+  what attacks), 'all' (fight every enemy met on the way, then go on: "kill anything you meet on the way").
+  until_see: stop as soon as a character of this kind is in sight ("until you encounter a soldier").
+- fight: `target` a kind ('Godrick Soldier', 'Boar'), 'enemy' (any hostile) or 'found'. count 'one' or
+  'all' (until none of them is left nearby: "kill everything", "all the soldiers"). cycle: kinds to take in
+  turn ("alternating soldiers and other things": ['Godrick Soldier', 'other']; 'other' = any other enemy).
+- move: shape 'circle', 'line' (straight ahead), 'wander' (around, to random places nearby); seconds; until_see
+  as for go ("walk around until you meet a soldier": wander with until_see, no seconds).
+- wait: seconds.
+"Kill the soldier you meet" after an until_see is fight target 'found'. Use the kind names exactly as the
+characters around list them (singular). Defaults: go engage 'none'; fight count 'one'. `say`: Navi's short,
+cheerful reply (one sentence, no lists). Use where_is or nearest_places only to check a place name."""
+
+PLAN_TOOL = {'name': 'make_plan', 'description': 'The steps of the order, in order.',
+             'input_schema': {'type': 'object', 'additionalProperties': False, 'required': ['say', 'steps'],
+                              'properties': {
+                                  'say': {'type': 'string'},
+                                  'steps': {'type': 'array', 'items': {
+                                      'type': 'object', 'additionalProperties': False, 'required': ['do'],
+                                      'properties': {
+                                          'do': {'type': 'string', 'enum': ['go', 'fight', 'move', 'wait']},
+                                          'target': {'type': 'string'},
+                                          'engage': {'type': 'string', 'enum': ['none', 'attackers', 'all']},
+                                          'until_see': {'type': 'string'},
+                                          'count': {'type': 'string', 'enum': ['one', 'all']},
+                                          'cycle': {'type': 'array', 'items': {'type': 'string'}},
+                                          'shape': {'type': 'string', 'enum': ['circle', 'line', 'wander']},
+                                          'seconds': {'type': 'number'}}}}}}}
+
 COMMAND_TOOLS = [
     {'name': 'fight_character', 'description': "Fight the nearest character with this name (as listed), or "
      "'enemy' for the nearest hostile one, until it's down: dodge its attacks and keep attacking.",
@@ -333,6 +368,32 @@ class Agent:
                                'allowed_domains': list(sources)})
 
     # ---- F10 orders the instant rules didn't understand ----
+
+    def plan(self, text: str, heard: str = '') -> dict | None:
+        """An order of several parts as plan steps (core/plan.py), from Haiku: {'say', 'steps'} or None.
+        Its own short exchange, through the spending guard. `heard`: the conversation of the last minute."""
+        tools = [t for t in self.tools if t.get('name') in ('where_is', 'nearest_places')] + [PLAN_TOOL]
+        around = self._characters_around()
+        context = f'<recent_conversation>{heard}</recent_conversation>\n' if heard else ''
+        msgs = [{'role': 'user', 'content': f'<characters_around>{around}</characters_around>\n{context}\n{text}'}]
+        system = PLAN_SYSTEM.format(game=self.adapter.game)
+        for _ in range(3):
+            self.guard.check()
+            msg = self.client.messages.create(model=MODEL, max_tokens=MAX_TOKENS * 2, system=system, tools=tools,
+                                              messages=msgs, thinking={'type': 'adaptive'},
+                                              output_config={'effort': 'low'})
+            self.guard.record(MODEL, msg.usage, 'plan')
+            uses = [b for b in msg.content if b.type == 'tool_use']
+            for b in uses:
+                if b.name == PLAN_TOOL['name']:
+                    return dict(b.input)
+            if not uses:
+                return None
+            msgs.append({'role': 'assistant', 'content': msg.content})
+            msgs.append({'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': b.id, 'content': self._run_tool(b.name, b.input)[0]}
+                for b in uses]})
+        return None
 
     def command(self, text: str) -> dict | None:
         """One action for an order, from Haiku: {'tool': name, 'input': {...}} or None. Its own short

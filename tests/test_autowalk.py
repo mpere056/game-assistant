@@ -199,6 +199,15 @@ class ChaseTests(unittest.TestCase):
         self.assertIn('arrived', aw.events)
         self.assertLess(math.hypot(w.pos[0] - enemy[0], w.pos[2] - enemy[2]), 3.5)  # where it is now
 
+    def test_follows_the_route_to_a_character_far_above(self):
+        # 15:22: an Eagle 35 m up a cliff, 18 m away on the map: straight at it walked into the cliff.
+        w = World()
+        aw = AutoWalk()
+        w.entities = (self._enemy((0.0, 35.0, 15.0)),)
+        aw.start([(0.0, 0.0, 0.0), (20.0, 0.0, 5.0), (0.0, 35.0, 15.0)], (0.0, 35.0, 15.0), 'Eagle', target_id=7)
+        aw.update(w.snap(), 1 / 30)
+        self.assertNotEqual(aw.state, 'chasing')     # along the route (round by the slope), not at the cliff
+
     def test_attack_locks_on_swings_once_and_hands_back(self):
         w = World()
         aw = AutoWalk()
@@ -222,3 +231,20 @@ class ChaseTests(unittest.TestCase):
         walk(aw, w, 0.2)
         self.assertIn('target_gone', aw.events)
         self.assertFalse(aw.active)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_no_stuck_right_after_a_pause(self):
+        from game_assistant.core.autowalk import RESUME_GRACE
+        aw = AutoWalk()
+        aw.start([(0.0, 0.0, 0.0), (0.0, 0.0, 50.0)], (0.0, 0.0, 50.0), 'there')
+        aw._paused_why = 'not_focused'
+        aw._resumed_at = None
+        aw.t = 10.0
+        aw._stuck_since = None
+        aw._paused_why = None
+        aw._resumed_at = aw.t
+        for _ in range(int((RESUME_GRACE - 0.1) * 30)):
+            aw.t += 1 / 30
+            self.assertFalse(aw._check_stuck((0.0, 0.0, 0.0)))
+        self.assertNotIn('unstick', aw.events)
