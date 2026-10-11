@@ -297,7 +297,7 @@ class Companion:
             self.show(point=goal, seconds=SHOW_SECONDS * 1.5)
             return None
         # Ladders, lifts, jumps and drops on the route: say so when the player gets near one.
-        for what, where in self.route_actions:
+        for what, where, *_ in self.route_actions:
             key = (what, round(where[0]), round(where[1]), round(where[2]))
             if key not in self._announced and math.hypot(where[0] - p[0], where[2] - p[2]) < ACTION_NEAR                     and abs(where[1] - p[1]) < 4.0:
                 self._announced.add(key)

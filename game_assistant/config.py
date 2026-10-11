@@ -29,6 +29,12 @@ DEFAULTS = {
     'voice': 'Zira',                  # 'windows' engine: part of a Windows voice name (Zira, David...)
     'voice_rate': 1,                  # 'windows' engine: -10 (slow) .. 10 (fast)
     'push_to_talk_key': 'F9',         # hold to talk: F1-F12, or a single letter
+    'command_key': 'F10',             # hold to give your character an order ("go to the nearest grace")
+    'auto_walk': True,                # orders make the character walk by itself (F10)
+    'auto_walk_sprint': True,         # run on long straight stretches while walking by itself
+    'walk_keys': {'forward': 'W', 'back': 'S', 'left': 'A', 'right': 'D', 'sprint': 'SPACE',
+                  'interact': 'E', 'jump': 'F', 'lock': 'Q', 'attack': 'LMB'},  # the game's bindings
+                  # (Elden Ring keyboard defaults; LMB = left mouse button, the light attack)
     'speech_model': 'base.en',        # faster-whisper model: tiny.en, base.en, small.en
     'microphone': '',                 # part of the microphone's name; '' = the Windows default
 }

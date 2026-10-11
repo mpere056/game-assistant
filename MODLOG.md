@@ -556,3 +556,95 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
 - Checked offline (bottom to top of real ones): Stormveil ladder 14.6 m: 15 m route via the ladder
   (250 m walk without it); Stormveil lift 116 m: reached via the lift (unreachable without);
   m15 ladder 21 m and m13 lift 82 m: reached only with them. 51 tests pass.
+
+## 2026-10-10: learned links; F10 orders and auto-walk (phase 4b)
+- User: commit and merge, don't test yet, continue with the next things.
+- Learned links: the adapter tells the route planner's process where the player is ~4 times a second;
+  a move between faces the graph doesn't connect within 3 links becomes a link (kind 8, cost +1 m),
+  saved in .local/eldenring/navgraph/learned.json. Teleports (>15 m between samples), long pauses,
+  menus and loading are ignored. Live: 167 frames of observations, planner stayed responsive.
+- core/autowalk.py: per frame, keys (the nearest of 8 directions relative to the camera) + a camera
+  turn toward a point 3.5 m ahead on the route; run on straights >= 20 m with hysteresis and at least
+  1.5 s (a short tap of Space is a backstep/roll in Elden Ring); arrived 3 m/3 m; stuck (<0.5 m in 2 s)
+  -> new route, twice within 10 s -> give up; pauses in menus, loading, death, when not focused; enemy
+  within 8 m of the player or the next 30 m of route -> warning, keeps walking; ladder: interact tap
+  then forward/back to the other end's height; lift: wait for the height change (25 s max); jump: jump
+  tap. 8 tests in a simulated world (L route within 3 m, run never shorter than 1.5 s, ...).
+- ui/win_input.py: SendInput scan codes (dwExtraInfo marked), relative mouse for the camera with
+  degrees-per-count learned from the camera's own turn, all keys released on stop/pause/exit; a
+  WH_KEYBOARD_LL hook: physical (not injected) W/A/S/D/Space/Shift -> takeover.
+- core/walk_commands.py: answer to Navi's question (10 s), stop, nearest grace/landmark (asks when the
+  second is within 15 %), "that" (crosshair), a named place; else Haiku with a command prompt and
+  action tools (Agent.command). Live: "head over to that church" -> crosshair, "back to the castle" ->
+  Castle Stormveil, "somewhere I can rest" -> nearest grace, $0.0011 for 5. "never mind, stop" went to
+  Haiku: stop now matches in short orders.
+- App: one push-to-talk listener for F9 (questions) and F10 (orders); "/..." typed is an order; the walk
+  runs in the fairy loop on Navi's route (Navi plans and leads); Navi speaks: start, "Careful, an enemy
+  ahead!", stuck, give up, "Okay, you've got it!", "Click back into the game...". Settings: command_key,
+  auto_walk, auto_walk_sprint, walk_keys (Elden Ring defaults W/A/S/D, Space run, E interact, F jump).
+- Found while wiring: app.py on main didn't parse (the ladder announcement line had real line breaks in
+  a string, from shell escaping); no test imported the app. Hotfix PR #8 with tests that compile every
+  file and import the app; another heredoc then put backspace characters into a regex: a test now
+  rejects control characters in source files. Scripts with backslashes are written as files now.
+- 73 tests pass. Not tried in the game.
+
+## 2026-10-10: first F10 test in game: wrong target, stuck at a cave mouth
+- User (screenshot): F10 "Walk to the nearest Godrick soldier" (twice) -> "Let's go to Groveside Cave!";
+  the character walked to the cave entrance, then "Hmm, something's in the way" again and again.
+  Also "Here we are: Groveside Cave!" came while the walk went on.
+- Cause 1: "the nearest X" only knew places; an unknown X fell back to the nearest landmark. Now
+  "nearest <name>" finds the nearest living character with that name (knowledge names), "enemy" means
+  any hostile; the walk follows the character (re-aims when it moved 6 m; "It's gone!" if it dies).
+- Cause 2 (checked live: the route from there reaches the cave grace, 37 m, ends 1 m from it): the walk
+  steered 3.5 m ahead on the route and cut corners into the rock (a 90-degree bend: 3.3 m off the route
+  in the simulation); and "give up after two stucks within 10 s" never happened because re-planning
+  takes seconds. Now: no steering past a sharp corner until within 1 m of it (same bend: < 1 m);
+  first stuck: back off and sidestep 0.8 s; second: the made-up links (entrance, step, drop, learned)
+  of the route within 5 m are avoided and the route re-planned; third within a minute: give up.
+- During a walk Navi says "Here we are" when the walk arrives (3 m), not at Navi's 15 m.
+- 77 tests pass (new: corridor bend, stuck sequence, nearest character by name / enemy / none).
+
+## 2026-10-10: second F10 test: orders for the Godrick Soldier still went wrong
+- User (2 screenshots): "Go to the Godrick Soldier." -> "The Warmaster's Shack or the Volcano Manor
+  Request: Istvan?"; "Go to the nearest Godrick soldier in front of me." -> "Let's go to Groveside
+  Cave!"; "I want you to walk my character to the nearest Godrick soldier, please." -> Haiku: "soldiers
+  are enemies, not fixed spots... Warmaster's Shack ...?".
+- The orders were at 22:24, the earlier fixes saved at 21:05; the Groveside reply is only possible
+  with the code from before them, so the app most likely hadn't been restarted. The status line now
+  says "NEW VERSION ON DISK: restart the assistant" when source files are newer than the app.
+- Real gaps anyway: named orders searched places first, and place search falls back to items
+  ("Godrick Soldier Ashes" -> Warmaster's Shack); filler ("in front of me", "please", "I mean") broke
+  matching; "gondric" (speech recognition) didn't match "Godrick"; Haiku had no character action.
+- core/walk_commands.py rewritten: "nearest/closest X" anywhere in the order; the target after
+  go/walk/take ... to; characters within 150 m first with forgiving word matching (difflib >= 0.72 or a
+  prefix), then places, never via an item; filler removed. Haiku's command prompt gets the characters
+  around ("Godrick Soldier (enemy) 39 m; ...") and a walk_to_character action. An order without the game
+  says "I can't see the game right now." instead of raising.
+- Test: all six of the user's phrasings resolve to the soldier (entity 11), instantly, with a place
+  search answering like the real one. 79 tests pass. Live check not possible: the game was closed.
+
+## 2026-10-10: third F10 test: soldier orders work; cave still stuck; moving targets; one hit
+- User (screenshot): "Go to the nearest Godrick soldier" now works ("There's a Godrick Soldier 30 metres
+  away", "Here we are"); "Go to the Site of Grace that's in the nearest cave" still stuck at the rock
+  beside the cave mouth. Moving characters: the walk went to where it was, not where it is. Wants it
+  to start combat: land one hit. Also asked about Laya / the NVIDIA model for real-time combat.
+- Cave, measured live from where the character stood: the route climbed a rock and used a made-up
+  drop link; two of its straight legs ran through rock (rays hit 0.1 m and 0.4 m along). Now every route
+  is checked before use: rays along each straight leg (first 80 m) at knee and chest height; a blocked
+  leg -> the planner avoids faces within 0.8 m of the hit (WorldGraph.avoid) and made-up links within
+  3 m, and plans again (up to 6 times; kept for the session). That made the route clear but short of
+  the cave (the passage has no navmesh). Bridge: when the navmesh route ends within 40 m of the goal,
+  the raycast planner (1 m cells, rays from 1.8 m above the feet so the overhang doesn't hide the
+  floor; 6 m start: no floor found) finishes it. Result: 27 m into Groveside Cave, 1.2 m from the
+  grace, no leg through a wall. (First try skipped the bridge after a timed-out search; fixed.)
+- Moving targets: within 20 m the walk steers at the character's live position every frame; further,
+  the route is re-planned when it has moved 3 m (was 6 m, and only re-aimed the route).
+- Attack (code, no model in the loop): "attack the nearest Godrick soldier", "hit that enemy",
+  "attack it" (the crosshair, else the nearest enemy), Haiku tool attack_character. Lock on (Q) within
+  12 m, close to 1.8 m from its body, swing (left mouse button) when facing within 30 degrees, wait
+  0.6 s, hand back ("Got a hit in! Your turn!"), still locked on. Target dies on the way: "It's gone!".
+- Laya / NVIDIA models for combat: kept out of the real-time loop (any model is hundreds of ms per
+  decision; a vision model would compete with the game on the 6 GB GPU). Combat timing belongs to code
+  at 60 Hz on memory data (next: enemy animation state via the bridge); a model picks what to do.
+- 83 tests pass (new: moving target reached where it is now, lock -> one swing -> hand back, target
+  dies, attack orders). Not tried in game.

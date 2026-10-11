@@ -29,11 +29,15 @@ def key_code(name: str) -> int:
 class PushToTalk:
     def __init__(self, on_text: Callable[[str], None], key: str = 'F9', model: str = 'base.en', microphone: str = '',
                  on_state: Callable[[str], None] = lambda s: None, vocabulary: str = '',
-                 on_press: Callable[[], None] = lambda: None):
+                 on_press: Callable[[], None] = lambda: None, command_key: str | None = None,
+                 on_command: Callable[[str], None] | None = None):
         self.on_text = on_text
         self.on_press = on_press      # called on its own thread when the key goes down (screen grab)
         self.on_state = on_state      # 'loading', 'ready', 'listening', 'thinking', or an error text
         self.vk = key_code(key)
+        # A second key for orders to the character (F10): same microphone and model, text tagged.
+        self.command_vk = key_code(command_key) if command_key and on_command else None
+        self.on_command = on_command
         self.model_name = model
         self.microphone = microphone
         # Game words (from the adapter) steer recognition: "Moonveil", not "Moonvale".
@@ -77,7 +81,11 @@ class PushToTalk:
             return
         get = ctypes.windll.user32.GetAsyncKeyState
         while True:
-            if not get(self.vk) & 0x8000:
+            if get(self.vk) & 0x8000:
+                vk, deliver = self.vk, self.on_text
+            elif self.command_vk and get(self.command_vk) & 0x8000:
+                vk, deliver = self.command_vk, self.on_command
+            else:
                 time.sleep(0.02)
                 continue
             self.on_state('listening')
@@ -86,7 +94,7 @@ class PushToTalk:
             try:
                 with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32', device=self._device(),
                                     callback=lambda data, frames, t, status: chunks.append(data.copy())):
-                    while get(self.vk) & 0x8000:
+                    while get(vk) & 0x8000:
                         time.sleep(0.02)
             except Exception as e:
                 self.on_state(f'microphone error: {e}')
@@ -104,4 +112,4 @@ class PushToTalk:
                 continue
             self.on_state('ready')
             if text:
-                self.on_text(text)
+                deliver(text)

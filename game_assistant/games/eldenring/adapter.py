@@ -73,6 +73,13 @@ def _rotate(q: tuple[float, float, float, float], v: Vec3) -> Vec3:
     return (v[0] + w * t[0] + c[0], v[1] + w * t[1] + c[1], v[2] + w * t[2] + c[2])
 
 
+OBSERVE_EVERY = 0.25  # seconds between telling the route planner where the player is
+ROUTE_CHECKS = 6      # plan, check against the world, avoid what's blocked: at most this many times
+LEG_CHECK_M = 80.0    # check the route's straight legs this far ahead (it's re-planned as you go)
+AVOID_RADIUS = 0.8    # metres around a blocked spot the route planner then keeps clear of
+BRIDGE_MAX = 40.0     # a navmesh route ending this close to its goal is finished with the raycast planner
+
+
 class EldenRingAdapter:
     game = 'Elden Ring'
     capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN, CAP_PLACES})
@@ -97,6 +104,9 @@ class EldenRingAdapter:
         self.wiki = Wiki()
         self._router = None  # the route planner's own process (core/route_worker.py), started when needed
         self._banned_links: set = set()  # drops/entrances a live ray found blocked (this session)
+        self._last_observe = 0.0
+        self._last_special: list = []  # (from, to, start in snapshot coordinates) of the last route
+        self._avoid: list = []         # (x, y, z, radius) in world coordinates: legs found blocked
         self._route_lock = threading.Lock()
         if (Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'navgraph' / 'index.json').exists():
             self.capabilities = self.capabilities | {CAP_NAVMESH}  # Get-GameData built the walkable world
@@ -256,7 +266,6 @@ class EldenRingAdapter:
         The result has waypoints, reaches_goal, length_m and timed_out: when the time budget runs out
         it is the best part of the way so far, and the caller plans on from its end while moving."""
         from ...core.nav import Route
-        from ...core.route_worker import RouteWorker
         snap = self.snapshot()
         if not snap.player or not snap.area:
             return None
@@ -269,25 +278,118 @@ class EldenRingAdapter:
         s = (start[0] + off[0], start[1] + off[1], start[2] + off[2])
         g = (goal[0] + off[0], goal[1] + off[1], goal[2] + off[2])
         with self._route_lock:
-            if self._router is None or not self._router.alive:
-                self._router = RouteWorker('game_assistant.games.eldenring.navgraph:WorldGraph')
-            for _ in range(4):  # drops and entrances on the route are checked in the game first
+            self._ensure_router()
+            for _ in range(ROUTE_CHECKS):  # checked against the real world before it is used
                 r = self._router.route(s, g, budget_s=budget_s, timeout=budget_s + 20,
-                                       attrs={'area': me[0], 'banned': set(self._banned_links)})
+                                       attrs={'area': me[0], 'banned': set(self._banned_links),
+                                              'avoid': list(self._avoid)})
                 if r is None:
                     return None
                 blocked = self._blocked_links(r.special or [], off)
-                if not blocked:
+                walls = [] if blocked else self._blocked_legs(r, off)
+                if not blocked and not walls:
                     break
                 self._banned_links |= blocked
+                for hit in walls:  # avoid the spot, and any made-up link near it
+                    self._avoid.append((hit[0] + off[0], hit[1] + off[1], hit[2] + off[2], AVOID_RADIUS))
+                    self._banned_links |= {(k[3], k[4]) for k in (r.special or []) if k[0] in (1, 2, 3, 8) and
+                                           math.dist(((k[1][0] + k[2][0]) / 2 - off[0], (k[1][1] + k[2][1]) / 2 - off[1],
+                                                      (k[1][2] + k[2][2]) / 2 - off[2]), hit) < 3.0}
+        self._last_special = [(frm, to, ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1],
+                                          (pa[2] + pb[2]) / 2 - off[2]))
+                              for k, pa, pb, frm, to, _land in (r.special or []) if k in (1, 2, 3, 8)]
         route = Route([(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints], r.reaches_goal, 0)
         route.length_m, route.timed_out = r.length, r.timed_out
-        # Things to tell the player on the way: (what, where it starts) for ladders, lifts, jumps, drops.
+        route.bridged = False
+        if not r.reaches_goal:  # (also after a timed-out search: the gap left is what matters)
+            self._bridge(route, goal)
+            if route.bridged:
+                route.timed_out = False
+        # Things on the way: (what, where it starts, where it ends) for ladders, lifts, jumps, drops.
         from ...core.navmesh import LINK_NAMES
         route.actions = [(LINK_NAMES[k], ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1],
-                                          (pa[2] + pb[2]) / 2 - off[2]))
-                         for k, pa, pb, *_ in (r.special or []) if k in (2, 4, 5, 6)]
+                                          (pa[2] + pb[2]) / 2 - off[2]),
+                          (land[0] - off[0], land[1] - off[1], land[2] - off[2]))
+                         for k, pa, pb, _f, _t, land in (r.special or []) if k in (2, 4, 5, 6)]
         return route
+
+    def avoid_links_near(self, pos: Vec3, radius: float = 5.0) -> int:
+        """The character got stuck at pos: don't use the made-up links (entrance gaps, steps, drops,
+        learned) of the last route near there again this session. Returns how many."""
+        near = {(frm, to) for frm, to, where in self._last_special if math.dist(where, pos) < radius}
+        self._banned_links |= near
+        return len(near)
+
+    def _ensure_router(self):
+        from ...core.route_worker import RouteWorker
+        if self._router is None or not self._router.alive:
+            self._router = RouteWorker('game_assistant.games.eldenring.navgraph:WorldGraph')
+        return self._router
+
+    def observe(self, snap) -> None:
+        """Called every fairy frame: about 4 times a second, tell the route planner where the player is,
+        so it learns connections the game's navmesh lacks from where the player actually goes."""
+        if CAP_NAVMESH not in self.capabilities or snap is None:
+            return
+        now = time.monotonic()
+        if now - self._last_observe < OBSERVE_EVERY:
+            return
+        self._last_observe = now
+        try:
+            if not snap.in_world or not snap.player or snap.menu or not snap.area:
+                self._ensure_router().observe(p=None)
+                return
+            me = self._place_index().player_world(int(snap.area, 16), snap.player.pos)
+            if me is None:
+                return
+            self._ensure_router().observe(p=(me[1], me[2], me[3]), area=me[0], t=now)
+        except (GameNotRunning, RuntimeError, OSError):
+            pass
+
+    def _bridge(self, route, goal: Vec3) -> None:
+        """The navmesh route ends short of a goal less than BRIDGE_MAX metres away: finish the trip with the
+        raycast planner (1 m cells, the game's real collision, walls checked). Some passages have no navmesh
+        at all: Groveside Cave's entrance has none for ~10 m; this got from the route's end to its grace in
+        0.14 s. Rays start just above head height, so an overhang doesn't hide the floor."""
+        from ...core import nav
+        end = route.waypoints[-1]
+        gap = math.dist(end, goal)
+        if gap > BRIDGE_MAX or gap < 2.0:
+            return
+        prof = nav.Profile(cell=1.0, radius=min(BRIDGE_MAX, gap + 10.0), probe_up=1.8, probe_down=6.0, max_up=0.6,
+                           max_down=0.9, min_normal_y=0.6, chunk=1024)
+        try:
+            b = nav.plan(self.raycast, end, goal, profile=prof)
+        except (GameNotRunning, TimeoutError, RuntimeError):
+            return
+        if b is None or not b.reaches_goal or len(b.waypoints) < 2:
+            return
+        route.waypoints = list(route.waypoints) + list(b.waypoints[1:])
+        route.length_m += sum(math.dist(u, v) for u, v in zip(b.waypoints, b.waypoints[1:]))
+        route.reaches_goal, route.bridged = True, True
+
+    def _blocked_legs(self, r, off: Vec3) -> list:
+        """Where the route's straight legs (the first LEG_CHECK_M metres) run into a wall or rock: rays
+        at knee and chest height along each leg. The navmesh can be right while the straight line between
+        two corners is not (a step or drop link across a gap, an overhang): measured at a cave mouth near
+        Stormhill, two legs went through rock 0.1 and 0.4 m along."""
+        pts = [(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints]
+        rays, walked = [], 0.0
+        for u, v in zip(pts, pts[1:]):
+            if walked > LEG_CHECK_M:
+                break
+            walked += math.dist(u, v)
+            if math.dist(u, v) < 0.3:
+                continue
+            for lift in (0.5, 1.2):
+                rays.append(((u[0], u[1] + lift, u[2]), (v[0], v[1] + lift, v[2])))
+        if not rays:
+            return []
+        try:
+            hits = self.raycast(rays)
+        except (GameNotRunning, TimeoutError, RuntimeError):
+            return []
+        return [h.pos for h in hits if h.hit and h.pos and h.normal and abs(h.normal[1]) < 0.6]
 
     def _blocked_links(self, special: list, off: Vec3) -> set:
         """Special links (drops, steps, dungeon entrances) that a ray shows are blocked by a wall or a

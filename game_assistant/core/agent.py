@@ -267,6 +267,42 @@ def direction(cam, pos) -> str:
     return 'right' if angle > 0 else 'left'
 
 
+COMMAND_SYSTEM = """The player of {game} gave an order for their character (it walks there by itself, with
+Navi leading), or attacks. Turn it into exactly one action by calling one action tool: attack_character
+(walk up to a character or enemy and land one hit), walk_to_character (a
+character or enemy near the player, by name, or "enemy" for the nearest hostile one: the list of
+characters around is given), walk_to_place (a named place: a Site of Grace, landmark, dungeon, ruin),
+walk_to_nearest (the nearest place of a kind), walk_to_crosshair ("that", "over there"), stop_walking,
+or ask_player when it is unclear (one short question, at most two options). Enemies and characters are
+not places: never send the player to where an item is found instead. Use where_is or nearest_places
+first only to check a place name. Never answer with text alone."""
+
+COMMAND_TOOLS = [
+    {'name': 'attack_character', 'description': "Walk up to the nearest character with this name (as listed), "
+     "or 'enemy' for the nearest hostile one, and land one hit on it.",
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
+                      'additionalProperties': False}},
+    {'name': 'walk_to_character', 'description': "Walk to the nearest character near the player with this "
+     "name (as listed), or 'enemy' for the nearest hostile one.",
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
+                      'additionalProperties': False}},
+    {'name': 'walk_to_place', 'description': 'Walk to a named place (as the game names it).',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
+                      'additionalProperties': False}},
+    {'name': 'walk_to_nearest', 'description': "Walk to the nearest place of a kind: 'site of grace' or 'landmark'.",
+     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['site of grace', 'landmark']}},
+                      'required': ['kind'], 'additionalProperties': False}},
+    {'name': 'walk_to_crosshair', 'description': 'Walk to what the player is looking at.',
+     'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'name': 'stop_walking', 'description': 'Stop walking.',
+     'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'name': 'ask_player', 'description': 'Ask one short question when the order is unclear.',
+     'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'},
+                                                       'options': {'type': 'array', 'items': {'type': 'string'}}},
+                      'required': ['question'], 'additionalProperties': False}},
+]
+
+
 class Agent:
     def __init__(self, adapter: GameAdapter, guard: SpendGuard | None = None, client: anthropic.Anthropic | None = None,
                  companion: Companion | None = None):
@@ -289,6 +325,52 @@ class Agent:
         if sources:  # Anthropic's server-side web search, limited to the game's wikis ($0.01 per search)
             self.tools.append({'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 2,
                                'allowed_domains': list(sources)})
+
+    # ---- F10 orders the instant rules didn't understand ----
+
+    def command(self, text: str) -> dict | None:
+        """One action for an order, from Haiku: {'tool': name, 'input': {...}} or None. Its own short
+        exchange (not the question history); a few cents of a cent; through the spending guard."""
+        tools = [t for t in self.tools if t.get('name') in ('where_is', 'nearest_places')] + COMMAND_TOOLS
+        around = self._characters_around()
+        msgs = [{'role': 'user', 'content': f'<characters_around>{around}</characters_around>\n\n{text}'}]
+        system = COMMAND_SYSTEM.format(game=self.adapter.game)
+        for _ in range(3):
+            self.guard.check()
+            msg = self.client.messages.create(model=MODEL, max_tokens=MAX_TOKENS, system=system, tools=tools,
+                                              messages=msgs, thinking={'type': 'adaptive'},
+                                              output_config={'effort': 'low'})
+            self.guard.record(MODEL, msg.usage, 'command')
+            uses = [b for b in msg.content if b.type == 'tool_use']
+            for b in uses:
+                if b.name in {t['name'] for t in COMMAND_TOOLS}:
+                    return {'tool': b.name, 'input': dict(b.input)}
+            if not uses:
+                return None
+            msgs.append({'role': 'assistant', 'content': msg.content})
+            msgs.append({'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': b.id, 'content': self._run_tool(b.name, b.input)[0]}
+                for b in uses]})
+        return None
+
+    def _characters_around(self, limit: int = 12) -> str:
+        """'Godrick Soldier (enemy) 39 m; Deer 33 m; ...' for the command prompt."""
+        try:
+            snap = self.adapter.snapshot()
+        except (GameNotRunning, TimeoutError, RuntimeError):
+            return 'unknown'
+        if not snap.in_world or not snap.player:
+            return 'unknown'
+        p = snap.player.pos
+        rows = []
+        for e in snap.entities:
+            if e.dead:
+                continue
+            k = self._knowledge(e.type_id) if e.type_id is not None else None
+            name = e.name or (k or {}).get('name') or 'unknown character'
+            rows.append((dist(p, e.pos), f"{name}{' (enemy)' if e.hostile else ''} {dist(p, e.pos):.0f} m"))
+        rows.sort()
+        return '; '.join(r for _, r in rows[:limit]) or 'none'
 
     # ---- tools: exact facts from the adapter ----
 
