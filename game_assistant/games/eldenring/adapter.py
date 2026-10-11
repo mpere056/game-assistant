@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_NAVMESH, CAP_PLACES, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN,
+from ...core.interface import (CAP_CAMERA, CAP_COMBAT, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_NAVMESH, CAP_PLACES, CAP_PLAYER, CAP_RAYCAST, CAP_SCREEN,
                               CAP_SEARCH, Camera, Entity,
                               GameNotRunning, Player, RayHit, Screen, Snapshot, Vec3, cross, normalize, sub)
 from .memory import Memory
@@ -34,6 +34,7 @@ MAGIC = 0x52454F41  # "AOER"
 OFF_STATE = 0x100
 STATE_SIZE = 0x120
 OFF_ENTITIES = 0x200000
+OFF_COMBAT = 0x370000        # AOER_OFF_ASSIST_COMBAT: animations of everyone, the player's stamina
 ENTITY_SIZE = 0x80
 MAX_ENTITIES = 256
 OFF_RAYS = 0x360000          # AOER_OFF_ASSIST_RAYS: the assistant's own ray block
@@ -80,6 +81,26 @@ AVOID_RADIUS = 0.8    # metres around a blocked spot the route planner then keep
 BRIDGE_MAX = 40.0     # a navmesh route ending this close to its goal is finished with the raycast planner
 
 
+def _playing(blob: bytes, o: int) -> tuple[tuple, float]:
+    """An AoerAnimState at o: every animation in the queue's newest entries, each once (its newest
+    entry), longest first: ((anim, time, length), ...), and the playback speed. Several animations
+    play at once (a Godrick Soldier: its 4 s main animation and a 0.03 s layer every frame)."""
+    write, read, speed, valid = struct.unpack_from('<IIfI', blob, o + 8)
+    if not valid or read >= 10:
+        return (), speed
+    seen, out = set(), []
+    for k in range(10):  # newest first
+        anim, t, _t2, length = struct.unpack_from('<ifff', blob, o + 0x18 + ((read - k) % 10) * 16)
+        if anim < 0 or length <= 0 or anim in seen:  # (0 is a real animation: the player's idle)
+            continue
+        seen.add(anim)
+        out.append((anim, t, length))
+        if len(out) >= 4:
+            break
+    out.sort(key=lambda a: -a[2])
+    return tuple(out), speed
+
+
 class EldenRingAdapter:
     game = 'Elden Ring'
     capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN, CAP_PLACES})
@@ -102,6 +123,9 @@ class EldenRingAdapter:
         self._graces_tried = False
         self._places: PlaceIndex | None = None
         self.wiki = Wiki()
+        self._attacks: dict | None = None  # model -> attack timings (attacks.json), loaded when needed
+        if (Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'attacks.json').exists():
+            self.capabilities = self.capabilities | {CAP_COMBAT}
         self._router = None  # the route planner's own process (core/route_worker.py), started when needed
         self._banned_links: set = set()  # drops/entrances a live ray found blocked (this session)
         self._last_observe = 0.0
@@ -157,12 +181,59 @@ class EldenRingAdapter:
             state = 'dead' if flags & PLAYER_DEAD else 'busy' if flags & HOST_BUSY else 'alive'
             facing = normalize(_rotate(player_quat, (0.0, 0.0, 1.0))) if any(player_quat) else None
             player = Player(player_pos, facing, state)
+        combat = self._combat(m) if in_world else None
+        entities = self._entities(m, combat) if in_world else ()
+        if player is not None and combat is not None:
+            (anims, _speed), stats = combat[0], combat[1]
+            main = anims[0] if anims else (None, 0.0, 0.0)
+            player = Player(player.pos, player.facing, player.state, stats[0], stats[1], stats[4], stats[5],
+                            stats[2], stats[3], main[0], main[1])
 
-        return Snapshot(self.game, frame, in_world, player, camera, self._entities(m) if in_world else (),
+        return Snapshot(self.game, frame, in_world, player, camera, entities,
                         f'{stage:#x}' if stage else None, screen=screen,
                         menu=bool(flags & HOST_BUSY) or None)  # loading is known; menus are not detected yet
 
-    def _entities(self, m: mmap.mmap) -> tuple[Entity, ...]:
+    def _combat(self, m: mmap.mmap):
+        """The bridge's assistant combat block (0x370000, version 2): (player's animations, (hp, max hp,
+        fp, max fp, stamina, max stamina), {entity id: (animations, speed)}), or None if the bridge is
+        older. Animations: every one playing now, ((anim, time, length), ...), main (longest) first."""
+        try:
+            blob = _seqlock_read(m, OFF_COMBAT, lambda mm: 0xF0 + 0xB8 * min(
+                struct.unpack_from('<I', mm, OFF_COMBAT + 4)[0], MAX_ENTITIES))
+        except GameNotRunning:
+            return None
+        count = min(struct.unpack_from('<I', blob, 4)[0], MAX_ENTITIES, (len(blob) - 0xF0) // 0xB8)
+        frame = struct.unpack_from('<Q', blob, 8)[0]
+        if (count == 0 and frame == 0) or struct.unpack_from('<I', blob, 0x28)[0] != 2:
+            return None  # an older bridge
+        stats = struct.unpack_from('<6i', blob, 0x10)
+        player = _playing(blob, 0x30)
+        ents = {}
+        for i in range(count):
+            o = 0xF0 + i * 0xB8
+            eid = struct.unpack_from('<Q', blob, o)[0]
+            ents[eid] = _playing(blob, o)
+        return player, stats, ents
+
+    def attack_windows(self, model: str | None, anim: int | None) -> list:
+        """[(start, end)] seconds into the animation when its attack hitbox is active (from the game's
+        animation files, Get-GameData.bat attacks), or [] when it isn't an attack (or isn't known)."""
+        if not model or anim is None or anim < 0:
+            return []
+        if self._attacks is None:
+            path = Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'attacks.json'
+            try:
+                self._attacks = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                self._attacks = {}
+        data = self._attacks.get(model)
+        if data is None:
+            # Variants (c4311 Godrick Soldier ... c4316) have no animation files of their own: they play
+            # their base model's (c4310: live, c4311 played 3043000, one of c4310's 1,165 animations).
+            data = self._attacks.get(model[:4] + '0', {})
+        return sorted({tuple(w) for w in data.get('attacks', {}).get(str(anim), [])})
+
+    def _entities(self, m: mmap.mmap, combat=None) -> tuple[Entity, ...]:
         blob = _seqlock_read(m, OFF_ENTITIES,
                              lambda mm: 0x10 + ENTITY_SIZE * min(struct.unpack_from('<I', mm, OFF_ENTITIES + 4)[0], MAX_ENTITIES))
         count = min(struct.unpack_from('<I', blob, 4)[0], MAX_ENTITIES, (len(blob) - 0x10) // ENTITY_SIZE)
@@ -175,10 +246,18 @@ class EldenRingAdapter:
             half = struct.unpack_from('<3f', blob, o + 0x38)
             hp, max_hp, eflags = struct.unpack_from('<ffI', blob, o + 0x44)
             name = blob[o + 0x50:o + 0x80].split(b'\0', 1)[0].decode('ascii', 'replace') or None
+            quat = struct.unpack_from('<4f', blob, o + 0x1C)
+            # The entity table's rotation turns the model's -Z onto where it faces (a Godrick Soldier
+            # swinging at the player read as facing away, -0.95, with +Z).
+            facing = normalize(_rotate(quat, (0.0, 0.0, -1.0))) if any(quat) else None
+            anims, speed = (combat[2].get(eid) if combat else None) or ((), 0.0)
+            main = anims[0] if anims else (None, 0.0, 0.0)
             out.append(Entity(
                 id=eid, type_id=type_id or None, model=name, pos=pos, center=center,
                 radius=half[0], height=half[1] * 2, hostile=kind in (ENT_LARGE, ENT_SMALL),
-                dead=bool(eflags & 1), health=hp, max_health=max_hp))
+                dead=bool(eflags & 1), health=hp, max_health=max_hp, facing=facing,
+                anim=main[0], anim_time=main[1], anim_length=main[2],
+                anim_speed=speed if speed > 0 else 1.0, anims=anims))
         return tuple(out)
 
     # ---- world queries ----

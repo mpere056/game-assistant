@@ -268,8 +268,8 @@ def direction(cam, pos) -> str:
 
 
 COMMAND_SYSTEM = """The player of {game} gave an order for their character (it walks there by itself, with
-Navi leading), or attacks. Turn it into exactly one action by calling one action tool: attack_character
-(walk up to a character or enemy and land one hit), walk_to_character (a
+Navi leading), or attacks. Turn it into exactly one action by calling one action tool: fight_character
+(fight an enemy until it's down), attack_character (walk up and land one hit), walk_to_character (a
 character or enemy near the player, by name, or "enemy" for the nearest hostile one: the list of
 characters around is given), walk_to_place (a named place: a Site of Grace, landmark, dungeon, ruin),
 walk_to_nearest (the nearest place of a kind), walk_to_crosshair ("that", "over there"), stop_walking,
@@ -278,6 +278,10 @@ not places: never send the player to where an item is found instead. Use where_i
 first only to check a place name. Never answer with text alone."""
 
 COMMAND_TOOLS = [
+    {'name': 'fight_character', 'description': "Fight the nearest character with this name (as listed), or "
+     "'enemy' for the nearest hostile one, until it's down: dodge its attacks and keep attacking.",
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
+                      'additionalProperties': False}},
     {'name': 'attack_character', 'description': "Walk up to the nearest character with this name (as listed), "
      "or 'enemy' for the nearest hostile one, and land one hit on it.",
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],

@@ -176,6 +176,33 @@ edge (21 of them); what
 two face markings mean (one marks evergaol arenas); underground areas without a world conversion;
 faster mesh building for long routes; the DLC (not installed).
 
+## Fighting for the player (added 2026-10-11)
+
+"Fight the nearest Godrick soldier" (F10): code fights at the frame rate; no model in the loop (a
+model's hundreds of milliseconds are too slow to dodge; a vision model would also compete with the
+game for the 6 GB GPU). A model only picks what to do.
+
+**What it knows, exactly, per enemy and per attack:** the bridge publishes every character's playing
+animations each frame (several blend at once), and the game's own animation files say when each attack
+animation's hitbox is out (4,805 attack animations of 170 models; variants use their base model). So
+delayed swings, combos and wind-ups, the things players learn enemy by enemy, are known in advance.
+
+**How it fights (from how experienced players fight, and from fight logs):**
+- Roll so the invincibility covers the hit: 14 i-frames (~0.23 s) from the roll's start; the roll starts
+  when the key is released: press ~0.16 s before the hit. Roll through the attack (forward-left/right
+  while locked on), not away. Another roll after ~0.55 s for combos.
+- Never be busy when a hit comes: one swing at a time, only when the player is free again (the game
+  ignores a roll pressed during the player's own swing or while staggered: seen in logs).
+- Punish in openings: right after the enemy's attack windows, while it recovers. Short, not greedy.
+- Back off to recover stamina; hand back below 35 % health.
+
+**Per-enemy next steps:**
+- Reach per attack (from the game's attack parameters) instead of one distance for all.
+- Ranged attacks and spells (the animation files mark projectile launches: "bullets").
+- Grabs (can't be blocked; must be rolled), area attacks (roll away), and attacks that can be parried.
+- Learn from fights: the log shows each hit taken and the rolls around it; adjust timing per enemy.
+- Healing (Flask) when health is low and the enemy is recovering; blocking with a shield.
+
 ## Two talk keys: ask Navi, or command your character (added 2026-10-10)
 
 | Key (setting) | What it is for | Who acts |

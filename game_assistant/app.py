@@ -31,6 +31,7 @@ from . import config
 from .core import commands, lookat
 from .core.agent import Agent
 from .core.autowalk import AutoWalk
+from .core.combat import Fighter
 from .core.walk_commands import CommandResolver, WalkAction
 from .core.companion import Companion
 from .core.interface import CAP_CAMERA, CAP_NAVMESH, CAP_RAYCAST, CAP_SCREEN, GameNotRunning
@@ -47,6 +48,7 @@ def _own_window_in_front() -> bool:
     return pid.value == os.getpid()
 
 
+FIGHT_FROM = 12.0  # metres: a "fight" order this close starts fighting at once (else walk up first)
 FOLLOW_MOVED = 3.0  # metres a character may move before the route to it is re-planned
 ACTION_LINES = {'ladder': 'Climb the ladder!', 'lift': 'Take the lift!', 'jump': 'Jump across here!',
                 'drop': 'Drop down here!'}
@@ -88,6 +90,9 @@ class App:
                                         stop_tasks=lambda: self._walk_request('stop', 'stop'))
         # F10 orders: the character walks by itself along Navi's route (phase 4b).
         self.walk = AutoWalk(sprint=bool(self.cfg['auto_walk_sprint']))
+        # Fighting for the player ("fight that soldier"): dodges by the game's own attack timings.
+        self.fighter = Fighter(getattr(self.adapter, 'attack_windows', lambda m, a: []))
+        self._fight_after = None          # the walk is going to a character to fight it
         self.resolver = CommandResolver(self.adapter, ask_model=self._model_order)
         self._walk_cmd = None             # ('start', point, name) or ('stop', why), applied by the fairy loop
         self._walk_route = None           # the companion route the walk follows
@@ -213,8 +218,9 @@ class App:
             return None
         tool, inp = r['tool'], r['input']
         if tool == 'attack_character':
-            got = self.resolver._attack(inp.get('name', 'enemy'))
-            return got
+            return self.resolver._attack(inp.get('name', 'enemy'), 'hit')
+        if tool == 'fight_character':
+            return self.resolver._attack(inp.get('name', 'enemy'), 'fight')
         if tool == 'walk_to_character':
             got = self.resolver.character(inp.get('name', 'enemy'))
             return got or WalkAction('none', f"I don't see any {inp.get('name', 'of those')} near you.")
@@ -270,19 +276,42 @@ class App:
             return
         cmd, self._walk_cmd = self._walk_cmd, None
         if cmd and cmd[0] == 'start':
+            self.fighter.stop()
+            entity = cmd[3] if len(cmd) > 3 else None
+            mode = cmd[4] if len(cmd) > 4 else False
+            self._fight_after = entity if mode == 'fight' else None
+            near = entity is not None and snap.player and any(
+                e.id == entity and math.dist(e.pos, snap.player.pos) < FIGHT_FROM for e in snap.entities)
+            if self._fight_after is not None and near:  # close already: straight into the fight
+                self.walk.stop()
+                self.fighter.start(entity, cmd[2])
+                self._fight_after = None
+                self._took_over = 0.0
+                cmd = None
+        if cmd and cmd[0] == 'start':
             self.companion.guide(cmd[1], cmd[2])     # Navi plans the route and leads the way
             entity = cmd[3] if len(cmd) > 3 else None
-            self.walk.start([], cmd[1], cmd[2], target_id=entity, attack=bool(cmd[4]) if len(cmd) > 4 else False)
+            mode = cmd[4] if len(cmd) > 4 else False
+            self.walk.start([], cmd[1], cmd[2], target_id=entity, attack=mode == 'hit' or mode is True)
             self._walk_route = None
             self._took_over = 0.0
             self._walk_entity = entity  # walking to a character: re-plan the route as it moves
             self._route_goal = cmd[1]
-        elif cmd and cmd[0] == 'stop' and self.walk.active:
+        elif cmd and cmd[0] == 'stop' and (self.walk.active or self.fighter.active):
             self.walk.stop(cmd[1])
+            self.fighter.stop()
+            self._fight_after = None
             self.companion.follow()
-        if self.walk.active and time.monotonic() - self._took_over < 0.5:
+        if (self.walk.active or self.fighter.active) and time.monotonic() - self._took_over < 0.5:
+            if self.fighter.active:
+                self.fighter.stop()
+                self.walk.events.append('stopped:you')
             self.walk.stop('you')
+            self._fight_after = None
             self.companion.follow()
+        if self.fighter.active:
+            self._fight_step(snap, dt)
+            return
         if not self.walk.active:
             if self.keys.held:
                 self.keys.release_all()
@@ -322,6 +351,47 @@ class App:
             self.companion.guide(e.pos, self.walk.name)
             self._walk_route = None
 
+    def _fight_step(self, snap, dt: float) -> None:
+        """Fighting: the fighter's keys and taps every frame (only while the game is in front)."""
+        intent = self.fighter.update(snap, dt)
+        if snap.screen is not None and snap.screen.focused and self.fighter.active:
+            self.keys.set(intent.keys)
+            for t in intent.taps:
+                self.keys.tap(t)
+            if intent.turn and snap.camera:
+                yaw = math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2]))
+                self.turner.turn(intent.turn, yaw)
+        else:
+            self.keys.release_all()
+        now = time.monotonic()
+        if now - getattr(self, '_last_fight_log', 0.0) > 0.25 or self.fighter.events:
+            self._last_fight_log = now
+            self._fight_log({'t': round(now, 3), 'state': self.fighter.state, 'events': list(self.fighter.events),
+                             'keys': sorted(intent.keys), 'taps': list(intent.taps),
+                             'focused': bool(snap.screen and snap.screen.focused), 'held': sorted(self.keys.held),
+                             **self.fighter.debug})
+        while self.fighter.events:
+            ev = self.fighter.events.pop(0)
+            if ev == 'not_focused':
+                self._navi_line("Click back into the game and I'll keep fighting!")
+                continue
+            line = {'won': "Got it! It's down!", 'low_health': "You're hurt! Over to you: heal up!",
+                    'target_gone': "It's gone!", 'timeout': "That's taking a while. Over to you!"}.get(ev)
+            if line:
+                self.companion.follow()
+                self._navi_line(line)
+        self._walk_events()
+
+    def _fight_log(self, row: dict) -> None:
+        """runtime/combat-<date>.jsonl: what the fighter saw and did, 4 times a second and at each
+        roll or swing (to tune timings from real fights)."""
+        try:
+            path = ROOT / 'runtime' / f'combat-{datetime.now():%Y%m%d}.jsonl'
+            with path.open('a', encoding='utf-8') as f:
+                f.write(json.dumps(row, default=str) + '\n')
+        except OSError:
+            pass
+
     def _walk_events(self) -> None:
         while self.walk.events:
             ev = self.walk.events.pop(0)
@@ -344,7 +414,11 @@ class App:
                 self.companion.follow()
                 self._navi_line("It's gone!")
             elif ev == 'arrived':
-                self._navi_line(f"Here we are: {self.walk.name}!" if self.walk.name else 'Here we are!')
+                if self._fight_after is not None:  # walked up to it: now the fight
+                    self.fighter.start(self._fight_after, self.walk.name)
+                    self._fight_after = None
+                else:
+                    self._navi_line(f"Here we are: {self.walk.name}!" if self.walk.name else 'Here we are!')
             elif ev == 'gave_up':
                 self.companion.follow()
                 self._navi_line("I can't get through here. Over to you!")

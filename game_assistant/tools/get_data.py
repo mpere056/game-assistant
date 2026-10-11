@@ -66,10 +66,19 @@ def get_navmesh() -> int:
     code = subprocess.call([sys.executable, '-m', 'game_assistant.tools.get_navmesh', '--workers', '3'])
     if code == 0:  # then the walkable world graph (links between blocks, drops, steps)
         code = subprocess.call([sys.executable, '-m', 'game_assistant.tools.get_navmesh', '--graph'])
+    if code == 0:  # and every character's attack timings (for fighting)
+        code = get_attacks()
     return code
 
 
-GAMES = {'eldenring': get_eldenring, 'voice': get_voice, 'navmesh': get_navmesh}
+def get_attacks() -> int:
+    """Every character's attack timings from the installed game's animation files (read-only), for
+    dodging: a few seconds, .local/eldenring/attacks.json. See tools/get_attacks.py."""
+    from . import get_attacks as ga
+    return ga.main()
+
+
+GAMES = {'eldenring': get_eldenring, 'voice': get_voice, 'navmesh': get_navmesh, 'attacks': get_attacks}
 
 
 def main() -> int:

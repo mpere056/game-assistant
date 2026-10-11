@@ -37,7 +37,9 @@ STOP_WORDS = 5
 _NEAREST = re.compile(r"\b(nearest|closest|next|near(?:est)?by)\s+(?P<what>[a-z' -]+)", re.I)
 _TARGET = re.compile(r"\b(go|walk|run|head|move|take|lead|bring|get|travel|guide)\b.*?\b(to|towards?|for)\s+"
                      r"(?P<target>.+)$", re.I)
-_ATTACK = re.compile(r"\b(attack|hit|strike|fight|kill|smack|slash|stab|whack|engage)\b\s*(?P<target>.*)$", re.I)
+_ATTACK = re.compile(r"\b(attack|hit|strike|fight|kill|smack|slash|stab|whack|engage|defeat|beat|take down|"
+                     r"take out|finish)\b\s*(?P<target>.*)$", re.I)
+_FIGHT_WORDS = re.compile(r"\b(fight|kill|defeat|beat|take down|take out|finish|engage)\b", re.I)
 _PRONOUN = re.compile(r"^(it|him|her|them|that|this|that one|this one|that guy|this guy)?$", re.I)
 _THAT = re.compile(r"^(that|there|it|this|that one|that place|over there|right there|this way)$", re.I)
 _FILLER = re.compile(r"\b(please|in front of me|ahead of me|in front|ahead|near me|nearby|around here|"
@@ -57,7 +59,7 @@ class WalkAction:
     point: Vec3 | None = None     # where to walk (snapshot coordinates)
     name: str | None = None
     entity_id: int | None = None  # walking to a character: follow it if it moves
-    attack: bool = False          # ...and land one hit on it
+    attack: str | bool = False    # ...and attack it: 'hit' (one hit, then hand back) or 'fight' (until it's down)
     options: list = field(default_factory=list)  # for 'ask': [(name, point)]
 
 
@@ -97,7 +99,7 @@ class CommandResolver:
             return WalkAction('stop', 'Stopping.')
         m = _ATTACK.search(t)
         if m:
-            return self._attack(m.group('target'))
+            return self._attack(m.group('target'), 'fight' if _FIGHT_WORDS.search(m.group(0)) else 'hit')
         m = _NEAREST.search(t)
         if m:
             what = _clean(m.group('what'))
@@ -175,7 +177,7 @@ class CommandResolver:
         label = name or 'that enemy'
         return WalkAction('walk', f"There's a {label} {round(d)} metres away. Let's go!", tuple(e.pos), label, e.id)
 
-    def _attack(self, target: str) -> WalkAction:
+    def _attack(self, target: str, mode: str = 'hit') -> WalkAction:
         """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and land one hit.
         A pronoun means what the player is looking at, else the nearest enemy."""
         words = _clean(re.sub(r"\b(nearest|closest|next)\b", ' ', target))
@@ -190,8 +192,9 @@ class CommandResolver:
         got = got or self.character(words or 'enemy')
         if got is None:
             return WalkAction('none', f"I don't see any {words or 'enemy'} to attack.")
-        got.attack = True
-        got.say = f"Attacking the {got.name}!" if got.name and got.name != 'that enemy' else 'Attacking!'
+        got.attack = mode
+        what = f'the {got.name}' if got.name and got.name != 'that enemy' else 'it'
+        got.say = f"Let's take {what} down!" if mode == 'fight' else f"Attacking {what}!"
         return got
 
     def _crosshair(self) -> WalkAction:

@@ -6,6 +6,7 @@ import unittest
 
 from game_assistant.app import App
 from game_assistant.core.autowalk import AutoWalk
+from game_assistant.core.combat import Fighter
 from game_assistant.core.companion import Companion
 from game_assistant.core.nav import Route
 from tests.test_autowalk import World
@@ -39,6 +40,8 @@ def make_app():
     app = App.__new__(App)
     app.keys, app.turner = FakeKeys(), FakeTurner()
     app.walk = AutoWalk()
+    app.fighter = Fighter(lambda model, anim: [])
+    app._fight_after = None
     app.companion = Companion()
     app.companion.plan_async = False
     app.companion.route_fn = lambda s, g: Route([s, (0.0, 0.0, 20.0), g], True, 0)
@@ -98,3 +101,36 @@ class WalkAppTests(unittest.TestCase):
         self.assertFalse(app.walk.active)
         self.assertEqual(app.keys.held, set())
         self.assertEqual(app.companion.mode, 'follow')
+
+
+class FightAppTests(unittest.TestCase):
+    def test_fight_order_walks_up_then_fights_and_the_player_can_take_over(self):
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        w = World()
+        enemy = Entity(9, 1, 'c4300', (0.0, 0.0, 30.0), (0.0, 1.0, 30.0), 0.5, 2.0, True, False, 400, 400)
+        w.entities = (enemy,)
+        step(app, w, 1.5)
+        app._walk_request('start', enemy.pos, 'Soldier', 9, 'fight')
+        step(app, w, 0.5)
+        self.assertTrue(app.walk.active)              # 30 m away: walk up first
+        self.assertFalse(app.fighter.active)
+        step(app, w, 12)
+        self.assertTrue(app.fighter.active)           # arrived: fighting
+        self.assertFalse(app.walk.active)
+        app._player_key(0x57)
+        step(app, w, 0.1)
+        self.assertFalse(app.fighter.active)
+        self.assertEqual(app.keys.held, set())
+        self.assertIn("Okay, you've got it!", app.lines)
+
+    def test_fight_order_close_by_starts_at_once(self):
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        w = World()
+        w.entities = (Entity(9, 1, 'c4300', (0.0, 0.0, 6.0), (0.0, 1.0, 6.0), 0.5, 2.0, True, False, 400, 400),)
+        step(app, w, 1.5)
+        app._walk_request('start', (0.0, 0.0, 6.0), 'Soldier', 9, 'fight')
+        step(app, w, 0.1)
+        self.assertTrue(app.fighter.active)
+        self.assertFalse(app.walk.active)
