@@ -194,6 +194,12 @@ delayed swings, combos and wind-ups, the things players learn enemy by enemy, ar
 - Never be busy when a hit comes: one swing at a time, only when the player is free again (the game
   ignores a roll pressed during the player's own swing or while staggered: seen in logs).
 - Punish in openings: right after the enemy's attack windows, while it recovers. Short, not greedy.
+- Poise decides how greedy: a normal enemy (poise, NpcParam super armor durability, 15-65; Godrick
+  Soldier 30) flinches from every light attack outside its own swings, so a punish needs only ~0.45 s of
+  recovery, and while it flinches (8XXX/9XXX reaction animations) the next light attack of the combo
+  is pressed (3 in a row; 2 against sturdier enemies). A long reaction (stagger, stance break): keep
+  hitting; a light attack from the front ripostes a broken stance.
+- Stepping back into a rock: strafe sideways instead.
 - Back off to recover stamina; hand back below 35 % health.
 
 **Per-enemy next steps:**

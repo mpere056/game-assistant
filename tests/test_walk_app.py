@@ -48,6 +48,7 @@ def make_app():
     app._walk_cmd, app._walk_route, app._took_over, app._last_enemy_line = None, None, 0.0, -1e9
     app.lines = []
     app._navi_line = app.lines.append
+    app._fight_log = lambda row: None   # never into the real runtime/combat log
     return app
 
 

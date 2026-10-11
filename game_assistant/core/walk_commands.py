@@ -39,12 +39,16 @@ _TARGET = re.compile(r"\b(go|walk|run|head|move|take|lead|bring|get|travel|guide
                      r"(?P<target>.+)$", re.I)
 _ATTACK = re.compile(r"\b(attack|hit|strike|fight|kill|smack|slash|stab|whack|engage|defeat|beat|take down|"
                      r"take out|finish)\b\s*(?P<target>.*)$", re.I)
-_FIGHT_WORDS = re.compile(r"\b(fight|kill|defeat|beat|take down|take out|finish|engage)\b", re.I)
+# Any attack order is a whole fight (the user: "attack that soldier" should fight it, dodging); one hit
+# and hand back only when asked for: "hit it once", "land one hit".
+_ONE_HIT = re.compile(r"\b(once|one hit|a hit|single hit|one blow|one strike|just one)\b", re.I)
 _PRONOUN = re.compile(r"^(it|him|her|them|that|this|that one|this one|that guy|this guy)?$", re.I)
 _THAT = re.compile(r"^(that|there|it|this|that one|that place|over there|right there|this way)$", re.I)
 _FILLER = re.compile(r"\b(please|in front of me|ahead of me|in front|ahead|near me|nearby|around here|"
                      r"right there|over there|for me|thanks|thank you|i mean|my character|you see|that is)\b", re.I)
 _ARTICLES = {'the', 'a', 'an', 'one', 'some', 'that', 'this', 'those', 'these'}
+_NOT_NAME = {'of', 'from', 'me', 'us', 'too', 'also', 'again', 'for', 'another', 'other', 'more', 'as', 'well',
+             'ones', 'guy', 'guys', 'next', 'them', 'either', 'any'}
 _GENERIC_ENEMY = {'enemy', 'enemies', 'monster', 'monsters', 'foe', 'foes', 'hostile', 'baddie', 'mob'}
 _PLACE_WORDS = re.compile(r'grace|landmark|ruin|cave|church|castle|tower|place|shack|camp|fort|catacomb|tunnel'
                           r'|bridge|lake|village|manor|evergaol|gate', re.I)
@@ -80,6 +84,7 @@ class CommandResolver:
         self.adapter = adapter
         self.ask_model = ask_model
         self.pending: tuple[float, list] | None = None   # (asked at, options)
+        self.last_kind: str | None = None                # the last enemy kind attacked ('the next one')
 
     def handle(self, text: str) -> WalkAction:
         try:
@@ -99,7 +104,7 @@ class CommandResolver:
             return WalkAction('stop', 'Stopping.')
         m = _ATTACK.search(t)
         if m:
-            return self._attack(m.group('target'), 'fight' if _FIGHT_WORDS.search(m.group(0)) else 'hit')
+            return self._attack(_ONE_HIT.sub(' ', m.group('target')), 'hit' if _ONE_HIT.search(t) else 'fight')
         m = _NEAREST.search(t)
         if m:
             what = _clean(m.group('what'))
@@ -177,10 +182,15 @@ class CommandResolver:
         label = name or 'that enemy'
         return WalkAction('walk', f"There's a {label} {round(d)} metres away. Let's go!", tuple(e.pos), label, e.id)
 
-    def _attack(self, target: str, mode: str = 'hit') -> WalkAction:
-        """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and land one hit.
-        A pronoun means what the player is looking at, else the nearest enemy."""
+    def _attack(self, target: str, mode: str = 'fight') -> WalkAction:
+        """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and fight it
+        ('hit it once': land one hit). A pronoun means what the player is looking at, else the nearest enemy."""
         words = _clean(re.sub(r"\b(nearest|closest|next)\b", ' ', target))
+        words = re.sub(r"^(on|at|against|into|onto)\b\s*", '', words)   # 'land one hit on the soldier'
+        # 'kill this soldier from me', 'one of the deer', 'the next one too': not part of a name
+        words = ' '.join(w for w in words.split() if w not in _NOT_NAME)
+        if not words and re.search(r"\b(next|another|other|more|again)\b", target, re.I) and self.last_kind:
+            words = self.last_kind   # 'kill the next one': another of the kind just fought
         got = None
         if _PRONOUN.match(words):
             snap = self.adapter.snapshot()
@@ -193,6 +203,8 @@ class CommandResolver:
         if got is None:
             return WalkAction('none', f"I don't see any {words or 'enemy'} to attack.")
         got.attack = mode
+        if got.name and got.name != 'that enemy':
+            self.last_kind = got.name
         what = f'the {got.name}' if got.name and got.name != 'that enemy' else 'it'
         got.say = f"Let's take {what} down!" if mode == 'fight' else f"Attacking {what}!"
         return got

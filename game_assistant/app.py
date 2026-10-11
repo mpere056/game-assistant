@@ -48,6 +48,9 @@ def _own_window_in_front() -> bool:
     return pid.value == os.getpid()
 
 
+LEDGE_STEP, LEDGE_ROLL = 1.5, 3.0   # metres out the ground is probed for a step and for a roll
+LEDGE_DROP = 3.5                    # deeper than this below the feet: a ledge
+MAX_CHASES = 3                      # a target that ran off this often: hand back
 FIGHT_FROM = 12.0  # metres: a "fight" order this close starts fighting at once (else walk up first)
 FOLLOW_MOVED = 3.0  # metres a character may move before the route to it is re-planned
 ACTION_LINES = {'ladder': 'Climb the ladder!', 'lift': 'Take the lift!', 'jump': 'Jump across here!',
@@ -91,7 +94,10 @@ class App:
         # F10 orders: the character walks by itself along Navi's route (phase 4b).
         self.walk = AutoWalk(sprint=bool(self.cfg['auto_walk_sprint']))
         # Fighting for the player ("fight that soldier"): dodges by the game's own attack timings.
-        self.fighter = Fighter(getattr(self.adapter, 'attack_windows', lambda m, a: []))
+        self._ledges: tuple = ((), ())    # where the ground drops away around the player (_ledge_loop)
+        self._chases: dict = {}           # entity -> times a fight handed over to a chase (it ran)
+        self.fighter = Fighter(getattr(self.adapter, 'attack_windows', lambda m, a: []), self._poise_of,
+                               lambda: self._ledges)
         self._fight_after = None          # the walk is going to a character to fight it
         self.resolver = CommandResolver(self.adapter, ask_model=self._model_order)
         self._walk_cmd = None             # ('start', point, name) or ('stop', why), applied by the fairy loop
@@ -131,6 +137,8 @@ class App:
             self.q.put(('voice_state', f'voice input unavailable: {e}'))
         if self.companion:
             threading.Thread(target=self._fairy_loop, name='fairy', daemon=True).start()
+        if self.keys is not None and hasattr(self.adapter, 'raycast'):
+            threading.Thread(target=self._ledge_loop, name='ledges', daemon=True).start()
         if hasattr(self.adapter, 'warm_up'):  # load game data now, not on the first question
             threading.Thread(target=self._warm_up, name='warm up', daemon=True).start()
 
@@ -376,11 +384,56 @@ class App:
                 self._navi_line("Click back into the game and I'll keep fighting!")
                 continue
             line = {'won': "Got it! It's down!", 'low_health': "You're hurt! Over to you: heal up!",
-                    'target_gone': "It's gone!", 'timeout': "That's taking a while. Over to you!"}.get(ev)
+                    'target_gone': "It's gone!", 'timeout': "That's taking a while. Over to you!",
+                    'next_target': "One down! Now the other one!"}.get(ev)
+            if ev == 'fled':   # it ran off: follow it along the navmesh, fight again on arrival
+                tid = self.fighter.target_id
+                e = next((x for x in snap.entities if x.id == tid), None)
+                n = self._chases.get(tid, 0) + 1
+                self._chases[tid] = n
+                if e is not None and n <= MAX_CHASES:
+                    self._walk_request('start', tuple(e.pos), self.fighter.name, tid, 'fight')
+                    line = "It's running! After it!"
+                else:
+                    line = "It keeps running away! Over to you."
             if line:
                 self.companion.follow()
                 self._navi_line(line)
         self._walk_events()
+
+    def _ledge_loop(self) -> None:
+        """While fighting, 10 times a second: rays straight down LEDGE_STEP and LEDGE_ROLL metres out in 8
+        directions; where nothing is hit within LEDGE_DROP metres below the feet, the ground drops away
+        (the fighter's straight steps don't use the navmesh: it once walked off a cliff after a deer)."""
+        while True:
+            time.sleep(0.1)
+            if not self.fighter.active:
+                self._ledges = ((), ())
+                continue
+            try:
+                snap = self.adapter.snapshot()
+                if not snap.in_world or snap.player is None:
+                    continue
+                p = snap.player.pos
+                rays = []
+                for k in range(8):
+                    a = math.radians(k * 45)
+                    for dist in (LEDGE_STEP, LEDGE_ROLL):
+                        x, z = p[0] + math.sin(a) * dist, p[2] + math.cos(a) * dist
+                        rays.append(((x, p[1] + 2.0, z), (x, p[1] - LEDGE_DROP, z)))
+                hits = self.adapter.raycast(rays, timeout=0.5)
+                step = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8) if not hits[2 * k].hit)
+                roll = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8)
+                             if not hits[2 * k].hit or not hits[2 * k + 1].hit)
+                self._ledges = (step, roll)
+            except Exception:
+                self._ledges = ((), ())
+
+    def _poise_of(self, type_id: int | None) -> float | None:
+        """The enemy kind's poise (how much it takes to flinch it), from the game's NpcParam."""
+        if type_id is None or not hasattr(self.adapter, 'knowledge'):
+            return None
+        return (self.adapter.knowledge(type_id) or {}).get('poise')
 
     def _fight_log(self, row: dict) -> None:
         """runtime/combat-<date>.jsonl: what the fighter saw and did, 4 times a second and at each
