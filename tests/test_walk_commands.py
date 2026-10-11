@@ -132,9 +132,26 @@ class AttackOrderTests(unittest.TestCase):
         return UserPhrasesTests()._resolver()
 
     def test_attack_orders(self):
-        for text, mode in [('Attack the nearest Godrick soldier', 'hit'), ('hit that enemy', 'hit'),
-                           ('attack it', 'hit'), ('go fight the soldier', 'fight'),
+        for text, mode in [('Attack the nearest Godrick soldier', 'fight'), ('hit that enemy', 'fight'),
+                           ('Attack that nearest soldier.', 'fight'), ('attack it', 'fight'),
+                           ('hit it once', 'hit'), ('land one hit on the soldier', 'hit'),
+                           ('just hit that enemy once', 'hit'), ('go fight the soldier', 'fight'),
                            ('kill the nearest Godrick soldier', 'fight'), ('take down that enemy', 'fight')]:
             with self.subTest(text=text):
                 a = self._resolver().handle(text)
                 self.assertEqual((a.kind, a.entity_id, a.attack), ('walk', 11, mode), a.say)
+
+    def test_orders_from_the_deer_session(self):
+        # runtime/chat-20261011.jsonl 14:39-14:41: these got "I don't see any ... to attack".
+        for text, who in [('Can you kill this Godrick soldier from me?', 11),
+                          ('Can you kill one of the deer for me?', 10),
+                          ('Kill one of those deers as well', 10)]:
+            with self.subTest(text=text):
+                a = self._resolver().handle(text)
+                self.assertEqual((a.kind, a.entity_id, a.attack), ('walk', who, 'fight'), a.say)
+
+    def test_the_next_one_is_the_same_kind(self):
+        r = self._resolver()
+        self.assertEqual(r.handle('kill the deer').entity_id, 10)
+        a = r.handle('Nice, kill the next one too.')
+        self.assertEqual((a.kind, a.entity_id), ('walk', 10), a.say)

@@ -769,3 +769,78 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   while still in our own swing or staggered.
 - 104 tests pass (new: two-swing chain gets two rolls, no swing that can't be rolled out of, punish a
   long recovery, facing only for others far away, spacing then in for a passive enemy). Not yet fought.
+
+## 2026-10-11: combat: hitting while it reels, poise, rocks behind
+- Third fight (user): dodged most hits and kept out of reach, but never attacked; once a rock stopped
+  the step back and a hit landed. The user finished the soldier by hand.
+- Why no attacks: openings needed >= 1.35 s of recovery after the enemy's last hit; the Godrick
+  Soldier's recoveries are shorter (3003005: hit 0.4-0.6 s, ends ~1.5 s) and it chains attacks.
+- From runtime/combat-20261011.jsonl (real rows): each landed hit made the soldier play a ~0.4 s
+  flinch (3008031/3008032/3008036 with 3009411/3009412) 0.27-0.53 s after the press; it attacked
+  0.4-0.5 s later (3003000, hit 0.8 s in): ~1.2 s with no hit coming. The second hit of a combo
+  re-flinched it 0.26 s after its press.
+- Poise: params.py read `toughness` (0x19C), which Elden Ring leaves at 0 for every enemy; poise is
+  `superArmorDurability` (f32 at 0x2A8, offsets checked against the Paramdex NpcParam def: row size
+  0x2E0). Live: Godrick Soldier, Land Squirt, Watcher Stones 30; wildlife -1 (none).
+- Changes (core/combat.py): low-poise targets (<= 60) are punished with >= 0.45 s of recovery left and
+  engaged after 1 s idle; a reaction animation that started after our press means the hit landed:
+  press the next combo attack (3 in a row, 2 for sturdier enemies; none while the reaction is a layer
+  on an attack with hits to come); a reaction >= 1 s (stagger, stance break) is hit without a cap;
+  a step back that moves < 0.4 m in 0.5 s strafes sideways for 0.8 s. The app passes the poise from
+  NpcParam; tests no longer write to the real combat log (earlier test rows are mixed into
+  combat-20261011.jsonl: the real ones have `target_anims`).
+- 112 tests pass (new: reaction animations, combo chain up to the cap, fewer against sturdy enemies,
+  no chain without a flinch, no opening from a layered flinch, keep hitting a stance break, short
+  punish only for low poise (log replay of 3003005), strafe past a rock). Not yet fought.
+
+## 2026-10-11: combat: repeated attacks dodged again, act in the roll's tail
+- Fourth fight (user): still no attacks. Log (runtime/combat-20261011.jsonl, 13:51): 6 rolls, 1 swing,
+  3 hits taken, handed back at low health.
+- Hit 1 (9.6 s) and hit 3 (15.4 s): the soldier repeated an attack already rolled once (3003003, 3003005);
+  "covered" was keyed by animation only, so a repeat never got a roll. Now a cover holds only for the
+  hit time it was (within 0.5 s). Hit 3 came while the player was still staggered by hit 2 (5323, 1.85 s).
+- Hit 2 (13.5 s): a roll was pressed 0.15 s ahead of 3003008 while the player played 22101 (1.0 s in);
+  no roll came out. 22101 is not identified yet.
+- No attacks: openings were found (op=1 in 17 rows) but the player's roll animation (27120) runs ~1.8 s
+  and counted as busy the whole time; rolls pressed 0.58 s and 1.03 s into it came out, so from 0.55 s
+  into a roll the player counts as free. Low-poise enemies are now awaited at 2.2 m (not 3 m): walking in
+  from 3 m took long enough for the soldier to chain its next attack.
+- Log rows of roll frames now carry the poise too (an analysis filtered on it and missed the rolls).
+- 115 tests pass (new: the same attack again gets its own roll; free in the roll's tail; closer spacing
+  for low poise).
+- Orders: "Attack that nearest soldier" (14:20) was a one-hit order by the old rule (only "fight / kill /
+  defeat" fought), so it hit once and handed back. Now every attack order fights (dodging until the enemy
+  is down); one hit only when asked: "hit it once", "land one hit" (and the model's command prompt says
+  the same). "hit on the soldier" no longer keeps "on" in the name. 115 tests pass.
+
+## 2026-10-11: combat: several enemies
+- Fifth session (user): "attack the nearest soldier" killed it (5 swings in 3 s, no hits taken). Then
+  "kill the next nearest one": it picked a soldier 2.4 m away that then walked off (2100, facing away,
+  to 30 m) while another soldier attacked; the game's lock-on was on the attacker, so "closing" on the
+  first pressed back (the camera faced the attacker). 18 rolls, 2 hits taken, no swing; the user took over.
+- Changes (core/combat.py): the target further than 5 m and another enemy within 4 m attacking or facing
+  the player: fight that one. Locked on but the camera more than 45 degrees off the target for 0.6 s: the
+  game locked someone else: fight the enemy the camera points at (within 20 degrees), or unlock, turn,
+  and lock again once the camera points at the target. The target down and another one on the player:
+  carry on ("One down! Now the other one!"). No punish or combo press while another enemy's hit would
+  land before the player could roll again.
+- 120 tests pass (new: attacker over a walker, follow the game's lock-on, unlock and turn, next enemy
+  after a kill, no punish into another enemy's swing).
+
+## 2026-10-11: orders with extra words; ledges; runaways
+- Sixth session (user): combat works well (soldiers, a boar: rolled its attack, killed it). Problems:
+  "Can you kill one of the deer for me?", "kill this Godrick soldier from me", "kill the next one too"
+  got "I don't see any ... to attack" (runtime/chat-20261011.jsonl 14:39-14:41): "of", "from me", "too"
+  stayed in the name. Then, chasing a fleeing deer in a straight line (the fighter's own steps, no
+  navmesh), it switched to another animal and walked off a cliff (player 4050/4000 falling, then 17090).
+- Orders: words that are never part of a name are dropped (of, from, me, too, also, again, another...);
+  "the next one" / "another one" means the kind last attacked.
+- Ledges: while fighting, the app casts 16 rays down (8 directions, 1.5 m and 3 m out, to 3.5 m below
+  the feet) 10 times a second (2.5 ms live, all ground found on flat ground); no step goes toward a drop
+  (the nearest safe direction within 90 degrees, else none) and no roll (the other side, a plain side
+  roll, else no roll: a hit rather than a fall).
+- Runaways: the target over 14 m away for 1 s: the fight hands over to the navmesh walk (sprints, follows
+  it) and fights again on arrival ("It's running! After it!"); after 3 chases: "It keeps running away!
+  Over to you."
+- 127 tests pass (new: the session's phrases, "the next one", no step toward a drop, only safe ways, roll
+  away from a drop, no roll when every way drops, runaway handed to the walk).

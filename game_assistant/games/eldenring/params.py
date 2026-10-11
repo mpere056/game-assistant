@@ -40,7 +40,7 @@ NPC_FIELDS = {
     'resist_madness': (0x128, 'H'),
     'npc_type': (0x132, 'B'),
     'team_type': (0x133, 'B'),
-    'poise': (0x19C, 'I'),               # toughness
+    'poise': (0x2A8, 'f'),               # super_armor_durability (toughness is unused, always 0)
     'taken_standard': (0x1A4, 'f'),      # neutral_damage_cut_rate: damage taken multiplier
     'taken_slash': (0x1A8, 'f'),
     'taken_strike': (0x1AC, 'f'),        # blow

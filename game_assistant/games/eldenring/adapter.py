@@ -671,6 +671,7 @@ def npc_facts(row: dict, name: str | None) -> dict:
         'name': name,
         'base_hp': row['hp'],
         'runes': row['runes'],
+        'poise': row.get('poise'),  # stance: normal enemies ~15-65 (light attacks flinch them); -1 none
         'damage_taken_percent': taken,
         # A weakness is a damage type clearly above this enemy's own usual (some take extra from everything).
         'weak_to': [k for k, v in taken.items() if v >= 110 and v >= usual + 15],
