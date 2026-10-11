@@ -580,3 +580,183 @@ class LedgeTests(unittest.TestCase):
             f.update(_snap([far]), 1 / 60)
         self.assertFalse(f.active)
         self.assertIn('fled', f.events)
+
+
+class BulletTests(unittest.TestCase):
+    """2026-10-11 15:3x (the "kill all of them" sweep): one hit, from a Godrick Soldier's 3003008: its swing
+    is out 1.167-1.233 s, and it launches a bullet at 1.2 s. A forward roll pressed at 1.02 s covered the
+    swing (and carried the player into it, gap 2.3 -> 0.5 m); the hit landed after the roll (1.28-1.57 s).
+    The adapter now merges the bullet into the window: (1.167, 1.5)."""
+
+    def test_a_long_hit_is_rolled_away_from_and_later(self):
+        WINDOWS[('c4300', 3003008)] = [(1.167, 1.5)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        rolled = None
+        for i in range(100):
+            t = 0.8 + i / 60
+            intent = f.update(_snap([_enemy(1, (0.0, 0.0, 2.8), anim=3003008, t=t)]), 1 / 60)
+            if 'roll' in intent.taps:
+                rolled = (t, intent.keys)
+                break
+        self.assertIsNotNone(rolled)
+        t, keys = rolled
+        self.assertIn('back', keys)                       # away, not through
+        self.assertTrue(1.08 <= t <= 1.14, t)             # invincible ~1.2-1.45 s: over the bullet's hit
+        # a short swing is still rolled through, 0.16 s ahead
+        f2 = Fighter(windows, lambda tid: 30.0)
+        f2.start(1)
+        for i in range(100):
+            t = 0.5 + i / 60
+            intent = f2.update(_snap([_enemy(1, (0.0, 0.0, 2.0), anim=3000, t=t)]), 1 / 60)
+            if 'roll' in intent.taps:
+                self.assertIn('forward', intent.keys)
+                self.assertTrue(1.0 - DODGE_LEAD - 0.02 <= t <= 1.0, t)
+                break
+
+    def test_the_adapter_merges_bullets_of_attacks_only(self):
+        from game_assistant.games.eldenring.adapter import EldenRingAdapter
+        a = EldenRingAdapter.__new__(EldenRingAdapter)
+        a._attacks = {'c4310': {'attacks': {'3003008': [[1.167, 1.233]], '3003000': [[0.8, 0.933]]},
+                                'bullets': {'3003008': [1.2], '3020021': [0.333], '3008032': [0.0],
+                                            '3003007': [1.5, 1.5]}}}
+        self.assertEqual(a.attack_windows('c4311', 3003008), [(1.167, 1.5)])
+        self.assertEqual(a.attack_windows('c4311', 3003000), [(0.8, 0.933)])
+        self.assertEqual(a.attack_windows('c4311', 3003007), [(1.5, 1.8)])   # a throw: a bullet alone
+        self.assertEqual(a.attack_windows('c4311', 3020021), [])             # the alert shout: not a hit
+        self.assertEqual(a.attack_windows('c4311', 3008032), [])             # a flinch's effect
+
+
+class FollowUpTests(unittest.TestCase):
+    """Seventh session (2026-10-11): two hits. A soldier's 3003000 -> 3003001 (rolled the first forward, the
+    second press 0.58 s into the roll only came out at ~0.95 s: hit); a boar's charge 3000 (hits at 1.633,
+    2.133, 2.633 s) rolled forward into it, then 3002 hit as it started."""
+
+    def _first_roll(self, f, anim, t0, z=1.6):
+        for i in range(200):
+            t = t0 + i / 60
+            intent = f.update(_snap([_enemy(1, (0.0, 0.0, z), anim=anim, t=t)]), 1 / 60)
+            if 'roll' in intent.taps:
+                return t, intent.keys
+        return None
+
+    def test_rolls_away_from_a_combo_it_cannot_roll_twice(self):
+        WINDOWS[('c4300', 3003000)] = [(0.8, 0.933)]
+        WINDOWS[('c4300', 3003001)] = [(0.567, 0.667)]
+        f = Fighter(windows, lambda tid: 30.0, chains={'c4300': {'3003000': [[0.92, 3003001]]}})
+        f.start(1)
+        t, keys = self._first_roll(f, 3003000, 0.3)
+        self.assertIn('back', keys)                          # 0.69 s to its next hit: away from it
+        # without the combo known: through it, as before
+        f2 = Fighter(windows, lambda tid: 30.0)
+        f2.start(1)
+        self.assertIn('forward', self._first_roll(f2, 3003000, 0.3)[1])
+
+    def test_a_combo_with_time_for_a_second_roll_is_rolled_through(self):
+        WINDOWS[('c4300', 3003001)] = [(0.567, 0.667)]
+        WINDOWS[('c4300', 3003003)] = [(1.167, 1.3)]
+        f = Fighter(windows, lambda tid: 30.0, chains={'c4300': {'3003001': [[0.76, 3003003]]}})
+        f.start(1)
+        self.assertIn('forward', self._first_roll(f, 3003001, 0.1)[1])   # 1.36 s to the next: time to roll
+
+    def test_a_multi_hit_charge_is_rolled_away_from(self):
+        WINDOWS[('c4300', 3100)] = [(1.633, 1.833), (2.133, 2.333), (2.633, 2.767)]   # (3000 is the sims' swing)
+        f = Fighter(windows, lambda tid: -1.0)
+        f.start(1)
+        t, keys = self._first_roll(f, 3100, 1.0, z=2.5)
+        self.assertIn('back', keys)
+        self.assertTrue(1.633 - DODGE_LEAD - 0.02 <= t <= 1.633, t)
+
+    def test_learns_a_combo_it_sees(self):
+        WINDOWS[('c4300', 3003000)] = [(0.8, 0.933)]
+        WINDOWS[('c4300', 3003001)] = [(0.567, 0.667)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        for i in range(90):                                  # 3003000 from 0.3 s, then 3003001 at 0.93 s
+            t = 0.3 + i / 60
+            anim, at = (3003000, t) if t < 0.93 else (3003001, t - 0.93)
+            f.update(_snap([_enemy(1, (0.0, 0.0, 6.0), anim=anim, t=at)]), 1 / 60)
+        got = f.chains.get('c4300', {}).get('3003000')
+        self.assertTrue(got and got[0][1] == 3003001 and abs(got[0][0] - 0.93) < 0.05, got)
+        self.assertTrue(f.chains_changed)
+
+
+class EighthSessionTests(unittest.TestCase):
+    """2026-10-11 16:35: a soldier behind a wall (10 s at a constant 2.05 m), then two soldiers with the lock
+    on one and the target the other (15 openings, one swing), a swing into a known combo (three hits)."""
+
+    def test_the_locked_on_enemy_is_the_target_at_once(self):
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        f._locked = True
+        side = _enemy(1, (4.0, 0.0, 0.0))            # the target, off to the right
+        ahead = _enemy(2, (0.0, 0.0, 3.0))           # the camera (locked) looks at this one
+        f.update(_snap([side, ahead]), 1 / 60)
+        self.assertEqual(f.target_id, 2)
+
+    def test_no_opening_in_an_attack_it_chains_out_of(self):
+        WINDOWS[('c4300', 3702)] = [(0.4, 0.5)]
+        WINDOWS[('c4300', 3700)] = [(0.8, 0.933)]
+        target = _enemy(1, (0.0, 0.0, 1.5), anim=3702, t=1.0, length=3.0)
+        f = Fighter(windows, lambda tid: 90.0, chains={'c4300': {'3702': [[1.2, 3700]]}})
+        f.start(1)
+        self.assertFalse(f._opening(target, 0.45))   # it goes into 3000 at 1.2 s: no time
+        f2 = Fighter(windows, lambda tid: 90.0)
+        f2.start(1)
+        self.assertTrue(f2._opening(target, 0.45))
+
+    def test_rolls_away_when_the_other_enemys_hit_follows_too_soon(self):
+        WINDOWS[('c4300', 3700)] = [(0.8, 0.933)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        rolled = None
+        for i in range(60):
+            t = 0.4 + i / 60
+            a = _enemy(1, (0.0, 0.0, 1.6), anim=3700, t=t)
+            b = _enemy(2, (1.5, 0.0, 1.2), facing=(-0.8, 0.0, -0.6), anim=3700, t=t - 0.4)   # hits 0.4 s later
+            intent = f.update(_snap([a, b]), 1 / 60)
+            if 'roll' in intent.taps:
+                rolled = intent.keys
+                break
+        self.assertIsNotNone(rolled)
+        self.assertIn('back', rolled)
+
+    def test_no_swing_through_a_wall_and_a_way_round_it(self):
+        f = Fighter(windows, lambda tid: 30.0, sees=lambda eid: False)
+        f.start(1)
+        f._last_enemy_attack = f.t - 10
+        f.t += 10                                    # passive: it would swing
+        target = _enemy(1, (0.0, 0.0, 2.2))          # 1.7 m: in reach, but behind a wall
+        taps, keys = [], []
+        for _ in range(int(1.5 * 60)):
+            intent = f.update(_snap([target]), 1 / 60)
+            taps += list(intent.taps)
+            keys.append(intent.keys)
+        self.assertNotIn('attack', taps)
+        self.assertTrue(any(k & {'left', 'right'} and not k & {'forward'} for k in keys))   # sideways round it
+        self.assertIn('blocked', f.events)
+
+    def test_gives_up_on_one_it_cannot_reach(self):
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        target = _enemy(1, (0.0, 0.0, 6.0))          # the sim doesn't move the player: no progress at all
+        for _ in range(int(8 * 60)):
+            f.update(_snap([target]), 1 / 60)
+            if not f.active:
+                break
+        self.assertFalse(f.active)
+        self.assertIn('unreachable', f.events)
+        self.assertIn(1, f.unreachable)
+
+    def test_a_blocked_swing_means_a_shield_only_openings_after(self):
+        sim, f = Sim(), Fighter(windows, lambda tid: 30.0)
+        f.start(5)
+        f._last_enemy_attack = f.t - 10
+        f.t += 10
+        run(f, sim, 0.2)
+        self.assertIn('attack', [tap for _t, _a, tap in sim.taps])   # an idle enemy: it tries
+        run(f, sim, 1.0)                                             # no flinch: it blocked
+        self.assertIn('guarded', f.events)
+        sim.taps.clear()
+        run(f, sim, 3.0)
+        self.assertNotIn('attack', [tap for _t, _a, tap in sim.taps])   # not again while it's idle

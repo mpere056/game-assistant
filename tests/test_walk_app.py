@@ -49,6 +49,10 @@ def make_app():
     app.lines = []
     app._navi_line = app.lines.append
     app._fight_log = lambda row: None   # never into the real runtime/combat log
+    app._walk_log = lambda row: None    # ...nor the walk log
+    app._save_chains = lambda: None     # ...nor the learned combos
+    from game_assistant.core.plan import PlanRunner
+    app.plan, app._plan_cmd = PlanRunner(app), None
     return app
 
 
@@ -63,6 +67,18 @@ def step(app, world, seconds, fps=30):
 
 
 class WalkAppTests(unittest.TestCase):
+    def test_walk_log_records_the_route_and_progress(self):
+        app = make_app()
+        rows = []
+        app._walk_log = rows.append
+        w = World()
+        step(app, w, 0.5)
+        app._walk_request('start', (0.0, 0.0, 60.0), 'Gatefront')
+        step(app, w, 2)
+        routes = [r['route'] for r in rows if 'route' in r]
+        self.assertTrue(routes and routes[0]['waypoints'][-1] == [0.0, 0.0, 60.0], routes)
+        self.assertTrue(all(r['pos'] and r['state'] for r in rows))
+
     def test_order_walks_with_navi_and_the_player_takes_over(self):
         app = make_app()
         w = World()
@@ -135,3 +151,50 @@ class FightAppTests(unittest.TestCase):
         step(app, w, 0.1)
         self.assertTrue(app.fighter.active)
         self.assertFalse(app.walk.active)
+
+
+class OrderSequenceAppTests(unittest.TestCase):
+    def test_the_next_part_runs_when_the_fight_is_won(self):
+        import time as _time
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        ran = []
+        app._order_work = ran.append
+        w = World()
+        enemy = Entity(9, 1, 'c4300', (0.0, 0.0, 4.0), (0.0, 1.0, 4.0), 0.5, 2.0, True, False, 400, 400)
+        w.entities = (enemy,)
+        step(app, w, 1.5)
+        app._then = ['kill any remaining soldiers']
+        app._walk_request('start', enemy.pos, 'Boar', 9, 'fight')
+        step(app, w, 0.2)
+        self.assertTrue(app.fighter.active)
+        w.entities = (Entity(9, 1, 'c4300', (0.0, 0.0, 4.0), (0.0, 1.0, 4.0), 0.5, 2.0, True, True, 0, 400),)
+        step(app, w, 0.2)
+        _time.sleep(0.1)                     # (the next part runs on a worker thread, as orders do)
+        self.assertEqual(ran, ['kill any remaining soldiers'])
+        self.assertIn('Got it! Now the next part!', app.lines)
+
+
+class PlanAppTests(unittest.TestCase):
+    def test_a_plan_moves_then_walks_and_the_player_can_take_over(self):
+        from game_assistant.core.plan import steps_from
+        app = make_app()
+        app.resolver = type('R', (), {'character': lambda self, *a, **k: None,
+                                      'handle': lambda self, t: type('A', (), {'kind': 'walk', 'point': (0.0, 0.0, 40.0),
+                                                                               'name': 'Gatefront', 'entity_id': None,
+                                                                               'options': []})(),
+                                      'pending': None})()
+        w = World()
+        step(app, w, 0.5)
+        app._plan_cmd = steps_from([{'do': 'move', 'shape': 'circle', 'seconds': 1},
+                                    {'do': 'go', 'target': 'Gatefront'}])
+        step(app, w, 0.5)
+        self.assertTrue(app.plan.active)
+        self.assertIn('forward', app.keys.held)            # circling
+        step(app, w, 1.0)
+        self.assertTrue(app.walk.active)                   # then the walk
+        self.assertEqual(app.walk.name, 'Gatefront')
+        app._player_key(0x57)
+        step(app, w, 0.1)
+        self.assertFalse(app.walk.active)
+        self.assertFalse(app.plan.active)

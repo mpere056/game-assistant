@@ -34,7 +34,8 @@ MAGIC = 0x52454F41  # "AOER"
 OFF_STATE = 0x100
 STATE_SIZE = 0x120
 OFF_ENTITIES = 0x200000
-OFF_COMBAT = 0x370000        # AOER_OFF_ASSIST_COMBAT: animations of everyone, the player's stamina
+OFF_COMBAT = 0x370000
+BULLET_SPAN = 0.3   # seconds a launched bullet (a projectile, a lingering sweep) is taken to be able to hit        # AOER_OFF_ASSIST_COMBAT: animations of everyone, the player's stamina
 ENTITY_SIZE = 0x80
 MAX_ENTITIES = 256
 OFF_RAYS = 0x360000          # AOER_OFF_ASSIST_RAYS: the assistant's own ray block
@@ -216,10 +217,20 @@ class EldenRingAdapter:
         return player, stats, ents
 
     def attack_windows(self, model: str | None, anim: int | None) -> list:
-        """[(start, end)] seconds into the animation when its attack hitbox is active (from the game's
-        animation files, Get-GameData.bat attacks), or [] when it isn't an attack (or isn't known)."""
+        """[(start, end)] seconds into the animation when it can hit (from the game's animation files,
+        Get-GameData.bat attacks), or [] when it isn't an attack (or isn't known). Besides the swing's own
+        hitbox: a bullet an attack animation (3XXX) launches, BULLET_SPAN long, merged with overlapping
+        windows (a Godrick Soldier's 3003008 swings 1.167-1.233 s and launches one at 1.2 s; it hit after a
+        roll that covered the swing, twice)."""
         if not model or anim is None or anim < 0:
             return []
+        key = (model, anim)
+        cache = self.__dict__.setdefault('_window_cache', {})
+        if key not in cache:
+            cache[key] = self._attack_windows(model, anim)
+        return cache[key]
+
+    def _attack_windows(self, model: str, anim: int) -> list:
         if self._attacks is None:
             path = Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'attacks.json'
             try:
@@ -231,7 +242,16 @@ class EldenRingAdapter:
             # Variants (c4311 Godrick Soldier ... c4316) have no animation files of their own: they play
             # their base model's (c4310: live, c4311 played 3043000, one of c4310's 1,165 animations).
             data = self._attacks.get(model[:4] + '0', {})
-        return sorted({tuple(w) for w in data.get('attacks', {}).get(str(anim), [])})
+        out = sorted({tuple(w) for w in data.get('attacks', {}).get(str(anim), [])})
+        if 3000 <= anim % 1_000_000 < 4000:   # attacks; other bullets are effects (flinch blood, the alert shout)
+            out += [(b, b + BULLET_SPAN) for b in data.get('bullets', {}).get(str(anim), []) if b > 0.05]
+        merged: list = []
+        for s, e in sorted(out):
+            if merged and s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            elif not merged or (s, e) != merged[-1]:
+                merged.append((s, e))
+        return merged
 
     def _entities(self, m: mmap.mmap, combat=None) -> tuple[Entity, ...]:
         blob = _seqlock_read(m, OFF_ENTITIES,
@@ -391,6 +411,21 @@ class EldenRingAdapter:
                           (land[0] - off[0], land[1] - off[1], land[2] - off[2]))
                          for k, pa, pb, _f, _t, land in (r.special or []) if k in (2, 4, 5, 6)]
         return route
+
+    def avoid_spot(self, pos: Vec3, radius: float = 1.2) -> bool:
+        """The character got stuck walking into pos (snapshot coordinates): routes keep clear of it this
+        session (the navmesh has no props: a campfire, a cart)."""
+        try:
+            snap = self.snapshot()
+            me = self._place_index().player_world(int(snap.area, 16), snap.player.pos)
+        except Exception:
+            return False
+        if me is None:
+            return False
+        p0 = snap.player.pos
+        off = (me[1] - p0[0], me[2] - p0[1], me[3] - p0[2])
+        self._avoid.append((pos[0] + off[0], pos[1] + off[1], pos[2] + off[2], radius))
+        return True
 
     def avoid_links_near(self, pos: Vec3, radius: float = 5.0) -> int:
         """The character got stuck at pos: don't use the made-up links (entrance gaps, steps, drops,

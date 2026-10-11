@@ -32,6 +32,7 @@ from .core import commands, lookat
 from .core.agent import Agent
 from .core.autowalk import AutoWalk
 from .core.combat import Fighter
+from .core.plan import PlanRunner, steps_from
 from .core.walk_commands import CommandResolver, WalkAction
 from .core.companion import Companion
 from .core.interface import CAP_CAMERA, CAP_NAVMESH, CAP_RAYCAST, CAP_SCREEN, GameNotRunning
@@ -50,7 +51,18 @@ def _own_window_in_front() -> bool:
 
 LEDGE_STEP, LEDGE_ROLL = 1.5, 3.0   # metres out the ground is probed for a step and for a roll
 LEDGE_DROP = 3.5                    # deeper than this below the feet: a ledge
-MAX_CHASES = 3                      # a target that ran off this often: hand back
+MAX_CHASES = 3
+# Orders the planner (core/plan.py) takes: several parts, or conditions, durations, shapes, "along the way"...
+_PLAN_WORDS = re.compile(r"\b(until|till|while|along the way|on the way|on your way|without|circles?|straight|"
+                         r"seconds?|minutes?|everything|everyone|alternat\w*|encounter\w*|wander\w*|patrol\w*|"
+                         r"explore|back to|come back|return|then|after|afterwards|first|finally|each|times|"
+                         r"meet|anything)\b", re.I)
+
+
+def needs_plan(text: str) -> bool:
+    return bool(_PLAN_WORDS.search(text)) or len(text.split()) > 16
+CHAINS_FILE = ROOT / '.local' / 'eldenring' / 'chains.json'   # learned enemy combos
+ALL_RANGE = 60.0                    # 'kill all of them': the next one within this many metres                      # a target that ran off this often: hand back
 FIGHT_FROM = 12.0  # metres: a "fight" order this close starts fighting at once (else walk up first)
 FOLLOW_MOVED = 3.0  # metres a character may move before the route to it is re-planned
 ACTION_LINES = {'ladder': 'Climb the ladder!', 'lift': 'Take the lift!', 'jump': 'Jump across here!',
@@ -96,8 +108,12 @@ class App:
         # Fighting for the player ("fight that soldier"): dodges by the game's own attack timings.
         self._ledges: tuple = ((), ())    # where the ground drops away around the player (_ledge_loop)
         self._chases: dict = {}           # entity -> times a fight handed over to a chase (it ran)
+        self.plan = PlanRunner(self)      # orders of several parts (core/plan.py)
+        self._plan_cmd = None
+        self._los: tuple = (None, None)    # (target, a clear line to it) from _ledge_loop
         self.fighter = Fighter(getattr(self.adapter, 'attack_windows', lambda m, a: []), self._poise_of,
-                               lambda: self._ledges)
+                               lambda: self._ledges, self._load_chains(),
+                               lambda eid: self._los[1] if self._los[0] == eid else None)
         self._fight_after = None          # the walk is going to a character to fight it
         self.resolver = CommandResolver(self.adapter, ask_model=self._model_order)
         self._walk_cmd = None             # ('start', point, name) or ('stop', why), applied by the fairy loop
@@ -202,11 +218,34 @@ class App:
         self.say(None, text + '\n')
         threading.Thread(target=self._order_work, args=(text,), daemon=True).start()
 
-    def _order_work(self, text: str) -> None:
+    def _next_order(self) -> bool:
+        """The next part of a '... and then ...' order, if any: run it (on a worker thread, as orders are)."""
+        then = getattr(self, '_then', None)
+        if not then:
+            return False
+        nxt = then.pop(0)
+        rest = list(then)
+
+        def work():
+            self._order_work(nxt)
+            if rest and not getattr(self, '_then', None):   # the part didn't queue its own: keep the rest
+                self._then = rest
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def _order_work(self, text: str, from_plan_queue: bool = False) -> None:
+        if not from_plan_queue and needs_plan(text) and self._can_plan():
+            return self._plan_order(text)
         try:
             action = self.resolver.handle(text)
         except Exception as e:  # show it instead of dying
             action = WalkAction('none', f"Hmm, I couldn't work that out ({type(e).__name__}).")
+        if action.kind == 'none' and not from_plan_queue and self._can_plan():
+            return self._plan_order(text)              # the rules didn't get it: the planner might
+        if action.kind in ('walk', 'stop'):
+            self._plan_cmd = 'stop'                    # a new order replaces a plan
+            self._fight_all = action.every if action.kind == 'walk' else None   # 'kill all of them'
+            self._then = list(action.then) if action.kind == 'walk' else []      # '... and then ...'
         if action.kind == 'walk':
             self._walk_request('start', action.point, action.name, action.entity_id, action.attack)
         elif action.kind == 'stop':
@@ -215,6 +254,69 @@ class App:
         with self.log.open('a', encoding='utf-8') as f:
             f.write(json.dumps({'t': datetime.now().isoformat(timespec='seconds'), 'order': text,
                                 'action': action.kind, 'place': action.name}) + '\n')
+
+    def _can_plan(self) -> bool:
+        return getattr(self, 'agent', None) is not None and hasattr(self.agent, 'plan')
+
+    def _plan_order(self, text: str) -> None:
+        """An order of several parts: Navi answers at once, the model writes the steps (~1-2 s), the frame
+        thread runs them (core/plan.py)."""
+        self._navi_line('Okay! Let me work that out...')
+        record = {'t': datetime.now().isoformat(timespec='seconds'), 'order': text, 'action': 'plan'}
+        try:
+            got = self.agent.plan(text, self.resolver.recent())
+        except SpendCapReached as e:
+            got, record['error'] = None, str(e)
+        except Exception as e:  # show it instead of dying
+            got, record['error'] = None, f'{type(e).__name__}: {e}'
+        steps = steps_from((got or {}).get('steps'))
+        if steps:
+            self._fight_all, self._then = None, []
+            self._plan_cmd = steps
+            self._navi_line((got or {}).get('say') or "On it!")
+        else:
+            self._navi_line(f"Sorry, I couldn't work out how to do that." if 'error' not in record
+                            else f"Sorry, I couldn't plan that ({record['error'][:60]}).")
+        record['plan'] = [x.text() for x in steps]
+        with self.log.open('a', encoding='utf-8') as f:
+            f.write(json.dumps(record) + '\n')
+
+    # ---- the plan's world (core/plan.py PlanWorld) ----
+
+    def plan_target(self, target: str):
+        if target.startswith('#entity '):
+            snap = self.adapter.snapshot()
+            e = next((x for x in snap.entities if str(x.id) == target.split()[1] and not x.dead), None)
+            return (tuple(e.pos), e.name or (self.adapter.knowledge(e.type_id) or {}).get('name'), e.id) if e else None
+        if target == 'crosshair':
+            a = self.resolver._crosshair()
+        else:
+            a = self.resolver.character(target) or self.resolver.handle(f'go to the {target}')
+            self.resolver.pending = None
+        if a is None:
+            return None
+        if a.kind == 'ask' and a.options:
+            return (tuple(a.options[0][1]), a.options[0][0], None)
+        if a.kind != 'walk' or a.point is None:
+            return None
+        return (tuple(a.point), a.name, a.entity_id)
+
+    def plan_find(self, kind: str, max_range: float, not_kinds: list):
+        skip = self.fighter.unreachable
+        if kind in ('enemy', 'other', 'any', 'anything', 'enemies'):
+            a = self.resolver.nearest_enemy(max_range, not_kinds, exclude=skip)
+        else:
+            a = self.resolver.character(kind, max_range=max_range, same_level=True, exclude=skip)
+        return (tuple(a.point), a.name, a.entity_id) if a else None
+
+    def plan_walk(self, point, name, entity_id, fight: bool) -> None:
+        self._walk_request('start', point, name, entity_id, 'fight' if fight else False)
+
+    def plan_stop(self) -> None:
+        self._walk_request('stop', 'plan')
+
+    def plan_say(self, line: str) -> None:
+        self._navi_line(line)
 
     def _model_order(self, text: str) -> WalkAction | None:
         """Orders the instant rules didn't understand: one Haiku call picks the action."""
@@ -310,6 +412,31 @@ class App:
             self.fighter.stop()
             self._fight_after = None
             self.companion.follow()
+        cmd_plan, self._plan_cmd = self._plan_cmd, None
+        if cmd_plan == 'stop':
+            self.plan.stop()
+        elif cmd_plan:
+            self.plan.start(cmd_plan, snap)
+        if self.plan.active and not (self.walk.active or self.fighter.active) \
+                and time.monotonic() - self._took_over < 0.5:   # the player took over during a move step
+            self.plan.stop()
+            self.keys.release_all()
+            self._navi_line("Okay, you've got it!")
+        if self.plan.active:
+            intent = self.plan.update(snap, dt, self.walk.active, self.fighter.active)
+            if intent is not None:            # a move step: its keys (never off a ledge)
+                if snap.screen is not None and snap.screen.focused and snap.camera:
+                    keys = self.fighter._safe(intent.keys, math.degrees(math.atan2(snap.camera.forward[0],
+                                                                                      snap.camera.forward[2])),
+                                              roll=False)
+                    self.keys.set(keys)
+                    if intent.turn:
+                        yaw = math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2]))
+                        self.turner.turn(intent.turn, yaw)
+                else:
+                    self.keys.release_all()
+                self._walk_events()
+                return
         if (self.walk.active or self.fighter.active) and time.monotonic() - self._took_over < 0.5:
             if self.fighter.active:
                 self.fighter.stop()
@@ -345,7 +472,55 @@ class App:
                 self.turner.turn(intent.turn, yaw)
         else:
             self.keys.release_all()
+        self._walk_trace(snap, intent, route)
         self._walk_events()
+
+    def _walk_trace(self, snap, intent, route) -> None:
+        """runtime/walk-<date>.jsonl: where the walk was, what it pressed and why, twice a second and at
+        each event; every new route in full (to see from a session why a walk went wrong)."""
+        now = time.monotonic()
+        new_route = route is not None and route is not getattr(self, '_logged_route', None)
+        if not (new_route or self.walk.events or now - getattr(self, '_last_walk_log', 0.0) > 0.5):
+            return
+        self._last_walk_log = now
+        p = snap.player.pos if snap.player else None
+        row = {'t': round(now, 3), 'state': self.walk.state, 'events': list(self.walk.events),
+               'name': self.walk.name, 'goal': [round(v, 1) for v in self.walk.goal] if self.walk.goal else None,
+               'pos': [round(v, 2) for v in p] if p else None, 'keys': sorted(intent.keys),
+               'taps': list(intent.taps), 'turn': round(intent.turn, 1),
+               'progress': getattr(self.walk, '_progress', None), 'route_points': len(self.walk.route),
+               'cam_yaw': round(math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2])), 1)
+               if snap.camera else None, 'anim': getattr(snap.player, 'anim', None) if snap.player else None,
+               'entity': getattr(self, '_walk_entity', None)}
+        if new_route:
+            self._logged_route = route
+            pts = getattr(route, 'waypoints', route)
+            row['route'] = {'complete': getattr(self.companion, 'route_complete', None),
+                            'waypoints': [[round(v, 1) for v in w] for w in pts],
+                            'actions': [str(a) for a in (self.companion.route_actions or [])][:20]}
+        self._walk_log(row)
+
+    def _stuck_spot(self, p):
+        """The point 1.2 m ahead of the player toward the walk's next waypoint (what it is stuck on)."""
+        route, i = self.walk.route, getattr(self.walk, '_progress', 0)
+        if not route:
+            return None
+        q = route[min(i, len(route) - 1)]
+        d = math.hypot(q[0] - p[0], q[2] - p[2])
+        if d < 0.3:
+            q = route[min(i + 1, len(route) - 1)]
+            d = math.hypot(q[0] - p[0], q[2] - p[2])
+        if d < 0.3:
+            return None
+        return (p[0] + (q[0] - p[0]) / d * 1.2, p[1], p[2] + (q[2] - p[2]) / d * 1.2)
+
+    def _walk_log(self, row: dict) -> None:
+        try:
+            path = ROOT / 'runtime' / f'walk-{datetime.now():%Y%m%d}.jsonl'
+            with path.open('a', encoding='utf-8') as f:
+                f.write(json.dumps(row, default=str) + '\n')
+        except OSError:
+            pass
 
     def _follow_entity(self, snap) -> None:
         """Walking to a character: the walk steers at its live position when close; further away the
@@ -378,6 +553,8 @@ class App:
                              'keys': sorted(intent.keys), 'taps': list(intent.taps),
                              'focused': bool(snap.screen and snap.screen.focused), 'held': sorted(self.keys.held),
                              **self.fighter.debug})
+        if not self.fighter.active and self.fighter.chains_changed:   # a fight ended: keep what it learned
+            self._save_chains()
         while self.fighter.events:
             ev = self.fighter.events.pop(0)
             if ev == 'not_focused':
@@ -385,7 +562,29 @@ class App:
                 continue
             line = {'won': "Got it! It's down!", 'low_health': "You're hurt! Over to you: heal up!",
                     'target_gone': "It's gone!", 'timeout': "That's taking a while. Over to you!",
-                    'next_target': "One down! Now the other one!"}.get(ev)
+                    'next_target': "One down! Now the other one!",
+                    'unreachable': "I can't reach that one!"}.get(ev)
+            if ev == 'unreachable':     # go on as if it were done, with the others
+                ev = 'target_gone' if not getattr(self, '_fight_all', None) else 'won'
+            if self.plan.active and ev != 'fled' and self.plan.on_event(ev):
+                pass                                              # the plan goes on by itself
+            elif ev == 'won' and getattr(self, '_fight_all', None):   # 'kill all of them': the next one
+                got = self.resolver.character(self._fight_all, max_range=ALL_RANGE, same_level=True,
+                                              exclude=self.fighter.unreachable)
+                if got is not None:
+                    self._walk_request('start', got.point, got.name, got.entity_id, 'fight')
+                    line = (line + ' ' if line and 'reach' in line else 'Got it! ') + f"Next {got.name or 'one'}!"
+                else:
+                    self._fight_all = None
+                    line = "Got it! That's all of them!"
+                    if self._next_order():
+                        line = "Got it! That's all of them! Now the next part!"
+            elif ev in ('won', 'target_gone') and self._next_order():
+                line = "Got it! Now the next part!"
+            elif ev in ('low_health', 'timeout', 'fled'):
+                self._fight_all = None if ev != 'fled' else getattr(self, '_fight_all', None)
+                if ev != 'fled':
+                    self._then = []
             if ev == 'fled':   # it ran off: follow it along the navmesh, fight again on arrival
                 tid = self.fighter.target_id
                 e = next((x for x in snap.entities if x.id == tid), None)
@@ -407,7 +606,8 @@ class App:
         (the fighter's straight steps don't use the navmesh: it once walked off a cliff after a deer)."""
         while True:
             time.sleep(0.1)
-            if not self.fighter.active:
+            moving = self.plan.active and self.plan.step is not None and self.plan.step.do == 'move'
+            if not (self.fighter.active or moving):
                 self._ledges = ((), ())
                 continue
             try:
@@ -421,13 +621,39 @@ class App:
                     for dist in (LEDGE_STEP, LEDGE_ROLL):
                         x, z = p[0] + math.sin(a) * dist, p[2] + math.cos(a) * dist
                         rays.append(((x, p[1] + 2.0, z), (x, p[1] - LEDGE_DROP, z)))
+                target = next((e for e in snap.entities if e.id == self.fighter.target_id), None)
+                if target is not None:   # a clear line from the chest to it (a wall between: no swing)
+                    a = (p[0], p[1] + 1.3, p[2])
+                    b = target.center
+                    d = math.dist(a, b)
+                    if d > 0.5:
+                        b = tuple(a[i] + (b[i] - a[i]) * (d - 0.4) / d for i in range(3))
+                    rays.append((a, b))
                 hits = self.adapter.raycast(rays, timeout=0.5)
+                if target is not None:
+                    self._los = (target.id, not hits[16].hit)
                 step = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8) if not hits[2 * k].hit)
                 roll = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8)
                              if not hits[2 * k].hit or not hits[2 * k + 1].hit)
                 self._ledges = (step, roll)
             except Exception:
                 self._ledges = ((), ())
+
+    @staticmethod
+    def _load_chains() -> dict:
+        """Enemy combos learned in fights (core/combat.py), kept across runs: .local/<game>/chains.json."""
+        try:
+            return json.loads(CHAINS_FILE.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+
+    def _save_chains(self) -> None:
+        try:
+            CHAINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CHAINS_FILE.write_text(json.dumps(self.fighter.chains, indent=1), encoding='utf-8')
+            self.fighter.chains_changed = False
+        except OSError:
+            pass
 
     def _poise_of(self, type_id: int | None) -> float | None:
         """The enemy kind's poise (how much it takes to flinch it), from the game's NpcParam."""
@@ -456,6 +682,9 @@ class App:
                 if snap_pos := getattr(self, '_last_player_pos', None):
                     if hasattr(self.adapter, 'avoid_links_near'):
                         self.adapter.avoid_links_near(snap_pos)
+                    ahead = self._stuck_spot(snap_pos)
+                    if ahead is not None and hasattr(self.adapter, 'avoid_spot'):
+                        self.adapter.avoid_spot(ahead)   # what it walked into (a campfire, a rock)
                 self.companion.route = None
                 self._walk_route = None
                 self.walk.set_route([])
@@ -466,16 +695,27 @@ class App:
             elif ev == 'target_gone':
                 self.companion.follow()
                 self._navi_line("It's gone!")
+                if self.plan.active:
+                    self.plan.on_event(ev)
             elif ev == 'arrived':
                 if self._fight_after is not None:  # walked up to it: now the fight
                     self.fighter.start(self._fight_after, self.walk.name)
                     self._fight_after = None
+                elif self.plan.active:
+                    self.plan.on_event(ev)
                 else:
                     self._navi_line(f"Here we are: {self.walk.name}!" if self.walk.name else 'Here we are!')
+                    self._next_order()
             elif ev == 'gave_up':
+                self._then = []
+                if self.plan.active and self.plan.on_event(ev):
+                    continue
                 self.companion.follow()
                 self._navi_line("I can't get through here. Over to you!")
             elif ev == 'stopped:you':
+                self._then, self._fight_all = [], None
+                if self.plan.active:
+                    self.plan.on_event(ev)
                 self._navi_line("Okay, you've got it!")
             elif ev == 'paused:not_focused':
                 self._navi_line("Click back into the game and I'll keep going.")
@@ -552,6 +792,7 @@ class App:
             record['error'] = f'{type(e).__name__}: {e}'
         with self.log.open('a', encoding='utf-8') as f:
             f.write(json.dumps(record) + '\n')
+        self.resolver.heard(question + '\n' + str(record.get('answer') or ''))   # 'kill all of them' after it
         self.q.put(('done', ''))
 
     # ---- the fairy (its own thread) ----

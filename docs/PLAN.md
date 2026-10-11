@@ -209,6 +209,23 @@ delayed swings, combos and wind-ups, the things players learn enemy by enemy, ar
 - Learn from fights: the log shows each hit taken and the rolls around it; adjust timing per enemy.
 - Healing (Flask) when health is low and the enemy is recovering; blocking with a shield.
 
+## Orders of several parts: plans (added 2026-10-11)
+
+Simple orders ("kill that soldier", "go to the nearest grace") keep the instant rules (core/walk_commands.py).
+An order with several parts, conditions or durations ("go to the grace and kill anything on the way",
+"walk in a circle for 10 seconds, then ...", "until you meet a soldier") goes to the planner: Navi answers at
+once, Haiku turns the order into steps (one make_plan call, ~1.5 s, ~$0.002), and code runs the steps at the
+frame rate (core/plan.py). The model understands the language; it never drives the character.
+
+| Step | Options |
+|------|---------|
+| go | target (a place, 'nearest site of grace', a character kind, 'found', 'crosshair', 'start'); engage none / attackers / all; until_see a kind |
+| fight | target (a kind, 'enemy', 'found'); count one / all; cycle (kinds in turn, 'other' = the rest) |
+| move | shape circle / line / wander; seconds; until_see |
+| wait | seconds |
+
+New abilities come as new step kinds or options (the schema and the runner), not as sentence rules.
+
 ## Two talk keys: ask Navi, or command your character (added 2026-10-10)
 
 | Key (setting) | What it is for | Who acts |

@@ -18,6 +18,7 @@ Filler ("please", "in front of me", "I mean", "my character") is ignored.
 from __future__ import annotations
 
 import difflib
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -48,7 +49,26 @@ _FILLER = re.compile(r"\b(please|in front of me|ahead of me|in front|ahead|near 
                      r"right there|over there|for me|thanks|thank you|i mean|my character|you see|that is)\b", re.I)
 _ARTICLES = {'the', 'a', 'an', 'one', 'some', 'that', 'this', 'those', 'these'}
 _NOT_NAME = {'of', 'from', 'me', 'us', 'too', 'also', 'again', 'for', 'another', 'other', 'more', 'as', 'well',
-             'ones', 'guy', 'guys', 'next', 'them', 'either', 'any'}
+             'ones', 'guy', 'guys', 'next', 'them', 'either', 'any', 'all', 'every', 'each', 'around', 'here',
+             'everyone', 'everything', 'left', 'remaining', 'rest'}
+# Orders from the 2026-10-11 sessions the rules missed:
+_NEXT_ONE = re.compile(r"\b(next|another) one\b|\bone more\b|\bthe next\b", re.I)  # 'now the next one please'
+_ALL = re.compile(r"\b(all|every|each|everyone|the rest)\b", re.I)                   # 'kill all of the soldiers'
+_IN_VIEW = re.compile(r"\b(in front|ahead|this|that|there|those|these)\b", re.I)    # 'this enemy in front of me'
+VIEW_ANGLE = 30.0     # degrees from the camera's forward: "the one in front of me"
+VIEW_RANGE = 60.0
+ALL_RANGE = 60.0      # 'kill all of them': the next one within this many metres
+SAME_LEVEL = 8.0      # 'any enemy' and 'all of them' skip characters this far above or below the player
+                      # (15:22: "all of them" went on to an Eagle 35 m up a cliff; the walk got stuck)
+CONTEXT_SECONDS = 60.0  # what was said this recently gives "them / it / that" its meaning
+FOLLOW_UP_SECONDS = 90.0  # an order without a verb this soon after an attack order is a correction
+# 'kill the boar and then kill any remaining soldiers' (15:4x): one order after another. 'and' alone only
+# splits when another order follows it ('kill the boar and the soldier' is one order... for two names).
+_VERBS = r"(?:kill|attack|fight|hit|strike|defeat|beat|take|go|walk|run|head|move|lead|bring|stop|after|once|when)"
+_THEN = re.compile(r"\s*,?\s*\b(?:and then|and after that|after that|afterwards|then|and also|and)\b\s*,?\s*"
+                   r"(?=(?:[a-z']+\s+){0,3}?" + _VERBS + r"\b)", re.I)
+_AFTER_CLAUSE = re.compile(r"^(?:after|once|when)\b[^,]*?(?:,\s*|\s+(?=(?:please\s+)?" + _VERBS + r"\b))", re.I)
+_NOT_THIS = re.compile(r"\bnot (?:the |that |those |these |an? )?([a-z']+)", re.I)  # 'not the Eagle'
 _GENERIC_ENEMY = {'enemy', 'enemies', 'monster', 'monsters', 'foe', 'foes', 'hostile', 'baddie', 'mob'}
 _PLACE_WORDS = re.compile(r'grace|landmark|ruin|cave|church|castle|tower|place|shack|camp|fort|catacomb|tunnel'
                           r'|bridge|lake|village|manor|evergaol|gate', re.I)
@@ -64,7 +84,25 @@ class WalkAction:
     name: str | None = None
     entity_id: int | None = None  # walking to a character: follow it if it moves
     attack: str | bool = False    # ...and attack it: 'hit' (one hit, then hand back) or 'fight' (until it's down)
+    every: str | None = None      # 'kill all of them': after each kill, the next of this kind nearby
+    then: list = field(default_factory=list)  # 'kill the boar and then the soldiers': the orders after this
     options: list = field(default_factory=list)  # for 'ask': [(name, point)]
+
+
+def split_orders(text: str) -> list[str]:
+    """'kill the boar and then after you've killed the boar, kill any soldiers' -> ['kill the boar', 'kill any
+    soldiers']: the orders in a sentence, in turn (an 'after you've killed X,' at the start is dropped)."""
+    out = []
+    for part in _THEN.split(text):
+        part = _AFTER_CLAUSE.sub('', part.strip(' ,.')).strip(' ,.')
+        m = _ATTACK.search(part)
+        names = re.split(r"\s*,?\s*\band\b\s*", m.group('target')) if m else []
+        if len(names) > 1 and all(n.strip() for n in names):   # 'kill the boar and the soldier': each in turn
+            out.append(part[:m.start('target')] + names[0])
+            out += [f'{m.group(1)} {n}' for n in names[1:]]
+        elif part:
+            out.append(part)
+    return out or [text]
 
 
 def _clean(text: str) -> str:
@@ -85,6 +123,14 @@ class CommandResolver:
         self.ask_model = ask_model
         self.pending: tuple[float, list] | None = None   # (asked at, options)
         self.last_kind: str | None = None                # the last enemy kind attacked ('the next one')
+        self.last_attack_t = -1e9                        # when the last attack order was understood
+        self._heard: list = []                           # (time, text) of the conversation, newest last
+
+    def heard(self, text: str) -> None:
+        """Something said in the conversation (a question and Navi's answer): 'kill all of them' right after
+        'Three Godrick Soldiers nearby' means the soldiers."""
+        now = time.monotonic()
+        self._heard = [(t, x) for t, x in self._heard if now - t < CONTEXT_SECONDS] + [(now, text)]
 
     def handle(self, text: str) -> WalkAction:
         try:
@@ -94,6 +140,13 @@ class CommandResolver:
 
     def _handle(self, text: str) -> WalkAction:
         t = normalize(text).strip().rstrip('?')
+        parts = split_orders(t)
+        if len(parts) > 1:   # one at a time: the app runs the next when this one is done
+            first = self._handle(parts[0])
+            if first.kind == 'walk':
+                first.then = parts[1:]
+                first.say = f'{first.say} Then the next part!'
+            return first
         if self.pending and time.monotonic() - self.pending[0] < ASK_SECONDS:
             choice = self._choose(t, self.pending[1])
             if choice is not None:
@@ -104,7 +157,15 @@ class CommandResolver:
             return WalkAction('stop', 'Stopping.')
         m = _ATTACK.search(t)
         if m:
-            return self._attack(_ONE_HIT.sub(' ', m.group('target')), 'hit' if _ONE_HIT.search(t) else 'fight')
+            return self._attack(_ONE_HIT.sub(' ', m.group('target')), 'hit' if _ONE_HIT.search(t) else 'fight',
+                                text=t)
+        if self.last_kind and _NEXT_ONE.search(t) and not _TARGET.search(t):   # 'now the next one please'
+            return self._attack('next one', 'fight', text=t)
+        if time.monotonic() - self.last_attack_t < FOLLOW_UP_SECONDS and not _TARGET.search(t):
+            # a correction of the last attack order: 'oh no, not the Eagle, all the soldiers'
+            named = self._mentioned(t, context=False)
+            if named:
+                return self._attack(('all ' if _ALL.search(_NOT_THIS.sub(' ', t)) else '') + named, 'fight', text=t)
         m = _NEAREST.search(t)
         if m:
             what = _clean(m.group('what'))
@@ -146,9 +207,11 @@ class CommandResolver:
             return self._ask([(a['name'], a['position']), (res[1]['name'], res[1]['position'])])
         return self._walk(a['name'], a['position'])
 
-    def character(self, what: str) -> WalkAction | None:
-        """The nearest living character within CHARACTER_RANGE whose name matches the words (forgiving),
-        or any hostile one for 'enemy'. None when nothing around matches."""
+    def character(self, what: str, in_view: bool = False, max_range: float = CHARACTER_RANGE,
+                  same_level: bool = False, exclude=()) -> WalkAction | None:
+        """The nearest living character within max_range whose name matches the words (forgiving), or any
+        hostile one for 'enemy'. in_view ('this one in front of me'): the nearest of those within VIEW_ANGLE
+        of where the camera looks, if any. None when nothing around matches."""
         snap = self.adapter.snapshot()
         if not snap.in_world or not snap.player:
             return None
@@ -157,13 +220,15 @@ class CommandResolver:
         words -= _GENERIC_ENEMY
         if not words and not generic:
             return None
+        same_level = same_level or generic   # 'any enemy': only ones the player can walk to
         p = snap.player.pos
         best = None
+        viewed = None
         for e in snap.entities:
-            if e.dead or (generic and not e.hostile):
+            if e.dead or (generic and not e.hostile) or e.id in exclude:
                 continue
             d = ((e.pos[0] - p[0]) ** 2 + (e.pos[2] - p[2]) ** 2) ** 0.5
-            if d > CHARACTER_RANGE:
+            if d > max_range or (same_level and abs(e.pos[1] - p[1]) > SAME_LEVEL):
                 continue
             name = e.name
             if not name and e.type_id is not None and hasattr(self.adapter, 'knowledge'):
@@ -176,21 +241,42 @@ class CommandResolver:
                 continue
             if best is None or d < best[0]:
                 best = (d, e, name)
+            if in_view and snap.camera is not None and d <= VIEW_RANGE and d > 0.1:
+                fx, fz = snap.camera.forward[0], snap.camera.forward[2]
+                n = (fx * fx + fz * fz) ** 0.5 or 1.0
+                cos = ((e.pos[0] - p[0]) * fx + (e.pos[2] - p[2]) * fz) / (n * d)
+                if cos >= math.cos(math.radians(VIEW_ANGLE)) and (viewed is None or d < viewed[0]):
+                    viewed = (d, e, name)
+        best = viewed or best
         if best is None:
             return None
         d, e, name = best
         label = name or 'that enemy'
         return WalkAction('walk', f"There's a {label} {round(d)} metres away. Let's go!", tuple(e.pos), label, e.id)
 
-    def _attack(self, target: str, mode: str = 'fight') -> WalkAction:
+    def _attack(self, target: str, mode: str = 'fight', text: str = '') -> WalkAction:
         """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and fight it
-        ('hit it once': land one hit). A pronoun means what the player is looking at, else the nearest enemy."""
+        ('hit it once': land one hit). Without a name: a kind named earlier in the order ('there was a boar
+        around here, kill that too'), else the kind last fought ('the next one'), else what the player looks
+        at, else the nearest enemy. 'this ... in front of me' prefers the one in view; 'all of them' goes on
+        to the next of that kind after each kill."""
+        every = bool(_ALL.search(target)) or bool(re.search(r"\b(any|remaining)\b", target, re.I)
+                                                  and re.search(r"[a-z]{3,}s\b", target.lower()))   # 'any soldiers'
+        in_view = bool(_IN_VIEW.search(target)) and not re.search(r"\b(nearest|closest|next)\b", target, re.I)
         words = _clean(re.sub(r"\b(nearest|closest|next)\b", ' ', target))
         words = re.sub(r"^(on|at|against|into|onto)\b\s*", '', words)   # 'land one hit on the soldier'
         # 'kill this soldier from me', 'one of the deer', 'the next one too': not part of a name
         words = ' '.join(w for w in words.split() if w not in _NOT_NAME)
-        if not words and re.search(r"\b(next|another|other|more|again)\b", target, re.I) and self.last_kind:
-            words = self.last_kind   # 'kill the next one': another of the kind just fought
+        if not words or _PRONOUN.match(words):
+            # the conversation only for many ('all of them', 'those'); 'that / it' is what the player looks at
+            plural = every or bool(re.search(r"\b(them|those|these)\b", target, re.I))
+            named = self._mentioned(text, context=plural)
+            if named:
+                words = named
+            elif re.search(r"\b(next|another|other|more|again)\b", target, re.I) and self.last_kind:
+                words = self.last_kind   # 'kill the next one': another of the kind just fought
+            elif every and self.last_kind:
+                words = self.last_kind
         got = None
         if _PRONOUN.match(words):
             snap = self.adapter.snapshot()
@@ -199,15 +285,94 @@ class CommandResolver:
                 e = r.best.entity
                 got = WalkAction('walk', '', tuple(e.pos), e.name or 'that enemy', e.id)
             words = 'enemy'
-        got = got or self.character(words or 'enemy')
+        got = got or self.character(words or 'enemy', in_view=in_view, same_level=every)
         if got is None:
             return WalkAction('none', f"I don't see any {words or 'enemy'} to attack.")
         got.attack = mode
+        self.last_attack_t = time.monotonic()
         if got.name and got.name != 'that enemy':
             self.last_kind = got.name
         what = f'the {got.name}' if got.name and got.name != 'that enemy' else 'it'
         got.say = f"Let's take {what} down!" if mode == 'fight' else f"Attacking {what}!"
+        if every and mode == 'fight':
+            got.every = got.name if got.name and got.name != 'that enemy' else 'enemy'
+            got.say = f"Let's take them all down! The nearest {got.name or 'one'} first!"
         return got
+
+    def recent(self) -> str:
+        """The conversation of the last minute, for the planner."""
+        now = time.monotonic()
+        return '\n'.join(x for t, x in self._heard if now - t < CONTEXT_SECONDS)
+
+    def nearest_enemy(self, max_range: float, not_kinds=(), exclude=()) -> WalkAction | None:
+        """The nearest living hostile on the player's level whose name is none of not_kinds ('other')."""
+        snap = self.adapter.snapshot()
+        if not snap.in_world or not snap.player:
+            return None
+        banned = [set(re.findall(r"[a-z']+", k.lower())) for k in not_kinds]
+        p, best = snap.player.pos, None
+        for e in snap.entities:
+            if e.dead or not e.hostile or abs(e.pos[1] - p[1]) > SAME_LEVEL or e.id in exclude:
+                continue
+            d = ((e.pos[0] - p[0]) ** 2 + (e.pos[2] - p[2]) ** 2) ** 0.5
+            if d > max_range or (best is not None and d >= best[0]):
+                continue
+            name = e.name
+            if not name and e.type_id is not None and hasattr(self.adapter, 'knowledge'):
+                try:
+                    name = (self.adapter.knowledge(e.type_id) or {}).get('name')
+                except Exception:
+                    name = None
+            words = set(re.findall(r"[a-z']+", (name or '').lower()))
+            if any(b and b <= words for b in banned):
+                continue
+            best = (d, e, name)
+        if best is None:
+            return None
+        d, e, name = best
+        return WalkAction('walk', '', tuple(e.pos), name or 'that enemy', e.id)
+
+    def _mentioned(self, text: str, context: bool = True) -> str | None:
+        """The name of a kind of character around the player that the order names somewhere ('I think there
+        was a boar around here. Can you kill that too?' -> 'Boar'), else (context) the conversation of the
+        last minute names ('Three Godrick Soldiers nearby' -> 'kill all of them'). Strict matching: whole
+        words; 'not the Eagle' excludes the Eagle."""
+        got = self._names_in(_NOT_THIS.sub(' ', text or ''), _NOT_THIS.findall(text or ''))
+        if got is None and context:
+            for _t, said in reversed(self._heard):   # newest first
+                got = self._names_in(said, _NOT_THIS.findall(text or ''))
+                if got:
+                    break
+        return got
+
+    def _names_in(self, text: str, excluded=()) -> str | None:
+        if not text:
+            return None
+        heard = {w.rstrip('s') for w in re.findall(r"[a-z']+", text.lower()) if len(w) >= 3}
+        heard -= {w.rstrip('s') for w in _NOT_NAME | _ARTICLES | _GENERIC_ENEMY}
+        banned = {w.rstrip('s') for x in excluded for w in re.findall(r"[a-z']+", x.lower()) if len(w) >= 3}
+        snap = self.adapter.snapshot()
+        if not snap.in_world or not snap.player:
+            return None
+        best = None
+        for e in snap.entities:
+            if e.dead:
+                continue
+            name = e.name
+            if not name and e.type_id is not None and hasattr(self.adapter, 'knowledge'):
+                try:
+                    name = (self.adapter.knowledge(e.type_id) or {}).get('name')
+                except Exception:
+                    name = None
+            if not name:
+                continue
+            name_words = {w.rstrip('s') for w in re.findall(r"[a-z']+", name.lower()) if len(w) >= 3}
+            if name_words & banned:
+                continue
+            n = len(name_words & heard)
+            if n and (best is None or n > best[0]):
+                best = (n, name)
+        return best[1] if best else None
 
     def _crosshair(self) -> WalkAction:
         snap = self.adapter.snapshot()
