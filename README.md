@@ -26,6 +26,10 @@ planning with "lead the way" (4). See [docs/STATUS.md](docs/STATUS.md).
 - **Voice**: hold F9 and speak; it answers aloud in its own small, bright fairy voice (a neural voice
   raised in pitch, with a little sparkle before it speaks). Speech recognition and the voice both run
   on your PC, free.
+- **Orders (F10)**: hold F10 and say "go to the nearest site of grace" (or type "/go to ..."): your
+  character walks there by itself along a route from the game's own navmesh (ladders, lifts and jumps
+  included) while Navi leads the way. Press any movement key to take over. Needs
+  `Get-GameData.bat navmesh` once. Built, not yet tried in the game.
 
 Full plan: [docs/PLAN.md](docs/PLAN.md). Game adapter interface: [docs/ADAPTER.md](docs/ADAPTER.md).
 

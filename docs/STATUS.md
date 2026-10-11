@@ -1,5 +1,16 @@
 # Status
 
+**2026-10-10, latest: F10 orders and auto-walk (phase 4b), learned links, ladders and lifts.** Built and
+tested offline only (73 tests); the user chose to test later. Hold F10 (or type "/go to ...") and say
+"go to the nearest site of grace": the character walks Navi's route by itself (mouse turns the camera,
+W/A/S/D, Space to run on long straights), climbs ladders, waits on lifts, jumps where the game marks
+jumps; any movement key you press yourself takes over at once. The route planner also learns
+connections from where you walk. First things to check in game: does the camera turn the right amount
+(mouse sensitivity is learned), do Space-to-run and E-for-ladders match your key bindings, does
+takeover feel instant.
+Also: a broken line in app.py (from the ladder change) stopped the app from starting; fixed in
+mpere056/game-assistant#8 with a test that compiles every file.
+
 **2026-10-10, latest: walking routes from the game's own navmesh.** Elden Ring's navmeshes (what its
 enemies walk on) are extracted from the installed game into `.local/` (`Get-GameData.bat navmesh`,
 done on this PC: 695 blocks, 4.5 million faces) and Navi's guiding plans over them. Checked against the

@@ -136,3 +136,45 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(down.special), 1)
         up = search(src, (1, 0, 5), (1, 4, 1))
         self.assertFalse(up.reaches_goal)  # no way back up
+
+
+class LearnedLinkTests(unittest.TestCase):
+    """WorldGraph.observe on a small hand-made world: two corridors 3 m apart, not connected."""
+
+    def _graph(self):
+        import tempfile
+        from pathlib import Path
+        from game_assistant.games.eldenring import navgraph
+        m = grid_mesh([(i, 0) for i in range(5)] + [(i, 2) for i in range(5)])
+        g = navgraph.WorldGraph.__new__(navgraph.WorldGraph)
+        g.names, g.area, g.banned, g.learned, g._prev, g.learned_count = ['m60_00_00_00'], 60, set(), {}, None, 0
+        g.locate = lambda p, **kw: m.locate(p, **kw)
+        g.block = None
+        g.neighbours = lambda f: m.neighbours(f) + g.learned.get(f, [])
+        self.tmp = tempfile.TemporaryDirectory()
+        navgraph.LEARNED_FILE = Path(self.tmp.name) / 'learned.json'
+        return g, m
+
+    def tearDown(self):
+        from game_assistant.games.eldenring import navgraph
+        navgraph.LEARNED_FILE = navgraph.GRAPH_DIR / 'learned.json'
+        self.tmp.cleanup()
+
+    def test_learns_a_crossing_the_mesh_lacks_once(self):
+        g, m = self._graph()
+        self.assertFalse(g.observe((5, 0, 1), 60, 0.0))
+        self.assertFalse(g.observe((7, 0, 1), 60, 0.25))   # along the corridor: connected
+        self.assertTrue(g.observe((7, 0, 5), 60, 0.5))     # across the gap: learned
+        self.assertTrue(g.observe((7, 0, 1), 60, 0.75))    # back again: the other direction is learned too
+        self.assertEqual(g.learned_count, 2)
+        g.observe((7, 0, 1), 60, 5.0)
+        self.assertFalse(g.observe((7, 0, 5), 60, 5.25))   # already known
+        self.assertEqual(g.learned_count, 2)
+
+    def test_teleports_and_menus_are_ignored(self):
+        g, m = self._graph()
+        g.observe((1, 0, 1), 60, 0.0)
+        self.assertFalse(g.observe((1, 0, 5), 60, 30.0))  # 30 s later (a menu, a grace): not a move
+        g.observe(None)
+        self.assertFalse(g.observe((9, 0, 5), 60, 30.25))
+        self.assertEqual(g.learned_count, 0)

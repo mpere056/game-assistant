@@ -33,7 +33,14 @@ def _main(factory: str, requests, results) -> None:
         job = requests.get()
         if job is None:
             return
-        rid, kwargs = job
+        if job[0] == 'observe':  # where the player is now (no answer): the source may learn from it
+            if hasattr(source, 'observe'):
+                try:
+                    source.observe(**job[1])
+                except Exception:
+                    pass
+            continue
+        _, rid, kwargs = job
         try:
             for k, v in kwargs.pop('attrs', {}).items():  # e.g. which world map the search is on
                 setattr(source, k, v)
@@ -58,7 +65,7 @@ class RouteWorker:
         """One search (see core.navmesh.search for kwargs: budget_s, weight...). Waits for it."""
         with self._lock:  # one search at a time; answers come back in order
             rid = next(self._ids)
-            self._req.put((rid, dict(start=tuple(start), goal=tuple(goal), attrs=attrs or {}, **kwargs)))
+            self._req.put(('route', rid, dict(start=tuple(start), goal=tuple(goal), attrs=attrs or {}, **kwargs)))
             waited = 0.0
             while True:
                 try:
@@ -75,6 +82,13 @@ class RouteWorker:
                 if got == rid:
                     self.last_error = err
                     return r
+
+    def observe(self, **kwargs) -> None:
+        """Tell the planner where the player is (it learns links from their moves). Never waits."""
+        try:
+            self._req.put(('observe', kwargs))
+        except Exception:
+            pass
 
     @property
     def alive(self) -> bool:

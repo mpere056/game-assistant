@@ -57,6 +57,13 @@ WALK, ENTRANCE, DROP, STEP, LADDER, LIFT, JUMP, DOOR = 0, 1, 2, 3, 4, 5, 6, 7  #
 # type 1 = doors (11: 3.3 m, level, door-sized). Type 2 (21: 1-14 m across, +-13 m) is not understood
 # yet and left out.
 USER_KINDS = {8: LADDER, 0: LIFT, 4: JUMP, 1: DOOR}
+# Learned links: where the player actually went between two faces the graph didn't connect (a gap the
+# data misses, a jump they made). Kept in LEARNED_FILE across sessions.
+LEARNED = 8
+LEARNED_FILE = GRAPH_DIR / 'learned.json'
+LEARN_MAX_STEP = 15.0   # metres between two samples: more is a teleport (fast travel, a grace), ignored
+LEARN_MAX_GAP_S = 1.5   # seconds between two samples
+LEARN_HOPS = 3          # faces this few links apart are already connected: nothing to learn
 
 
 # ---- building (once, after extraction) ----
@@ -467,6 +474,11 @@ class WorldGraph:
         self.hi = np.array([e['hi'] for e in idx]) if idx else np.zeros((0, 3))
         self.area = 60
         self.banned: set[tuple[int, int]] = set()  # (from node, to node) links found blocked in the game
+        self.learned: dict[int, list] = {}           # node -> [(node, portal a, portal b, LEARNED)]
+        self.avoid: list = []                        # [(x, y, z, radius)] spots a live ray found blocked
+        self._prev = None                            # last observed (node, position, time)
+        self.learned_count = 0
+        self._load_learned()
         self._cache: OrderedDict[int, _Loaded] = OrderedDict()
         self._size = cache_blocks
         self._lock = threading.Lock()
@@ -504,6 +516,9 @@ class WorldGraph:
 
     def neighbours(self, node):
         nb = self.block(node >> FACE_BITS).nbrs[node & ((1 << FACE_BITS) - 1)]
+        extra = self.learned.get(node)
+        if extra:
+            nb = nb + extra
         if self.banned:
             nb = [x for x in nb if (node, x[0]) not in self.banned]
         return nb
@@ -512,10 +527,86 @@ class WorldGraph:
         return self.block(node >> FACE_BITS).cent[node & ((1 << FACE_BITS) - 1)]
 
     def cost(self, node):
-        return self.block(node >> FACE_BITS).cost[node & ((1 << FACE_BITS) - 1)]
+        c = self.block(node >> FACE_BITS).cost[node & ((1 << FACE_BITS) - 1)]
+        if self.avoid:
+            x, y, z = self.centre(node)
+            for ax, ay, az, r in self.avoid:
+                if (x - ax) ** 2 + (z - az) ** 2 < r * r and abs(y - ay) < 3.0:
+                    return math.inf
+        return c
 
     def closest_on(self, node, p):
         return closest_on_poly(self.block(node >> FACE_BITS).poly(node & ((1 << FACE_BITS) - 1)), p)
 
     def block_name(self, node) -> str:
         return self.names[node >> FACE_BITS]
+
+    # ---- learning from where the player goes ----
+
+    def observe(self, p=None, area: int | None = None, t: float = 0.0) -> bool:
+        """The player is at p (world coordinates) at time t; None: not in the world (menu, loading).
+        Returns True when a new link was learned."""
+        if p is None:
+            self._prev = None
+            return False
+        if area is not None:
+            self.area = area
+        r = self.locate(p, max_below=3.0, max_above=1.5, max_side=1.0)
+        if r is None:  # in the air (jumping, falling) or off the mesh: keep the last spot on the ground
+            if self._prev and t - self._prev[2] > LEARN_MAX_GAP_S * 4:
+                self._prev = None
+            return False
+        node = r[0]
+        prev, self._prev = self._prev, (node, p, t)
+        if prev is None or prev[0] == node:
+            return False
+        gap = math.dist(prev[1], p)
+        if gap > LEARN_MAX_STEP or t - prev[2] > LEARN_MAX_GAP_S * 4:
+            return False
+        if self._connected(prev[0], node, LEARN_HOPS):
+            return False
+        mid = tuple((a + b) / 2 for a, b in zip(prev[1], p))
+        self._add_learned(prev[0], node, mid)
+        self._save_learned()
+        return True
+
+    def _connected(self, a: int, b: int, hops: int) -> bool:
+        frontier, seen = {a}, {a}
+        for _ in range(hops):
+            nxt = set()
+            for f in frontier:
+                for nb in self.neighbours(f):
+                    if nb[0] == b:
+                        return True
+                    if nb[0] not in seen:
+                        seen.add(nb[0])
+                        nxt.add(nb[0])
+            frontier = nxt
+        return False
+
+    def _add_learned(self, a: int, b: int, mid) -> None:
+        lst = self.learned.setdefault(a, [])
+        if all(x[0] != b for x in lst):
+            lst.append((b, mid, mid, LEARNED))
+            self.learned_count += 1
+
+    def _load_learned(self) -> None:
+        if not LEARNED_FILE.exists() or not self.names:
+            return
+        try:
+            rows = json.loads(LEARNED_FILE.read_text(encoding='utf-8'))
+        except ValueError:
+            return
+        num = {n: i for i, n in enumerate(self.names)}
+        for fb, ff, tb, tf, mid in rows:
+            if fb in num and tb in num:
+                self._add_learned((num[fb] << FACE_BITS) | ff, (num[tb] << FACE_BITS) | tf, tuple(mid))
+
+    def _save_learned(self) -> None:
+        mask = (1 << FACE_BITS) - 1
+        rows = [[self.names[a >> FACE_BITS], a & mask, self.names[b >> FACE_BITS], b & mask, list(mid)]
+                for a, lst in self.learned.items() for b, mid, _, _ in lst]
+        try:
+            LEARNED_FILE.write_text(json.dumps(rows), encoding='utf-8')
+        except OSError:
+            pass
