@@ -125,3 +125,30 @@ class WikiTextTest(unittest.TestCase):
     def test_names_ignore_accents(self):
         from game_assistant.games.eldenring.wiki import _fold
         self.assertEqual(_fold(' Kalé '), 'kale')
+
+
+class AttackWindowTests(unittest.TestCase):
+    def test_variants_use_their_base_model(self):
+        """c4311 (Godrick Soldier) has no animation files: it plays c4310's (measured live)."""
+        from game_assistant.games.eldenring.adapter import EldenRingAdapter
+        a = EldenRingAdapter.__new__(EldenRingAdapter)
+        a._attacks = {'c4310': {'attacks': {'3000': [[0.8, 0.933], [0.8, 0.933]]}}}
+        self.assertEqual(a.attack_windows('c4311', 3000), [(0.8, 0.933)])   # duplicates once
+        self.assertEqual(a.attack_windows('c4310', 3000), [(0.8, 0.933)])
+        self.assertEqual(a.attack_windows('c4311', 20), [])
+        self.assertEqual(a.attack_windows('c9999', 3000), [])
+
+
+class AnimQueueTests(unittest.TestCase):
+    def test_every_playing_animation_from_the_queue(self):
+        """A Godrick Soldier's real queue: its 4 s animation and a 0.03 s layer alternate every frame;
+        the newest entry alone (what was read first) is only the layer."""
+        from game_assistant.games.eldenring.adapter import _playing
+        blob = bytearray(0xB8)
+        struct.pack_into('<QIIfI', blob, 0, 7, 8, 6, 1.0, 1)        # write 8, read 6 (newest), valid
+        for i in range(10):
+            entry = (3043000, 0.02, 0.0, 0.03) if i % 2 == 0 else (3000704, 3.1 + i * 0.01, 0.0, 4.0)
+            struct.pack_into('<ifff', blob, 0x18 + i * 16, *entry)
+        anims, speed = _playing(bytes(blob), 0)
+        self.assertEqual([a for a, _t, _l in anims], [3000704, 3043000])   # main (longest) first
+        self.assertAlmostEqual(anims[0][1], 3.15, places=4)                 # its newest entry (index 5)

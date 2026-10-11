@@ -72,6 +72,12 @@ class Player:
     state: str           # 'alive', 'dead' or 'busy' (loading, cutscene, menu)
     health: float | None = None
     max_health: float | None = None
+    stamina: float | None = None
+    max_stamina: float | None = None
+    fp: float | None = None
+    max_fp: float | None = None
+    anim: int | None = None        # the animation the character plays (game's id), if known
+    anim_time: float = 0.0         # seconds into it
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,13 @@ class Entity:
     health: float | None = None
     max_health: float | None = None
     name: str | None = None  # only when the game itself provides one; knowledge() fills the rest
+    facing: Vec3 | None = None     # unit vector it faces, if known
+    anim: int | None = None        # the animation it plays (game's id), if known (combat)
+    anim_time: float = 0.0         # seconds into it
+    anim_length: float = 0.0
+    anim_speed: float = 1.0        # playback speed (1 normal)
+    anims: tuple = ()              # every animation playing now (several blend or layer):
+                                   # ((anim id, seconds into it, length), ...), the main one first
 
 
 @dataclass(frozen=True)
@@ -139,6 +152,7 @@ CAP_SEARCH = 'search'          # find enemies, items and places by name (search(
 CAP_ACTIONS = 'actions'        # phase 3
 CAP_PLACES = 'places'          # locate(name): where a named place is from the player, for guiding
 CAP_NAVMESH = 'navmesh'        # route(start, goal): a walkable route over the game's own navmesh
+CAP_COMBAT = 'combat'          # entities' animations + attack_windows(model, anim): when attacks hit
 
 
 class GameAdapter(Protocol):

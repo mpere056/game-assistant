@@ -22,6 +22,7 @@ kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE = 0x2, 0x8
 MOUSEEVENTF_MOVE = 0x1
+TAP_HOLD = 0.06  # seconds a tapped key or button stays down (about 4 frames)
 MOUSE_BUTTONS = {'LMB': (0x2, 0x4), 'RMB': (0x8, 0x10), 'MMB': (0x20, 0x40)}  # (down, up) flags
 MARK = 0x47414149  # "GAAI": our own input, in dwExtraInfo
 WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN = 13, 0x100, 0x104
@@ -85,32 +86,53 @@ class Keys:
     def __init__(self, bindings: dict[str, str]):
         self.bindings = {k: v.upper() for k, v in bindings.items()}
         self.held: set[str] = set()
+        self._tapped: list[tuple[str, float]] = []  # (action, pressed at) from tap(): released after TAP_HOLD
         atexit.register(self.release_all)
 
     def set(self, actions) -> None:
+        self._release_taps()
         want = {a for a in actions if self.bindings.get(a) in SCAN}
+        tapped = {a for a, _t in self._tapped}
+        want -= tapped  # a tapped key still down is released by its tap, not held
         items = [_key(SCAN[self.bindings[a]], True) for a in self.held - want]
         items += [_key(SCAN[self.bindings[a]], False) for a in want - self.held]
         _send(items)
         self.held = want
 
     def tap(self, action: str) -> None:
+        """Press now; released TAP_HOLD seconds later (by a later set(), never waiting here), so a roll
+        or a swing starts at once and the game surely sees the press (a roll happens on the release of
+        its key; one frame could be missed). A key already held is released first so the press registers."""
         k = self.bindings.get(action)
         if k in MOUSE_BUTTONS:
-            down, up = MOUSE_BUTTONS[k]
-            for flag in (down, up):
-                i = INPUT(type=INPUT_MOUSE)
-                i.u.mi = MOUSEINPUT(0, 0, 0, flag, 0, MARK)
-                _send([i])
-                if flag == down:
-                    time.sleep(0.05)
-            return
-        if k in SCAN:
+            i = INPUT(type=INPUT_MOUSE)
+            i.u.mi = MOUSEINPUT(0, 0, 0, MOUSE_BUTTONS[k][0], 0, MARK)
+            _send([i])
+            self._tapped.append((action, time.monotonic()))
+        elif k in SCAN:
+            if any(self.bindings.get(h) == k for h in self.held):
+                _send([_key(SCAN[k], True)])
+                self.held = {h for h in self.held if self.bindings.get(h) != k}
             _send([_key(SCAN[k], False)])
-            time.sleep(0.05)
-            _send([_key(SCAN[k], True)])
+            self._tapped.append((action, time.monotonic()))
+
+    def _release_taps(self, force: bool = False) -> None:
+        keep = []
+        for action, at in self._tapped:
+            if not force and time.monotonic() - at < TAP_HOLD:
+                keep.append((action, at))
+                continue
+            k = self.bindings.get(action)
+            if k in MOUSE_BUTTONS:
+                i = INPUT(type=INPUT_MOUSE)
+                i.u.mi = MOUSEINPUT(0, 0, 0, MOUSE_BUTTONS[k][1], 0, MARK)
+                _send([i])
+            elif k in SCAN:
+                _send([_key(SCAN[k], True)])
+        self._tapped = keep
 
     def release_all(self) -> None:
+        self._release_taps(force=True)
         if self.held:
             _send([_key(SCAN[self.bindings[a]], True) for a in self.held])
         self.held = set()

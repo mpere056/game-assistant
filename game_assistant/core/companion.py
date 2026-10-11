@@ -88,6 +88,7 @@ class _Target:
     path: list[Vec3] = field(default_factory=list)  # for 'lead'
 
 
+ACTION_QUIET = 6.0   # seconds before the same kind of line ("Drop down here!") again
 ACTION_NEAR = 8.0    # metres: when Navi says "climb the ladder" and the like
 CONTINUE_PLANS = 8   # a long route is planned in up to this many time-limited pieces
 
@@ -112,6 +113,7 @@ class Companion:
         self.route_source = ''        # 'navmesh' or 'raycast': which planner made the current route
         self.route_actions: list = []  # (what, where) on the route: 'ladder', 'lift', 'jump', 'drop'
         self._announced: set = set()
+        self._said_action: dict = {}     # what -> when Navi last said it
         self.route: list[Vec3] | None = None    # guide mode: walkable waypoints toward the goal
         self.route_complete = False   # the route reaches the goal (else it ends as close as the area allows)
         self._route_time = 0.0
@@ -148,7 +150,7 @@ class Companion:
         self._ground = None
         self._sight_ahead = None
         self.route, self.route_complete, self._route_time = None, False, 0.0
-        self.route_actions, self._announced = [], set()
+        self.route_actions, self._announced, self._said_action = [], set(), {}
         self._said_no_way = False
         self._plan_gen += 1
 
@@ -299,9 +301,13 @@ class Companion:
         # Ladders, lifts, jumps and drops on the route: say so when the player gets near one.
         for what, where, *_ in self.route_actions:
             key = (what, round(where[0]), round(where[1]), round(where[2]))
-            if key not in self._announced and math.hypot(where[0] - p[0], where[2] - p[2]) < ACTION_NEAR                     and abs(where[1] - p[1]) < 4.0:
+            near = math.hypot(where[0] - p[0], where[2] - p[2]) < ACTION_NEAR and abs(where[1] - p[1]) < 4.0
+            if key not in self._announced and near:
                 self._announced.add(key)
-                self.events.append(f'action:{what}')
+                # Several drops close together were "Drop down here!" three times: once per ACTION_QUIET.
+                if self.t - self._said_action.get(what, -1e9) >= ACTION_QUIET:
+                    self._said_action[what] = self.t
+                    self.events.append(f'action:{what}')
         # Plan, or re-plan: no route yet, near the end of a partial one, off the route, or stale.
         if self.route is None:
             if not self._planning and self.t - self._route_time > 1.0:

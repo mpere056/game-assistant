@@ -33,7 +33,7 @@ DEFAULTS = {
     'auto_walk': True,                # orders make the character walk by itself (F10)
     'auto_walk_sprint': True,         # run on long straight stretches while walking by itself
     'walk_keys': {'forward': 'W', 'back': 'S', 'left': 'A', 'right': 'D', 'sprint': 'SPACE',
-                  'interact': 'E', 'jump': 'F', 'lock': 'Q', 'attack': 'LMB'},  # the game's bindings
+                  'interact': 'E', 'jump': 'F', 'lock': 'Q', 'attack': 'LMB', 'roll': 'SPACE'},  # bindings
                   # (Elden Ring keyboard defaults; LMB = left mouse button, the light attack)
     'speech_model': 'base.en',        # faster-whisper model: tiny.en, base.en, small.en
     'microphone': '',                 # part of the microphone's name; '' = the Windows default

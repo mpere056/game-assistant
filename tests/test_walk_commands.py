@@ -132,7 +132,9 @@ class AttackOrderTests(unittest.TestCase):
         return UserPhrasesTests()._resolver()
 
     def test_attack_orders(self):
-        for text in ['Attack the nearest Godrick soldier', 'hit that enemy', 'attack it', 'go fight the soldier']:
+        for text, mode in [('Attack the nearest Godrick soldier', 'hit'), ('hit that enemy', 'hit'),
+                           ('attack it', 'hit'), ('go fight the soldier', 'fight'),
+                           ('kill the nearest Godrick soldier', 'fight'), ('take down that enemy', 'fight')]:
             with self.subTest(text=text):
                 a = self._resolver().handle(text)
-                self.assertEqual((a.kind, a.entity_id, a.attack), ('walk', 11, True), a.say)
+                self.assertEqual((a.kind, a.entity_id, a.attack), ('walk', 11, mode), a.say)

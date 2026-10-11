@@ -648,3 +648,124 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   at 60 Hz on memory data (next: enemy animation state via the bridge); a model picks what to do.
 - 83 tests pass (new: moving target reached where it is now, lock -> one swing -> hand back, target
   dies, attack orders). Not tried in game.
+
+## 2026-10-11: fighting for the player (dodge by the game's own attack timings)
+- User (screenshot): Q locks on and left mouse attacks as expected; the camera is fine; no getting
+  stuck. Wants real combat: see when enemies attack, dodge, keep attacking. Asked about Laya / the
+  NVIDIA model earlier: kept out of the real-time loop (too slow, GPU contention); code at 60 Hz.
+- Research: the bridge already read the player's animation (CSChrTimeActModule queue); the entity
+  table had none. Through the debug mailbox (WorldChrMan +0x1F1D0 character list, handle at ChrIns
+  +0x08, modules +0x190, time-act +0x18): enemies' animations readable, 7 ms per character. Entity ids
+  are handles, not addresses (the first probe failed on that).
+- Bridge (AoER repo): new assistant combat block at 0x370000: every published entity's animation,
+  time, length, speed; the player's animation, HP, FP, stamina (stamina 0x154 / max 0x158, FP 0x148,
+  measured). Hot-reloaded into the running game; 4 microseconds per read.
+- Attack timings: games/eldenring/tae.py reads TAE files (64-bit TAE3, layout from Smithbox's template,
+  MIT); event type 1 = attack hitbox active (start, end seconds). Animation ids in the files equal the
+  ids the game reports (live: c4300 3026, c4440 2000 found). tools/get_attacks.py: 289 models with
+  animation files, 170 with attacks, 4,805 attack animations, 6 s -> .local/eldenring/attacks.json.
+  119 models (variants such as c4071, c6001) hold only a skeleton and borrow animations from a model
+  not yet identified (not the family base: c4070/c6000 lack their animation 43000).
+- Adapter: snapshot entities get facing, anim, anim_time, anim_length, anim_speed; the player stamina,
+  FP, anim; attack_windows(model, anim); capability combat.
+- core/combat.py Fighter: lock on; roll sideways (alternating) when a facing enemy within reach will
+  hit within 0.22 s (or its hitbox is out and no roll covered it), at most every 0.75 s; swing when in
+  reach (1.8 m), no hit within 0.6 s, stamina >= 20, every 0.9 s; back off below 15 stamina until 50;
+  hand back below 35 % health; stop when it dies / is lost / after 90 s. Orders: "fight/kill/take down"
+  = fight until it's down (walks up first when further than 12 m); "attack/hit" = one hit. Haiku tool
+  fight_character. Key taps no longer pause the loop 50 ms (released on the next frame).
+- "Drop down here!" was said three times for drops close together: the same kind of line now at most
+  once per 6 s.
+- 92 tests pass (new: roll just before a hit, two rolls for a two-hit combo, no swing while a hit is
+  coming, closing in, stamina, hand back, enemy facing away; fight order walks up then fights, close
+  fight starts at once, takeover stops the fight). Not tried in game.
+
+## 2026-10-11: first fights: the second Godrick Soldier hit repeatedly, no dodges
+- User (screenshot): "Fight the nearest Godrick Soldier" twice: both killed ("Got it! It's down!");
+  the first never swung; the second landed several hits and the fighter never rolled.
+- Cause: the Godrick Soldier is model c4311, a variant without animation files of its own (one of
+  the ~120 without attack timings): the fighter saw no attacks coming. Its animations are its base
+  model's: c4310 (animation-only, no chrbnd); live, c4311 played 3043000, one of c4310's 1,165. Rule:
+  a model without timings uses c###0. It covers 107 of 259 models without timings (the rest are
+  mostly DLC). Attack windows are de-duplicated (several attack events often share one window).
+- Combat log: runtime/combat-<date>.jsonl, 4 times a second and at each roll or swing: state, keys,
+  taps, the target's animation and time, its attack windows, distance, whether it faces the player,
+  the next hit expected, stamina, health. 93 tests pass.
+
+## 2026-10-11: fight 3: still no dodges; the combat log showed why
+- User: the fighter killed the soldier but never dodged; it took several hits.
+- runtime/combat-20261011.jsonl (63 rows): the target's animation read 3043000 the whole fight (not an
+  attack; health fell 673 -> 524 -> 470 -> 416 -> 331), next_hit never set, and the soldier "faced"
+  the player at -0.84..-0.99 (i.e. away) while attacking.
+- Dumping whole CSChrTimeActModule queues (mailbox): several animations play at once and each frame
+  writes an entry per animation. c4311: 3000704 (4 s, time advancing) and 3043000 (0.03 s layer)
+  alternate; the newest entry (read_idx), all the bridge published, is the layer. Goats blend up to 4.
+- Bridge: the combat block (version 2) now copies each queue (10 entries, write/read index, speed);
+  the adapter takes each distinct animation from the newest entries (up to 4, longest first) into
+  Entity.anims, and the fighter checks every one for attack windows. Facing: the entity table's
+  rotation maps the model's -Z to its facing (was +Z). Live after a hot reload: c4311 shows
+  [(3000704, 4 s), (3043000, 0.03 s)], goats 2-3 animations; facing values positive toward the player.
+- 95 tests pass (new: the soldier's real queue layout; a dodge of an attack playing beside a layer).
+  Not yet fought in game with this.
+
+## 2026-10-11: fight 4: attacks now seen, still no dodge (the fight log showed why)
+- User: still no dodging. runtime/combat-20261011.jsonl: the soldier's attacks were now seen
+  (3003000, 3003003, 3003006, 3003008 with windows; facing 0.94-0.99), 3 roll decisions at 0.21-0.22 s
+  before the hit, but: (1) the frame after each roll press it pressed attack (the hit window was
+  "covered", so nothing seemed to be coming): the later input wins in Elden Ring: no roll; (2) at
+  296.66 it swung with a hit 0.66 s away; the roll at 297.09 couldn't start out of its own swing:
+  hit; (3) in that fight stamina stayed 97 through 8 swings and 3 rolls: no input reached the game
+  (the first fight's swings did cost stamina); unknown why: the log didn't record focus or held keys.
+- Also: the player's own animation never showed: its idle is animation 0, skipped as "empty".
+- Fixes: no swing within 0.75 s after a roll; swing only with no hit for 1.1 s (was 0.6); taps held
+  60 ms (a roll happens on the key's release; one frame could be missed), released by a later frame,
+  never by waiting; the fighter pauses when the game isn't in front (Navi: "Click back into the game
+  and I'll keep fighting!"); the log now has focused, held keys and the player's own animation;
+  entries with length > 0 are real (animation 0 included). Live: player animation 0 at 1.2 s.
+- 97 tests pass (new: the two moments from the log replayed).
+
+## 2026-10-11: fight 5: three soldiers down, still no rolls (the player's own animation shows why)
+- User: fought 3 enemies; no rolling; maybe one block.
+- Log with the player's animation: swings work (23030000/23030010, stamina drops). Roll presses came
+  while the player was in its own attack (0.18, 1.1 and 1.48 s in) or staggered by a hit (5101, 5102):
+  ignored by the game, except once: 27020 with stamina 97 -> 89 (probably a backstep: the direction key
+  was released one frame after the press, and the roll happens on the key's release; likely the "block").
+  Swinging every 0.9 s chained attacks, so a hit always found the player mid-swing.
+- Changes: player_doing() reads the player's animation (attacking aXXX_03XXXX, staggered 5XXX, dodging
+  27XXX, free); one swing at a time (only when the player is free again); swing in an opening (the
+  target's attack windows are over and it still needs >= 0.5 s) or when nothing hits for 1.1 s; the roll's
+  direction is held 0.3 s; roll pressed 0.25 s before the hit (was 0.22).
+- 101 tests pass (new: reading the player's animation, one swing at a time, roll keeps its direction,
+  swing in the opening). Not yet fought in game.
+
+## 2026-10-11: how people fight in Elden Ring (research) -> roll timing and direction
+- User: look into how people normally fight, optimally, maybe different per enemy.
+- Sources: eldenring.wiki.gg "Invincibility Frames" (14 i-frames for light/medium rolls, 13 heavy, from
+  the roll's start), Fextralife "Equip Load", Bandai Namco's combat guide, TheGamer, Windows Central:
+  dodge a split second before the hit; roll through/into attacks rather than away; punish after big
+  attacks with a short combo, don't trade; manage stamina. The offline Fandom wiki has almost no fighting
+  advice for common enemies (Godrick Soldier: lore and drops only). The per-enemy part players learn
+  (delayed swings, combos, wind-ups) is exactly what the extracted attack timings give.
+- Changes: press roll 0.16 s before the hit (was 0.25: the roll started ~0.19 s early and its 0.23 s of
+  invincibility ran out during longer swings); roll forward-left/right (through, while locked on);
+  another roll after 0.55 s (was 0.75) for combos. PLAN.md: "Fighting for the player" with per-enemy next
+  steps (reach per attack, projectiles, grabs, parries, learning from fight logs, healing). 101 tests pass.
+
+## 2026-10-11: fight 6: rolling works; remaining hits analysed one by one
+- User: "it was doing a bunch of rolls this time! It actually dodged the hits multiple times"; still
+  several hits. Wants none (one on one), using what we know of the enemies' timing.
+- Each hit in runtime/combat-20261011.jsonl (6 hits, 4 rolls, 31 swings, 1 win):
+  1. a two-swing chain (3003000 then 3003001, 0.08 s warning seen): the second roll was blocked by
+     "not while dodging" although a roll can follow a roll after ~0.5 s;
+  2-3 and 5. attacks skipped because the soldier faced 90-130 degrees away at that moment (it turns
+     during the wind-up); one swing went straight into such an attack;
+  4 and 6. staggered from the previous hit (5203 lasts ~1.8 s, no roll possible): chains;
+  also: a light attack (23030000) can't be rolled out of for ~1.3 s (logs: 1.1 s ignored, 1.48 and
+  1.6 s rolled), and swings came with hits 0.5-1.1 s away.
+- Changes (core/combat.py): roll again after 0.55 s even while rolling; facing filters only other
+  enemies further than 2.5 m (never the target); bait and punish: wait at 3 m (out of most reaches),
+  step in only for an opening (the target's hits are over and it needs >= 1.35 s more) or a passive
+  enemy (no attack for 2.5 s) with nothing landing within 1.35 + 0.16 s; back out after; never swing
+  while still in our own swing or staggered.
+- 104 tests pass (new: two-swing chain gets two rolls, no swing that can't be rolled out of, punish a
+  long recovery, facing only for others far away, spacing then in for a passive enemy). Not yet fought.
