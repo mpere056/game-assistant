@@ -128,6 +128,8 @@ class AutoWalk:
 
     # ---- commands ----
 
+    clear_line: bool | None = None      # set by the app: a clear line to the target character (None: not known)
+
     def start(self, route: list[Vec3], goal: Vec3, name: str | None = None, actions=(),
               target_id: int | None = None, attack: bool = False) -> None:
         self.active, self.goal, self.name, self.state = True, goal, name, 'walking'
@@ -226,11 +228,13 @@ class AutoWalk:
         if self.attack and gap <= ATTACK_REACH and abs(err) <= ATTACK_FACING:
             self._swung_at = self.t
             return Intent(taps=tuple(taps) + ('attack',))
-        if not self.attack and gap <= REACH_CHARACTER:
+        if not self.attack and gap <= REACH_CHARACTER and self.clear_line is not False:
             self.events.append('arrived')
             self.stop()
             return Intent()
-        if (_flat(p, e.pos) > CHASE_DIRECT or abs(e.pos[1] - p[1]) > CHASE_LEVEL) and self.route:
+        # Straight at it only when close, on its level, with nothing between (a wall: round by the route)
+        if (_flat(p, e.pos) > CHASE_DIRECT or abs(e.pos[1] - p[1]) > CHASE_LEVEL or self.clear_line is False) \
+                and self.route:
             return None if not taps else Intent(taps=tuple(taps))
         # Close: straight at it. Locked on, the camera follows by itself: don't fight it with the mouse.
         keys = set(min(DIRECTIONS, key=lambda d: abs(_wrap(err - d[0])))[1])

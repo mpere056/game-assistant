@@ -152,3 +152,28 @@ class AnimQueueTests(unittest.TestCase):
         anims, speed = _playing(bytes(blob), 0)
         self.assertEqual([a for a, _t, _l in anims], [3000704, 3043000])   # main (longest) first
         self.assertAlmostEqual(anims[0][1], 3.15, places=4)                 # its newest entry (index 5)
+
+
+class BlockedGapTests(unittest.TestCase):
+    """Gatefront, 2026-10-11 21:56: the navmesh has a gap at a barricade, made-up step links bridged it, and
+    banning them one at a time left the next one: the walk got stuck at the barricade."""
+
+    def test_made_up_links_near_a_blocked_one_are_not_used(self):
+        from game_assistant.games.eldenring.navgraph import WorldGraph
+        g = WorldGraph.__new__(WorldGraph)
+        g.link_blocks = [(100.0, 10.0, 200.0)]
+        self.assertTrue(g._near_block((101.0, 10.0, 201.0), (102.0, 10.0, 202.0)))    # 2 m away: blocked too
+        self.assertFalse(g._near_block((110.0, 10.0, 200.0), (111.0, 10.0, 200.0)))   # 10 m away: fine
+        self.assertFalse(g._near_block((101.0, 20.0, 201.0), (102.0, 20.0, 202.0)))   # another level
+
+    def test_neighbours_drop_blocked_made_up_links_only(self):
+        from game_assistant.games.eldenring.navgraph import FACE_BITS, WorldGraph
+        g = WorldGraph.__new__(WorldGraph)
+        g.learned, g.banned, g.walls = {}, set(), []
+        g.link_blocks = [(0.0, 0.0, 0.0)]
+        blk = type('B', (), {})()
+        blk.nbrs = [[(5, (0.5, 0.0, 0.0), (1.0, 0.0, 0.0)),            # a navmesh edge: kept
+                     (6, (0.5, 0.0, 0.0), (1.0, 0.0, 0.0), 3),         # a step link by the block: dropped
+                     (7, (0.5, 0.0, 0.0), (1.0, 0.0, 0.0), 4)]]        # a ladder (the game's): kept
+        g.block = lambda bid: blk
+        self.assertEqual([x[0] for x in g.neighbours(0 << FACE_BITS)], [5, 7])

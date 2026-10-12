@@ -108,6 +108,7 @@ class App:
         # Fighting for the player ("fight that soldier"): dodges by the game's own attack timings.
         self._ledges: tuple = ((), ())    # where the ground drops away around the player (_ledge_loop)
         self._chases: dict = {}           # entity -> times a fight handed over to a chase (it ran)
+        self.companion.plan_close = True  # the character walks by itself: a route even to close goals
         self.plan = PlanRunner(self)      # orders of several parts (core/plan.py)
         self._plan_cmd = None
         self._los: tuple = (None, None)    # (target, a clear line to it) from _ledge_loop
@@ -390,7 +391,7 @@ class App:
             entity = cmd[3] if len(cmd) > 3 else None
             mode = cmd[4] if len(cmd) > 4 else False
             self._fight_after = entity if mode == 'fight' else None
-            near = entity is not None and snap.player and any(
+            near = entity is not None and snap.player and entity != getattr(self, '_via_route', None) and any(
                 e.id == entity and math.dist(e.pos, snap.player.pos) < FIGHT_FROM for e in snap.entities)
             if self._fight_after is not None and near:  # close already: straight into the fight
                 self.walk.stop()
@@ -462,6 +463,7 @@ class App:
             self._walk_route = route
         if snap.player:
             self._last_player_pos = snap.player.pos
+        self.walk.clear_line = self._los[1] if self._los[0] == self.walk.target_id else None
         intent = self.walk.update(snap, dt)
         if snap.screen is not None and snap.screen.focused and self.walk.active:
             self.keys.set(intent.keys)
@@ -585,6 +587,13 @@ class App:
                 self._fight_all = None if ev != 'fled' else getattr(self, '_fight_all', None)
                 if ev != 'fled':
                     self._then = []
+            if ev == 'walled':  # a wall between: round it by the navmesh, then the fight again
+                tid = self.fighter.target_id
+                e = next((x for x in snap.entities if x.id == tid), None)
+                if e is not None:
+                    self._via_route = tid
+                    self._walk_request('start', tuple(e.pos), self.fighter.name, tid, 'fight')
+                    line = "There's a wall in the way. Going round!"
             if ev == 'fled':   # it ran off: follow it along the navmesh, fight again on arrival
                 tid = self.fighter.target_id
                 e = next((x for x in snap.entities if x.id == tid), None)
@@ -607,7 +616,8 @@ class App:
         while True:
             time.sleep(0.1)
             moving = self.plan.active and self.plan.step is not None and self.plan.step.do == 'move'
-            if not (self.fighter.active or moving):
+            walking_to = self.walk.active and self.walk.target_id is not None
+            if not (self.fighter.active or moving or walking_to):
                 self._ledges = ((), ())
                 continue
             try:
@@ -621,7 +631,8 @@ class App:
                     for dist in (LEDGE_STEP, LEDGE_ROLL):
                         x, z = p[0] + math.sin(a) * dist, p[2] + math.cos(a) * dist
                         rays.append(((x, p[1] + 2.0, z), (x, p[1] - LEDGE_DROP, z)))
-                target = next((e for e in snap.entities if e.id == self.fighter.target_id), None)
+                tid = self.fighter.target_id if self.fighter.active else self.walk.target_id
+                target = next((e for e in snap.entities if e.id == tid), None)
                 if target is not None:   # a clear line from the chest to it (a wall between: no swing)
                     a = (p[0], p[1] + 1.3, p[2])
                     b = target.center
@@ -699,6 +710,7 @@ class App:
                     self.plan.on_event(ev)
             elif ev == 'arrived':
                 if self._fight_after is not None:  # walked up to it: now the fight
+                    self._via_route = None
                     self.fighter.start(self._fight_after, self.walk.name)
                     self._fight_after = None
                 elif self.plan.active:

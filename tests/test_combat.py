@@ -267,7 +267,7 @@ class SecondFightLogTests(unittest.TestCase):
     def test_no_swing_unless_it_fits_before_a_roll_is_possible_again(self):
         # 23030000 locks the player ~1.35 s: a swing with a hit 1.2 s away can't be rolled out of.
         WINDOWS[('c4300', 3003002)] = [(1.0, 1.067)]
-        sim, f = Sim(), Fighter(windows)
+        sim, f = Sim(), Fighter(windows, lambda tid: 90.0)   # sturdy: no interrupting it
         f.start(5)
         f.t = f._started + 10          # long enough that the enemy would count as passive
         f._last_enemy_attack = f.t - 10
@@ -745,6 +745,12 @@ class EighthSessionTests(unittest.TestCase):
             if not f.active:
                 break
         self.assertFalse(f.active)
+        self.assertIn('walled', f.events)                 # first: round by the route (the app walks)
+        f.start(1)                                        # back from the walk, still walled in
+        for _ in range(int(8 * 60)):
+            f.update(_snap([target]), 1 / 60)
+            if not f.active:
+                break
         self.assertIn('unreachable', f.events)
         self.assertIn(1, f.unreachable)
 
@@ -760,3 +766,42 @@ class EighthSessionTests(unittest.TestCase):
         sim.taps.clear()
         run(f, sim, 3.0)
         self.assertNotIn('attack', [tap for _t, _a, tap in sim.taps])   # not again while it's idle
+
+
+class NinthSessionTests(unittest.TestCase):
+    """20:31: a 39 s fight against one soldier, 22 rolls, no damage, 4 swings: after each roll it stepped back
+    out of reach and waited 0.75 s, and the soldier's 0.3-0.7 s openings went by."""
+
+    def test_interrupts_a_low_poise_wind_up_and_learns_when_it_cannot(self):
+        WINDOWS[('c4300', 3710)] = [(1.2, 1.3)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        intent = f.update(_snap([_enemy(1, (0.0, 0.0, 1.8), anim=3710, t=0.1)]), 1 / 60)
+        self.assertIn('attack', intent.taps)                 # 1.1 s to its hit: strike first
+        for i in range(60):                                  # no flinch follows: armoured
+            f.update(_snap([_enemy(1, (0.0, 0.0, 1.8), anim=3710, t=0.12 + i / 60)]), 1 / 60)
+        self.assertIn('armored', f.events)
+        f._last_swing = -1e9
+        f._last_enemy_attack = f.t
+        intent = f.update(_snap([_enemy(1, (0.0, 0.0, 1.8), anim=3710, t=0.1)]), 1 / 60)
+        self.assertNotIn('attack', intent.taps)              # not that attack again
+        f2 = Fighter(windows, lambda tid: 90.0)              # sturdy: never
+        f2.start(1)
+        self.assertNotIn('attack', f2.update(_snap([_enemy(1, (0.0, 0.0, 1.8), anim=3710, t=0.1)]), 1 / 60).taps)
+
+    def test_stays_close_while_it_recovers(self):
+        WINDOWS[('c4300', 3711)] = [(0.4, 0.5)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        f._last_roll = f.t                                   # just rolled: no swing yet
+        intent = f.update(_snap([_enemy(1, (0.0, 0.0, 1.2), anim=3711, t=0.9, length=3.0)]), 1 / 60)
+        self.assertNotIn('back', intent.keys)                # no stepping away from the opening
+
+    def test_swings_half_a_second_after_a_roll(self):
+        WINDOWS[('c4300', 3712)] = [(0.4, 0.5)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        f._last_roll = f.t - 0.52
+        intent = f.update(_snap([_enemy(1, (0.0, 0.0, 1.8), anim=3712, t=1.0, length=2.0)]), 1 / 60)
+        self.assertIn('attack', intent.taps)
+

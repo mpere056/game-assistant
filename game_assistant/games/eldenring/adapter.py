@@ -26,6 +26,7 @@ from .wiki import Wiki
 
 ROOT = Path(__file__).resolve().parents[3]
 NPC_DUMP = ROOT / '.local' / 'eldenring' / 'npc_params.json'   # what was read from memory, for checking
+BLOCKS_FILE = ROOT / '.local' / 'eldenring' / 'world_blocks.json'  # walls and blocked gaps found while walking
 
 SHM_NAME = 'Local\\AoER_bridge_v1'
 SHM_SIZE = 8 * 1024 * 1024
@@ -78,6 +79,7 @@ def _rotate(q: tuple[float, float, float, float], v: Vec3) -> Vec3:
 OBSERVE_EVERY = 0.25  # seconds between telling the route planner where the player is
 ROUTE_CHECKS = 6      # plan, check against the world, avoid what's blocked: at most this many times
 LEG_CHECK_M = 80.0    # check the route's straight legs this far ahead (it's re-planned as you go)
+WALL_STEP = 0.4      # metres before and after a wall the faces are looked up (navgraph walls)
 AVOID_RADIUS = 0.8    # metres around a blocked spot the route planner then keeps clear of
 BRIDGE_MAX = 40.0     # a navmesh route ending this close to its goal is finished with the raycast planner
 
@@ -132,6 +134,9 @@ class EldenRingAdapter:
         self._last_observe = 0.0
         self._last_special: list = []  # (from, to, start in snapshot coordinates) of the last route
         self._avoid: list = []         # (x, y, z, radius) in world coordinates: legs found blocked
+        self._walls: list = []         # (before, after) world points across walls found (navgraph walls)
+        self._link_blocks: list = []   # world midpoints of made-up links found blocked (navgraph link_blocks)
+        self._load_blocks()            # (both kept across sessions: a barricade found once stays known)
         self._route_lock = threading.Lock()
         if (Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'navgraph' / 'index.json').exists():
             self.capabilities = self.capabilities | {CAP_NAVMESH}  # Get-GameData built the walkable world
@@ -376,24 +381,33 @@ class EldenRingAdapter:
         off = (me[1] - pos[0], me[2] - pos[1], me[3] - pos[2])
         s = (start[0] + off[0], start[1] + off[1], start[2] + off[2])
         g = (goal[0] + off[0], goal[1] + off[1], goal[2] + off[2])
+        found_any = False
         with self._route_lock:
             self._ensure_router()
             for _ in range(ROUTE_CHECKS):  # checked against the real world before it is used
                 r = self._router.route(s, g, budget_s=budget_s, timeout=budget_s + 20,
                                        attrs={'area': me[0], 'banned': set(self._banned_links),
-                                              'avoid': list(self._avoid)})
+                                              'avoid': list(self._avoid), 'walls': list(self._walls),
+                                              'link_blocks': list(self._link_blocks)})
                 if r is None:
                     return None
                 blocked = self._blocked_links(r.special or [], off)
                 walls = [] if blocked else self._blocked_legs(r, off)
                 if not blocked and not walls:
                     break
+                found_any = True
                 self._banned_links |= blocked
-                for hit in walls:  # avoid the spot, and any made-up link near it
+                for k, pa, pb, frm, to, _land in (r.special or []):   # and every made-up link near them
+                    if (frm, to) in blocked:
+                        self._link_blocks.append(((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, (pa[2] + pb[2]) / 2))
+                for hit, d in walls:  # avoid the spot, the crossing through it, and any made-up link near it
                     self._avoid.append((hit[0] + off[0], hit[1] + off[1], hit[2] + off[2], AVOID_RADIUS))
+                    self._add_wall(hit, d, off)
                     self._banned_links |= {(k[3], k[4]) for k in (r.special or []) if k[0] in (1, 2, 3, 8) and
                                            math.dist(((k[1][0] + k[2][0]) / 2 - off[0], (k[1][1] + k[2][1]) / 2 - off[1],
                                                       (k[1][2] + k[2][2]) / 2 - off[2]), hit) < 3.0}
+        if found_any:
+            self._save_blocks()
         self._last_special = [(frm, to, ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1],
                                           (pa[2] + pb[2]) / 2 - off[2]))
                               for k, pa, pb, frm, to, _land in (r.special or []) if k in (1, 2, 3, 8)]
@@ -425,6 +439,10 @@ class EldenRingAdapter:
         p0 = snap.player.pos
         off = (me[1] - p0[0], me[2] - p0[1], me[3] - p0[2])
         self._avoid.append((pos[0] + off[0], pos[1] + off[1], pos[2] + off[2], radius))
+        d = (pos[0] - p0[0], 0.0, pos[2] - p0[2])
+        n = math.hypot(d[0], d[2]) or 1.0
+        self._add_wall((pos[0], pos[1] + 0.5, pos[2]), (d[0] / n, 0.0, d[2] / n), off)   # and the crossing there
+        self._save_blocks()
         return True
 
     def avoid_links_near(self, pos: Vec3, radius: float = 5.0) -> int:
@@ -503,7 +521,35 @@ class EldenRingAdapter:
             hits = self.raycast(rays)
         except (GameNotRunning, TimeoutError, RuntimeError):
             return []
-        return [h.pos for h in hits if h.hit and h.pos and h.normal and abs(h.normal[1]) < 0.6]
+        out = []
+        for (a, b), h in zip(rays, hits):
+            if h.hit and h.pos and h.normal and abs(h.normal[1]) < 0.6:
+                n = math.dist(a, b) or 1.0
+                out.append((h.pos, ((b[0] - a[0]) / n, (b[1] - a[1]) / n, (b[2] - a[2]) / n)))
+        return out
+
+    def _load_blocks(self) -> None:
+        try:
+            got = json.loads(BLOCKS_FILE.read_text(encoding='utf-8'))
+            self._walls = [(tuple(a), tuple(b)) for a, b in got.get('walls', [])]
+            self._link_blocks = [tuple(x) for x in got.get('link_blocks', [])]
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save_blocks(self) -> None:
+        try:
+            BLOCKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BLOCKS_FILE.write_text(json.dumps({'walls': [[list(a), list(b)] for a, b in self._walls[-2000:]],
+                                               'link_blocks': [list(x) for x in self._link_blocks[-2000:]]}),
+                                   encoding='utf-8')
+        except OSError:
+            pass
+
+    def _add_wall(self, hit, d, off) -> None:
+        """A wall at hit (snapshot coordinates), met going along d: the navmesh crossing there is blocked."""
+        before = (hit[0] - d[0] * WALL_STEP + off[0], hit[1] + off[1], hit[2] - d[2] * WALL_STEP + off[2])
+        after = (hit[0] + d[0] * WALL_STEP + off[0], hit[1] + off[1], hit[2] + d[2] * WALL_STEP + off[2])
+        self._walls.append((before, after))
 
     def _blocked_links(self, special: list, off: Vec3) -> set:
         """Special links (drops, steps, dungeon entrances) that a ray shows are blocked by a wall or a
