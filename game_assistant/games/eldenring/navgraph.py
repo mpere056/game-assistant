@@ -463,6 +463,10 @@ class _Loaded:
         return self.v[self.fv[self.fs[f]:self.fs[f + 1]]]
 
 
+LINK_BLOCK_RADIUS = 4.0  # metres: made-up links this near one found blocked are not used either
+MADE_UP = (1, 2, 3, 8)    # entrance, drop, step, learned: links the game's navmesh lacks
+WALL_FACE_COST = 60.0   # a face with a wall found inside it: use it only when there is no other way
+
 class WorldGraph:
     def __init__(self, folder: Path = GRAPH_DIR, cache_blocks: int = 300):
         self.folder = folder
@@ -476,6 +480,11 @@ class WorldGraph:
         self.banned: set[tuple[int, int]] = set()  # (from node, to node) links found blocked in the game
         self.learned: dict[int, list] = {}           # node -> [(node, portal a, portal b, LEARNED)]
         self.avoid: list = []                        # [(x, y, z, radius)] spots a live ray found blocked
+        self.walls: list = []                        # [(before, after)] walls found in the world (_wall_sets)
+        self.link_blocks: list = []                  # [(x, y, z)] made-up links found blocked (_near_block)
+        self._walls_src = None
+        self._wall_pairs: set = set()
+        self._wall_faces: set = set()
         self._prev = None                            # last observed (node, position, time)
         self.learned_count = 0
         self._load_learned()
@@ -521,13 +530,50 @@ class WorldGraph:
             nb = nb + extra
         if self.banned:
             nb = [x for x in nb if (node, x[0]) not in self.banned]
+        if self.walls:
+            pairs, _faces = self._wall_sets()
+            if pairs:
+                nb = [x for x in nb if (node, x[0]) not in pairs]
+        if self.link_blocks:
+            nb = [x for x in nb if not (len(x) > 3 and x[3] in MADE_UP and self._near_block(x[1], x[2]))]
         return nb
+
+    def _near_block(self, va, vb) -> bool:
+        """A made-up link (va-vb its edge) within LINK_BLOCK_RADIUS of one found blocked: there is a gap in
+        the navmesh there for a reason (Gatefront: step links bridged the gap at a barricade, and banning
+        them one by one left the next; six checks later the route still ran through it)."""
+        mx, my, mz = (va[0] + vb[0]) / 2, (va[1] + vb[1]) / 2, (va[2] + vb[2]) / 2
+        for bx, by, bz in self.link_blocks:
+            if (mx - bx) ** 2 + (mz - bz) ** 2 < LINK_BLOCK_RADIUS ** 2 and abs(my - by) < 3.0:
+                return True
+        return False
+
+    def _wall_sets(self):
+        """The navmesh crossings (face pairs) and faces that walls found in the world block. A wall is
+        (a point just before it, a point just past it) along a line that hit it: the faces under the two
+        points, if different, may not be crossed between; if the same face, that face costs WALL_FACE_COST
+        more (the navmesh is baked from the ground: a barricade, a fence or a tarp placed on it is not in it:
+        Gatefront, 2026-10-11, a 4.9 m and a 7.7 m face ran straight through one)."""
+        if self._walls_src is not self.walls:
+            pairs, faces = set(), set()
+            for before, after in self.walls:
+                fa, fb = self.locate(before, max_side=0.6), self.locate(after, max_side=0.6)
+                if fa is None or fb is None:
+                    continue
+                if fa[0] != fb[0]:
+                    pairs |= {(fa[0], fb[0]), (fb[0], fa[0])}
+                else:
+                    faces.add(fa[0])
+            self._walls_src, self._wall_pairs, self._wall_faces = self.walls, pairs, faces
+        return self._wall_pairs, self._wall_faces
 
     def centre(self, node):
         return self.block(node >> FACE_BITS).cent[node & ((1 << FACE_BITS) - 1)]
 
     def cost(self, node):
         c = self.block(node >> FACE_BITS).cost[node & ((1 << FACE_BITS) - 1)]
+        if self.walls and node in self._wall_sets()[1]:
+            c = c + WALL_FACE_COST
         if self.avoid:
             x, y, z = self.centre(node)
             for ax, ay, az, r in self.avoid:

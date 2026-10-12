@@ -53,6 +53,7 @@ def make_app():
     app._save_chains = lambda: None     # ...nor the learned combos
     from game_assistant.core.plan import PlanRunner
     app.plan, app._plan_cmd = PlanRunner(app), None
+    app._los = (None, None)
     return app
 
 
@@ -198,3 +199,24 @@ class PlanAppTests(unittest.TestCase):
         step(app, w, 0.1)
         self.assertFalse(app.walk.active)
         self.assertFalse(app.plan.active)
+
+
+class WallAppTests(unittest.TestCase):
+    def test_a_walled_fight_goes_round_by_the_route_then_fights(self):
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        w = World()
+        enemy = Entity(9, 1, 'c4300', (0.0, 0.0, 6.0), (0.0, 1.0, 6.0), 0.5, 2.0, True, False, 400, 400)
+        w.entities = (enemy,)
+        step(app, w, 1.5)
+        app._walk_request('start', enemy.pos, 'Soldier', 9, 'fight')
+        step(app, w, 0.1)
+        self.assertTrue(app.fighter.active)
+        app.fighter.sees = lambda eid: app._los[1] if app._los[0] == eid else None   # (as App.__init__ does)
+        app._los = (9, False)                            # a wall between
+        app.fighter._detours = 3                         # its ways round it used up
+        step(app, w, 1.5)
+        self.assertTrue(app.walk.active)                 # 6 m away, but walking: round the wall first
+        self.assertFalse(app.fighter.active)
+        self.assertIn("There's a wall in the way. Going round!", app.lines)
+

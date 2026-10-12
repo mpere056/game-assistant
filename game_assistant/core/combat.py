@@ -47,7 +47,8 @@ ATTACK_REACH = 1.8      # metres from the target's body edge to swing
 SAFE_GAP = 1.1          # no hit landing within this many seconds: safe to swing. A swing takes about a
                         # second to recover from and a roll can't start before: at 0.66 s a hit landed
                         # through the roll (fight log 2026-10-11)
-ROLL_RECOVER = 0.75     # no swing this soon after a roll: the attack press right after the roll press
+ROLL_RECOVER = 0.5      # no swing this soon after a roll (was 0.75: in a 39 s fight it let most of a soldier's
+                        # 0.3-0.7 s openings go by): the attack press right after the roll press
                         # cancelled the roll (in Elden Ring the later input wins)
 SWING_EVERY = 0.9       # seconds between light attacks
 STAMINA_PER_SWING = 20.0
@@ -80,7 +81,7 @@ BACK_MIN = 0.4
 STRAFE_FOR = 0.8        # then strafe sideways this long instead
 SPACING_LOW = 2.2       # against a low-poise enemy wait closer: at 3 m the walk in took so long that the
                         # soldier had chained its next attack before the swing (fourth fight log)
-ROLL_FREE_AFTER = 0.55  # seconds into the player's roll (27XXX) it can act again: the animation runs ~1.8 s
+ROLL_FREE_AFTER = 0.5   # seconds into the player's roll (27XXX) it can act again: the animation runs ~1.8 s
                         # but rolls pressed 0.58 s and 1.03 s into it came out (fourth fight log)
 # Several enemies (fifth fight log: the target walked off to 30 m while another soldier attacked; the game's
 # lock-on was on the attacker, the fighter kept "closing" on the first one, dodged 18 times, never swung).
@@ -112,8 +113,14 @@ CLOSE_CHECK = 0.8       # closing in this long and the gap shrank less than CLOS
 CLOSE_MIN = 0.25        # blocked: step sideways DETOUR_FOR s (sides in turn); after MAX_DETOURS: unreachable
 DETOUR_FOR = 0.7
 MAX_DETOURS = 3
+WALLED_FOR = 1.0        # closing with a wall in the line this long: the route round it
 GUARD_CHECK = 0.7       # a swing at an enemy not attacking, and no flinch this long after: it blocked (a shield):
                         # only openings after its attacks from then on
+# Interrupting (ninth session): a light attack lands ~0.3-0.4 s after the press, and a low-poise enemy hit in
+# its wind-up flinches out of the attack (fight logs: 3003000 0.45 s in, cut short by 3008031). So with its
+# next hit still INTERRUPT_LEAD away, strike first. An attack that doesn't flinch (no reaction GUARD_CHECK
+# after) is armoured: not tried again.
+INTERRUPT_LEAD = 0.75
 COVERED_SLACK = 0.5     # a dodged hit is "covered" only for the hit it was: the same attack again later
                         # lands at another time and gets its own roll (it was never dodged again: two hits)
 
@@ -178,14 +185,17 @@ class Fighter:
         self._strafe_side = 'left'
         self._off_since: float | None = None   # locked on, but the camera points away from the target
         self.unreachable: set = set()          # targets given up on (a wall): not chosen again this session
+        self.walled: set = set()               # targets once handed to the walk to get round a wall
         self._far_since: float | None = None   # the target out at CHASE_FROM since
         self._attacking: dict = {}             # entity -> (attack, its time, when seen): to learn chains
         self._close_ref: tuple | None = None   # (time, gap) closing in began or last made progress
         self._detour_until = -1e9
         self._detour_side = 'left'
         self._detours = 0
+        self._walled_since: float | None = None
         self._swing_check: list | None = None  # [time, target, it was attacking, it reacted]
         self._guarding: set = set()            # targets that blocked a swing (shields)
+        self._armored: set = set()             # (base model, attack) a swing didn't interrupt
         self.chains_changed = False
 
     def start(self, target_id: int, name: str | None = None) -> None:
@@ -195,6 +205,7 @@ class Fighter:
         self._recovering = False
         self._poise, self._combo, self._back_from = None, 0, None
         self._close_ref, self._detours, self._swing_check, self._guarding = None, 0, None, set()
+        self._walled_since = None
 
     def stop(self, why: str = '') -> None:
         if self.active and why:
@@ -368,7 +379,11 @@ class Fighter:
         opening = self._opening(e, PUNISH_LOW if low_poise else PLAYER_COMMIT)
         reel = self._reeling(e)   # None, 'flinch' (our last hit landed) or 'broken'
         clear = soonest is None or soonest[0] > PLAYER_COMMIT + DODGE_LEAD
-        go_in = (opening or reel or (passive and clear)) and self.t - self._last_roll >= ROLL_RECOVER
+        wind_up = self._wind_up(e)          # seconds to its next hit, in an attack's wind-up
+        interrupt = self._poise is not None and 0.0 <= self._poise <= LOW_POISE and wind_up is not None and wind_up >= INTERRUPT_LEAD \
+            and (_base(e.model), self._attack_anim(e)) not in self._armored
+        go_in = (opening or reel or interrupt or (passive and clear)) and self.t - self._last_roll >= ROLL_RECOVER
+        self.debug['interrupt'] = interrupt
         self.debug.update(opening=opening, passive=passive, reel=reel, poise=self._poise, combo=self._combo)
         stamina_ok = st is None or st >= STAMINA_PER_SWING
         others = self._next_hit(snap, p, exclude=e.id)
@@ -387,7 +402,7 @@ class Fighter:
         if gap <= ATTACK_REACH + (0.5 if chain else 0.0) and (can_swing or chain) and abs(err) < 40.0 \
                 and not walled:
             if not chain:
-                self._swing_check = [self.t, e.id, attacking, False]
+                self._swing_check = [self.t, e.id, attacking, False, self._attack_anim(e), _base(e.model)]
             self._close_ref, self._detours = None, 0
             self._last_swing = self.t
             self._combo += 1
@@ -402,7 +417,9 @@ class Fighter:
             self.state = 'waiting'
             return Intent(frozenset(), 0.0, tuple(taps))
         spacing = SPACING_LOW if low_poise else SPACING
-        if gap < spacing - 0.4:  # 4b. too close between openings: step back out of reach
+        if gap < spacing - 0.4 and not self._recovering_from_attack(e):
+            # 4b. too close between openings: step back out of reach (not while it recovers from an attack:
+            # that is when to be close)
             self.state = 'spacing'
             return Intent(self._back_keys(p), turn, tuple(taps))
         self._back_from = None
@@ -426,9 +443,43 @@ class Fighter:
                 return True
         return False
 
+    def _attack_anim(self, e) -> int | None:
+        """The attack the target is playing (one with hit windows), or None."""
+        for a, _t, _l in (e.anims or ((e.anim, e.anim_time, e.anim_length),)):
+            if a is not None and self.windows(e.model, a):
+                return a
+        return None
+
+    def _wind_up(self, e) -> float | None:
+        """Seconds until the target's attack's first hit, while it hasn't come yet (None otherwise)."""
+        speed = e.anim_speed if e.anim_speed > 0 else 1.0
+        for a, t, _l in (e.anims or ((e.anim, e.anim_time, e.anim_length),)):
+            w = self.windows(e.model, a) if a is not None else []
+            if w and t < w[0][0]:
+                return (w[0][0] - t) / speed
+        return None
+
+    def _recovering_from_attack(self, e) -> bool:
+        for a, t, _l in (e.anims or ((e.anim, e.anim_time, e.anim_length),)):
+            w = self.windows(e.model, a) if a is not None else []
+            if w and t > max(end for _s, end in w):
+                return True
+        return False
+
     def _closing(self, keys, turn, taps, gap: float, walled: bool) -> Intent:
         """Closing in on the target; blocked (no progress, or a wall between): sideways around it."""
         self.state = 'closing'
+        if walled:   # a wall stays between for WALLED_FOR s: round it by the route (or give it up)
+            if self._walled_since is None:
+                self._walled_since = self.t
+            elif self.t - self._walled_since >= WALLED_FOR:
+                self._walled_since = None
+                first = self.target_id not in self.walled
+                self.walled.add(self.target_id)
+                self.stop('walled' if first else 'unreachable')
+                return Intent()
+        else:
+            self._walled_since = None
         if self.t < self._detour_until:
             return Intent(frozenset({self._detour_side}), turn, tuple(taps))
         if self._close_ref is None or gap < self._close_ref[1] - CLOSE_MIN:
@@ -436,7 +487,10 @@ class Fighter:
         elif self.t - self._close_ref[0] >= CLOSE_CHECK or (walled and self.t - self._close_ref[0] >= 0.3):
             self._detours += 1
             if self._detours > MAX_DETOURS:
-                self.stop('unreachable')
+                # first: the walk takes it round by the navmesh and the fight starts again there
+                first = self.target_id not in self.walled
+                self.walled.add(self.target_id)
+                self.stop('walled' if first else 'unreachable')
                 return Intent()
             self._detour_side = 'right' if self._detour_side == 'left' else 'left'
             self._detour_until = self.t + DETOUR_FOR
@@ -457,6 +511,9 @@ class Fighter:
             if not c[2] and not c[3]:
                 self._guarding.add(e.id)
                 self.events.append('guarded')
+            elif c[2] and not c[3] and c[4] is not None:   # swung into its attack, no flinch: armoured
+                self._armored.add((c[5], c[4]))
+                self.events.append('armored')
             self._swing_check = None
 
     def _reeling(self, e) -> str | None:

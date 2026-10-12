@@ -947,3 +947,41 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
 - Walk: 2 s after a pause before "stuck" counts; a stuck walk also marks the spot 1.2 m ahead as one to
   route around (props like the campfire are not in the navmesh).
 - 165 tests pass. Live: the line-of-sight ray to a soldier 38 m away was blocked by terrain 3.6 m out.
+
+## 2026-10-11: walls by the navmesh; quicker punishes
+- Ninth session (user, 20:31-20:35): (1) "kill all the soldiers": one 39 s fight, 22 rolls, no damage, only 4
+  swings; (2) the next soldier, 13 m away behind a ruin wall (screenshot): the walk went straight at it
+  for 17 s with no route at all, stuck, gave up. The user asked whether the navmesh knows such walls.
+- It does: the planner routes round that wall (east along it, then north through a gap: 0.1-2.3 s from
+  every point the walk stood on). The walk never had the route: the companion counts a goal within 15 m
+  as reached (Navi's "here we are") and so never planned one, and the walk went straight at characters
+  within 20 m regardless of walls.
+- Now: the companion plans a route to close goals too while the character walks itself; the walk goes
+  straight at a character only with a clear line (the chest-to-target ray, now also cast while walking
+  to a character) and only counts as arrived with one; a fight with a wall in the line for 1 s (or no
+  way round after 3 sidesteps) hands over to the walk by the route, which starts the fight again on
+  arrival ("There's a wall in the way. Going round!"); only a second time is the target given up.
+- Quicker punishes (the 39 s fight): an action is possible 0.5 s into a roll (was 0.55, and no swing for
+  0.75 s after a roll press: most 0.3-0.7 s openings went by; an attack late in a roll comes out as a
+  rolling attack); it no longer steps back out of reach while the target recovers from an attack; and a
+  low-poise enemy (known poise <= 60) in an attack's wind-up with its hit still >= 0.75 s away is struck
+  first (a light attack lands in ~0.3-0.4 s and flinches it out of the attack, as the logs showed); an
+  attack that doesn't flinch is remembered (armoured) and not tried again.
+- 171 tests pass.
+
+## 2026-10-11: blocked gaps stay blocked
+- Tenth session (user, 21:56, screenshot at a Gatefront barricade): the walk now followed the navmesh route
+  but got stuck at a wooden barricade with a tarp, between the player and a soldier.
+- Found: the game's navmesh has a gap there (the faces on the two sides aren't joined), but the made-up
+  "step" links (edge to edge across gaps up to 3.5 m, added for cave mouths) bridged it. The route check
+  found the step link blocked and banned it, but there were many across the same gap: each of the six
+  checks banned one, and the route still ran through the barricade. (Leg rays at the spot: a vertical
+  surface 0.4-2.5 m along at every height.) Avoid spots also did nothing there: they only matched a face
+  by its centre, and the faces are 5-8 m across.
+- Now: a made-up link found blocked blocks every made-up link within 4 m of it (navgraph link_blocks); a
+  wall a leg ray finds blocks the navmesh crossing there (the faces just before and past it; inside one
+  face, that face costs 60 m more); a stuck walk blocks the crossing ahead too. Found blocks are kept in
+  .local/eldenring/world_blocks.json (a barricade found once stays known).
+- Live: from the stuck spot the route now goes north round the barricade (27 m, every leg clear); from
+  where the walk began, east round it (36 m); a fresh adapter loads the blocks and goes round at once.
+- 173 tests pass.

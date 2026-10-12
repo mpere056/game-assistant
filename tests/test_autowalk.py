@@ -248,3 +248,28 @@ class ResumeTests(unittest.TestCase):
             aw.t += 1 / 30
             self.assertFalse(aw._check_stuck((0.0, 0.0, 0.0)))
         self.assertNotIn('unstick', aw.events)
+
+
+class ClearLineTests(unittest.TestCase):
+    def test_round_by_the_route_when_a_wall_is_between(self):
+        # 20:34: a soldier 13 m away behind a wall: straight at it, stuck, gave up.
+        w = World()
+        aw = AutoWalk()
+        w.entities = (Entity(7, 1, 'c1', (0.0, 0.0, 13.0), (0.0, 1.0, 13.0), 0.5, 2.0, True, False),)
+        aw.start([(0.0, 0.0, 0.0), (10.0, 0.0, 6.0), (0.0, 0.0, 13.0)], (0.0, 0.0, 13.0), 'Soldier', target_id=7)
+        aw.clear_line = False
+        aw.update(w.snap(), 1 / 30)
+        self.assertNotEqual(aw.state, 'chasing')
+        aw.clear_line = True
+        aw.update(w.snap(), 1 / 30)
+        self.assertEqual(aw.state, 'chasing')
+
+    def test_not_arrived_through_a_wall(self):
+        w = World()
+        aw = AutoWalk()
+        w.entities = (Entity(7, 1, 'c1', (0.0, 0.0, 2.0), (0.0, 1.0, 2.0), 0.5, 2.0, True, False),)
+        aw.start([(0.0, 0.0, 0.0), (3.0, 0.0, 2.0)], (0.0, 0.0, 2.0), 'Soldier', target_id=7)
+        aw.clear_line = False
+        aw.update(w.snap(), 1 / 30)
+        self.assertNotIn('arrived', aw.events)
+
