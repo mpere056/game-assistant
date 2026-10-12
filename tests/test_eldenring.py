@@ -177,3 +177,27 @@ class BlockedGapTests(unittest.TestCase):
                      (7, (0.5, 0.0, 0.0), (1.0, 0.0, 0.0), 4)]]        # a ladder (the game's): kept
         g.block = lambda bid: blk
         self.assertEqual([x[0] for x in g.neighbours(0 << FACE_BITS)], [5, 7])
+
+
+class StuckSpotTests(unittest.TestCase):
+    def test_a_leg_through_a_stuck_spot_goes_round_it(self):
+        # Gatefront barrels, 2026-10-12: inside the start face, invisible to rays; the leg ran through them.
+        from game_assistant.games.eldenring.adapter import round_stuck_spots
+        pts = [(0.0, 0.0, 0.0), (0.0, 0.0, 10.0)]
+        got = round_stuck_spots(pts, [(0.0, 0.0, 1.2)])
+        self.assertEqual(len(got), 3)
+        self.assertAlmostEqual(abs(got[1][0]), 1.8, places=3)   # beside it
+        self.assertEqual(round_stuck_spots(pts, [(5.0, 0.0, 5.0)]), pts)   # not near the leg: unchanged
+        both = round_stuck_spots(pts, [(0.0, 0.0, 1.2), (1.8, 0.0, 1.2)])   # one side stuck too: the other
+        self.assertAlmostEqual(both[1][0], -1.8, places=3)
+
+    def test_stuck_spot_faces_are_not_used(self):
+        from game_assistant.games.eldenring.navgraph import WorldGraph
+        g = WorldGraph.__new__(WorldGraph)
+        g.walls, g.avoid, g.stuck_spots = [], [], [(1.0, 2.0, 3.0)]
+        g._stuck_src = None
+        g.locate = lambda pt, max_side=6.0: (42, pt, 0.0)
+        blk = type('B', (), {'cost': [1.0] * 64})()
+        g.block = lambda bid: blk
+        self.assertEqual(g.cost(42), float('inf'))
+        self.assertEqual(g.cost(7), 1.0)

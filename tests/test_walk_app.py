@@ -45,7 +45,7 @@ def make_app():
     app.companion = Companion()
     app.companion.plan_async = False
     app.companion.route_fn = lambda s, g: Route([s, (0.0, 0.0, 20.0), g], True, 0)
-    app._walk_cmd, app._walk_route, app._took_over, app._last_enemy_line = None, None, 0.0, -1e9
+    app._walk_cmd, app._walk_route, app._took_over = None, None, 0.0
     app.lines = []
     app._navi_line = app.lines.append
     app._fight_log = lambda row: None   # never into the real runtime/combat log
@@ -220,3 +220,77 @@ class WallAppTests(unittest.TestCase):
         self.assertFalse(app.fighter.active)
         self.assertIn("There's a wall in the way. Going round!", app.lines)
 
+
+
+class OnTheWayTests(unittest.TestCase):
+    def test_an_enemy_coming_at_the_player_on_the_way_is_fought(self):
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        w = World()
+        far = Entity(9, 1, 'c4300', (0.0, 0.0, 40.0), (0.0, 1.0, 40.0), 0.5, 2.0, True, False, 400, 400)
+        w.entities = (far,)
+        step(app, w, 1.5)
+        app._fight_all = 'Godrick Soldier'
+        app._walk_request('start', far.pos, 'Soldier', 9, 'fight')
+        step(app, w, 0.5)
+        self.assertTrue(app.walk.active)
+        p = w.pos
+        near = Entity(10, 1, 'c4300', (p[0] + 1.0, 0.0, p[2] + 3.0), (p[0] + 1.0, 1.0, p[2] + 3.0), 0.5, 2.0, True,
+                      False, 400, 400, facing=(-0.3, 0.0, -0.95))     # 3 m ahead, facing the player
+        w.entities = (far, near)
+        step(app, w, 0.2)
+        self.assertTrue(app.fighter.active)
+        self.assertEqual(app.fighter.target_id, 10)
+
+
+class TwentySecondSessionAppTests(unittest.TestCase):
+    def test_a_lost_key_press_is_pressed_again(self):
+        # 2026-10-12: back in the game after a pause, forward held 4 s and the character stood idle (anim 0)
+        from game_assistant.core.interface import Player, Snapshot
+
+        class IdleWorld(World):
+            def snap(self):
+                s = super().snap()
+                pl = Player(s.player.pos, s.player.facing, 'alive', anim=0)
+                return Snapshot(s.game, s.frame, True, pl, s.camera, s.entities, None, screen=s.screen)
+        app = make_app()
+        w = IdleWorld(frozen=True)
+        step(app, w, 1.0)
+        app._walk_request('start', (0.0, 0.0, 60.0), 'Gatefront')
+        before = app.keys.released
+        step(app, w, 1.2)
+        self.assertTrue(app.walk.active)
+        self.assertGreater(app.keys.released, before)       # let go, then pressed again
+        self.assertIn('forward', app.keys.held)
+
+    def test_whatever_comes_at_the_player_is_next(self):
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        app.fighter = Fighter(lambda model, anim: [(0.5, 0.6)] if anim == 3000 else [])
+        w = World()
+        soldier = Entity(9, 1, 'c4310', (0.0, 0.0, 30.0), (0.0, 1.0, 30.0), 0.5, 2.0, True, False, 400, 400)
+        wolf = Entity(10, 2, 'c4070', (0.0, 0.0, 12.0), (0.0, 1.0, 12.0), 0.5, 1.0, True, False, 200, 200,
+                      facing=(0.0, 0.0, -1.0))
+        w.entities = (soldier, wolf)
+        app.fighter._vel[10] = (0.0, -5.0)                  # running at the player
+        self.assertEqual(app._coming_at_me(w.snap()).id, 10)
+        app.fighter._vel[10] = (0.0, 0.0)                   # standing there: not coming
+        self.assertIsNone(app._coming_at_me(w.snap()))
+
+
+class TwentyThirdSessionAppTests(unittest.TestCase):
+    def test_the_fairy_keeps_planning_for_a_walk_to_a_close_goal_behind_a_wall(self):
+        # 16:52: the soldier 15 m off behind a wall: the fairy took it as "arrived" (within its 15 m), switched to
+        # showing it, and threw the route it was planning away: the walk waited 15 s with no route.
+        c = Companion()
+        c.plan_async = False
+        c.route_fn = lambda s, g: None                 # (a plan still running: no route yet)
+        c.walking = True
+        c.guide((0.0, 0.0, 10.0), 'Soldier')
+        w = World()
+        for _ in range(10):
+            c.update(w.snap(), 1 / 30)
+        self.assertEqual(c.mode, 'guide')
+        c.walking = False                              # the player walking: arrived, show it
+        c.update(w.snap(), 1 / 30)
+        self.assertEqual(c.mode, 'show')

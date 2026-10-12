@@ -107,6 +107,7 @@ class Companion:
         self.trail: list[tuple[float, Vec3, bool]] = []  # (time, world position, moving fast), newest last
         self._sight_ahead: float | None = None  # guide mode: how far ahead the player can still see it
         self.plan_async = True        # plan routes on a background thread (tests plan inline)
+        self.walking = False          # set by the app: the character walks this route itself (auto-walk)
         self.plan_close = False       # plan a route even to a goal within ARRIVE (the character walks there
                                       # itself: 20:34, a soldier 13 m away behind a wall got no route at all)
         # The game's own navmesh, when the adapter has one (adapter.route): exact walkable routes of
@@ -294,7 +295,9 @@ class Companion:
         goal, p = self.target.point, snap.player.pos
         if self.plan_close and self.route is None and not self._planning and self.t - self._route_time > 1.0:
             self._start_plan(p, goal)
-        if math.hypot(goal[0] - p[0], goal[2] - p[2]) < ARRIVE:
+        if math.hypot(goal[0] - p[0], goal[2] - p[2]) < ARRIVE and not (self.walking and self.route is None):
+            # (the character walking there itself with no route yet: keep planning; switching to 'show' here
+            # threw the plan away and left the walk waiting 15 s behind a wall, twenty-third session)
             dy = goal[1] - p[1]
             if abs(dy) <= ARRIVE_HEIGHT:
                 self.events.append(f'arrived:{self.target.name or "there"}')

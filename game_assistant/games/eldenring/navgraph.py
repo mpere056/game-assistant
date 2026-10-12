@@ -482,6 +482,9 @@ class WorldGraph:
         self.avoid: list = []                        # [(x, y, z, radius)] spots a live ray found blocked
         self.walls: list = []                        # [(before, after)] walls found in the world (_wall_sets)
         self.link_blocks: list = []                  # [(x, y, z)] made-up links found blocked (_near_block)
+        self.stuck_spots: list = []                  # [(x, y, z)] where the character got stuck (_stuck_faces)
+        self._stuck_src = None
+        self._stuck_set: set = set()
         self._walls_src = None
         self._wall_pairs: set = set()
         self._wall_faces: set = set()
@@ -538,6 +541,18 @@ class WorldGraph:
             nb = [x for x in nb if not (len(x) > 3 and x[3] in MADE_UP and self._near_block(x[1], x[2]))]
         return nb
 
+    def _stuck_faces(self) -> set:
+        """The faces under spots the character got stuck walking into: not used at all (breakable barrels and
+        crates block the character but no ray sees them; a face cost or a crossing ban left the same route)."""
+        if self._stuck_src is not self.stuck_spots:
+            faces = set()
+            for pt in self.stuck_spots:
+                f = self.locate(pt, max_side=0.6)
+                if f is not None:
+                    faces.add(f[0])
+            self._stuck_src, self._stuck_set = self.stuck_spots, faces
+        return self._stuck_set
+
     def _near_block(self, va, vb) -> bool:
         """A made-up link (va-vb its edge) within LINK_BLOCK_RADIUS of one found blocked: there is a gap in
         the navmesh there for a reason (Gatefront: step links bridged the gap at a barricade, and banning
@@ -574,6 +589,8 @@ class WorldGraph:
         c = self.block(node >> FACE_BITS).cost[node & ((1 << FACE_BITS) - 1)]
         if self.walls and node in self._wall_sets()[1]:
             c = c + WALL_FACE_COST
+        if self.stuck_spots and node in self._stuck_faces():
+            return math.inf
         if self.avoid:
             x, y, z = self.centre(node)
             for ax, ay, az, r in self.avoid:
