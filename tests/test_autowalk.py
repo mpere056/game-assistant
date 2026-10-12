@@ -129,13 +129,14 @@ class AutoWalkTests(unittest.TestCase):
         w.focused = True
         self.assertIn('forward', aw.update(w.snap(), 1 / 30).keys)
 
-    def test_warns_about_an_enemy_ahead_once_and_keeps_walking(self):
+    def test_walks_past_enemies_without_a_word(self):
+        # (the "Careful, an enemy ahead!" warning was removed at the user's request, 2026-10-12)
         w = World()
         w.entities = (Entity(7, 1, 'c1', (1.0, 0.0, 20.0), (1.0, 1.0, 20.0), 0.5, 2.0, True, False),)
         aw = AutoWalk()
         aw.start([(0.0, 0.0, 0.0), (0.0, 0.0, 50.0)], (0.0, 0.0, 50.0))
         walk(aw, w, 3)
-        self.assertEqual(aw.events.count('enemy:7'), 1)
+        self.assertFalse([e for e in aw.events if e.startswith('enemy')])
         self.assertTrue(aw.active)
 
     def test_ladder_interacts_and_climbs(self):
@@ -260,7 +261,29 @@ class ClearLineTests(unittest.TestCase):
         aw.clear_line = False
         aw.update(w.snap(), 1 / 30)
         self.assertNotEqual(aw.state, 'chasing')
+        aw.clear_line = True                 # a clear line, but the route bends 6 m off it: the route still
+        aw.update(w.snap(), 1 / 30)          # (something low the rays don't see; twenty-second session)
+        self.assertNotEqual(aw.state, 'chasing')
+        aw.set_route([(0.0, 0.0, 0.0), (0.5, 0.0, 6.0), (0.0, 0.0, 13.0)])   # a straight route: straight at it
+        aw.update(w.snap(), 1 / 30)
+        self.assertEqual(aw.state, 'chasing')
+
+    def test_the_route_for_a_while_after_getting_stuck_chasing(self):
+        from game_assistant.core.autowalk import STUCK_ROUTE_S
+        w = World()
+        aw = AutoWalk()
+        w.entities = (Entity(7, 1, 'c1', (0.0, 0.0, 13.0), (0.0, 1.0, 13.0), 0.5, 2.0, True, False),)
+        aw.start([(0.0, 0.0, 0.0), (0.5, 0.0, 6.0), (0.0, 0.0, 13.0)], (0.0, 0.0, 13.0), 'Soldier', target_id=7)
         aw.clear_line = True
+        aw.update(w.snap(), 1 / 30)
+        self.assertEqual(aw.state, 'chasing')
+        aw._stucks = []
+        aw._stuck_since, aw._stuck_pos = aw.t - 3.0, (0.0, 0.0, 0.0)
+        aw._check_stuck((0.0, 0.0, 0.0))
+        aw._unstick_until = aw._around_until = -1.0
+        aw.update(w.snap(), 1 / 30)
+        self.assertNotEqual(aw.state, 'chasing')
+        aw.t += STUCK_ROUTE_S
         aw.update(w.snap(), 1 / 30)
         self.assertEqual(aw.state, 'chasing')
 
@@ -273,3 +296,60 @@ class ClearLineTests(unittest.TestCase):
         aw.update(w.snap(), 1 / 30)
         self.assertNotIn('arrived', aw.events)
 
+
+
+class NoRouteTests(unittest.TestCase):
+    def test_waits_for_a_route_rather_than_walk_into_a_wall(self):
+        w = World()
+        aw = AutoWalk()
+        w.entities = (Entity(7, 1, 'c1', (0.0, 0.0, 10.0), (0.0, 1.0, 10.0), 0.5, 2.0, True, False),)
+        aw.start([], (0.0, 0.0, 10.0), 'Soldier', target_id=7)
+        aw.clear_line = False
+        intent = aw.update(w.snap(), 1 / 30)
+        self.assertEqual(aw.state, 'waiting_route')
+        self.assertEqual(intent.keys, frozenset())
+
+
+class BreakTests(unittest.TestCase):
+    """Stuck against something no ray sees (barrels, crates: likely breakable): swing at it first."""
+
+    def _stuck_walk(self, ahead_blocked, seconds=6.0):
+        w = World()
+        aw = AutoWalk()
+        aw.start([(0.0, 0.0, 0.0), (0.0, 0.0, 50.0)], (0.0, 0.0, 50.0))
+        aw.ahead_blocked = ahead_blocked
+        taps = []
+        for _ in range(int(seconds * 30)):
+            intent = aw.update(w.snap(), 1 / 30)       # (the world never moves the player: stuck)
+            taps += list(intent.taps)
+            if not aw.active:
+                break
+        return aw, taps
+
+    def test_swings_at_an_unseen_blocker_then_falls_back_to_stepping_round(self):
+        aw, taps = self._stuck_walk(False, seconds=9.0)
+        self.assertIn('break', aw.events)
+        self.assertGreaterEqual(taps.count('attack'), 2)
+        self.assertLessEqual(aw.events.count('break'), 2)       # at most twice in one place
+        self.assertIn('unstick', aw.events)                     # then round it
+
+    def test_a_wall_seen_ahead_is_not_attacked(self):
+        aw, taps = self._stuck_walk(True)
+        self.assertNotIn('break', aw.events)
+        self.assertNotIn('attack', taps)
+        self.assertIn('unstick', aw.events)
+
+
+class ChaseBreakTests(unittest.TestCase):
+    def test_walking_to_a_character_and_stuck_on_an_unseen_thing_swings(self):
+        # 2026-10-12: "let me smash it" four times walking to soldiers, never a swing (the chase returned first).
+        w = World()
+        aw = AutoWalk()
+        w.entities = (Entity(7, 1, 'c1', (0.0, 0.0, 8.0), (0.0, 1.0, 8.0), 0.5, 2.0, True, False),)
+        aw.start([(0.0, 0.0, 0.0), (0.0, 0.0, 8.0)], (0.0, 0.0, 8.0), 'Soldier', target_id=7)
+        aw.ahead_blocked, aw.clear_line = False, True
+        taps = []
+        for _ in range(int(3.5 * 30)):
+            taps += list(aw.update(w.snap(), 1 / 30).taps)
+        self.assertIn('break', aw.events)
+        self.assertGreaterEqual(taps.count('attack'), 2)

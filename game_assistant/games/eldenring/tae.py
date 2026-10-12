@@ -58,6 +58,29 @@ def parse(data: bytes) -> tuple[int, dict[int, list[Event]]]:
     return file_id, out
 
 
+def imports(data: bytes) -> dict[int, int]:
+    """{animation id: the animation it imports} for animations with no events of their own whose header is
+    "import another animation" (anim file header type 1, the imported id at +0x18). Weapon movesets reuse
+    attacks this way: a Godrick Soldier's 5003008 has no events and imports 1003008 (2026-10-12: its hits
+    had no timings, five landed unseen)."""
+    count = struct.unpack_from('<i', data, 0x54)[0]
+    anims_off = struct.unpack_from('<Q', data, 0x58)[0]
+    out = {}
+    for i in range(count):
+        aid, aoff = struct.unpack_from('<QQ', data, anims_off + i * 16)
+        if not aoff or aoff + 0x2C > len(data):
+            continue
+        _ev, _grp, _times, afile, n_ev = struct.unpack_from('<QQQQi', data, aoff)
+        if n_ev or not afile or afile + 0x1C > len(data):
+            continue
+        kind = struct.unpack_from('<Q', data, afile)[0]
+        if kind == 1:
+            src = struct.unpack_from('<i', data, afile + 0x18)[0]
+            if src > 0 and src != aid:
+                out[int(aid)] = src
+    return out
+
+
 def attack_windows(events: list[Event]) -> list[tuple[float, float]]:
     """(start, end) seconds of each attack hitbox in an animation."""
     return sorted((e.start, e.end) for e in events if e.type == ATTACK and e.end > e.start)

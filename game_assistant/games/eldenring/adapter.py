@@ -20,13 +20,17 @@ from ...core.interface import (CAP_CAMERA, CAP_COMBAT, CAP_ENTITIES, CAP_KNOWLED
                               GameNotRunning, Player, RayHit, Screen, Snapshot, Vec3, cross, normalize, sub)
 from .memory import Memory
 from .knowledge import EldenRingKnowledge
-from .params import read_graces, read_legacy_conversions, read_map_points, read_npc_params
+from .params import read_graces, read_holder, read_legacy_conversions, read_map_points, read_npc_params
 from .places import TILE, PlaceIndex, compass, place_words
 from .wiki import Wiki
 
 ROOT = Path(__file__).resolve().parents[3]
 NPC_DUMP = ROOT / '.local' / 'eldenring' / 'npc_params.json'   # what was read from memory, for checking
 BLOCKS_FILE = ROOT / '.local' / 'eldenring' / 'world_blocks.json'  # walls and blocked gaps found while walking
+GAME_DATA_MAN_RVA = 0x3D61F98    # fromsoftware-rs rva_ww.rs (59fbd3b): GameDataMan; +0x08 the player's game data
+EQUIP_IDS_OFF = 0x398            # ...its equipped item ids (ChrAsm, 22 x i32: L1 R1 L2 R2 L3 R3 ...): found by
+                                 # scanning and checked against EquipParamWeapon (2026-10-11: R1 2000002 Longsword+2)
+RANGED_REACH = 30.0              # an attack that launches a bullet (BehaviorParam refType 1): reaches far
 
 SHM_NAME = 'Local\\AoER_bridge_v1'
 SHM_SIZE = 8 * 1024 * 1024
@@ -104,6 +108,55 @@ def _playing(blob: bytes, o: int) -> tuple[tuple, float]:
     return tuple(out), speed
 
 
+STUCK_CLEAR = 1.0      # a route leg passing this near a spot the character got stuck at...
+STUCK_SIDESTEP = 1.8   # ...gets a waypoint this far to the side of it (2026-10-12: barrels stood inside one 6.6 m
+                       # navmesh face, the one the character stood on: no face could be avoided; no ray sees them)
+
+
+def round_stuck_spots(pts: list, spots: list) -> list:
+    """The route with a waypoint beside each known stuck spot its legs pass near (the shorter side, not near
+    another stuck spot: stuck there too, that side is marked and the next plan takes the other)."""
+    if not spots or len(pts) < 2:
+        return pts
+    out = [pts[0]]
+    for u, v in zip(pts, pts[1:]):
+        dx, dz = v[0] - u[0], v[2] - u[2]
+        l2 = dx * dx + dz * dz
+        for sp in spots:
+            if l2 < 1e-6 or abs(sp[1] - u[1]) > 4.0:
+                continue
+            k = max(0.0, min(1.0, ((sp[0] - u[0]) * dx + (sp[2] - u[2]) * dz) / l2))
+            near = (u[0] + dx * k, u[2] + dz * k)
+            if math.hypot(sp[0] - near[0], sp[2] - near[1]) >= STUCK_CLEAR or k in (0.0, 1.0):
+                continue
+            n = math.sqrt(l2)
+            px, pz = -dz / n, dx / n
+            cands = [(sp[0] + px * STUCK_SIDESTEP * s_, sp[1], sp[2] + pz * STUCK_SIDESTEP * s_) for s_ in (1, -1)]
+            cands = [c for c in cands if all(math.hypot(c[0] - o[0], c[2] - o[2]) >= STUCK_CLEAR for o in spots)]
+            if cands:
+                c = min(cands, key=lambda c: math.hypot(c[0] - u[0], c[2] - u[2]) + math.hypot(v[0] - c[0], v[2] - c[2]))
+                out.append(c)
+                break
+        out.append(v)
+    return out
+
+
+def _spheres(row: bytes):
+    """(radius, dummy 1, dummy 2) of an AtkParam row's hit spheres in use (16: hit0-3 then hit4-15)."""
+    out = []
+    for k in range(16):
+        if k < 4:
+            r = struct.unpack_from('<f', row, 4 * k)[0]
+            d1, d2 = struct.unpack_from('<h', row, 0x2C + 2 * k)[0], struct.unpack_from('<h', row, 0x34 + 2 * k)[0]
+        else:
+            r = struct.unpack_from('<f', row, 0x108 + 4 * (k - 4))[0]
+            d1 = struct.unpack_from('<h', row, 0x138 + 2 * (k - 4))[0]
+            d2 = struct.unpack_from('<h', row, 0x150 + 2 * (k - 4))[0]
+        if r > 0 and (d1 >= 0 or d2 >= 0):
+            out.append((r, d1, d2))
+    return out
+
+
 class EldenRingAdapter:
     game = 'Elden Ring'
     capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN, CAP_PLACES})
@@ -136,6 +189,7 @@ class EldenRingAdapter:
         self._avoid: list = []         # (x, y, z, radius) in world coordinates: legs found blocked
         self._walls: list = []         # (before, after) world points across walls found (navgraph walls)
         self._link_blocks: list = []   # world midpoints of made-up links found blocked (navgraph link_blocks)
+        self._stuck_spots: list = []   # world points the character got stuck walking into (navgraph stuck_spots)
         self._load_blocks()            # (both kept across sessions: a barricade found once stays known)
         self._route_lock = threading.Lock()
         if (Path(__file__).resolve().parents[3] / '.local' / 'eldenring' / 'navgraph' / 'index.json').exists():
@@ -221,6 +275,84 @@ class EldenRingAdapter:
             ents[eid] = _playing(blob, o)
         return player, stats, ents
 
+    def _load_attack_tables(self) -> None:
+        """BehaviorParam and AtkParam_Npc from memory (a few MB, once, in the background)."""
+        if getattr(self, '_atk_tables', None) is not None:
+            return
+        mem = Memory(self._map())
+        self._atk_tables = (read_holder(mem, 'behavior_npc').rows, read_holder(mem, 'atk_npc').rows,
+                            read_holder(mem, 'weapon').rows)
+
+    def attack_reach(self, model: str | None, type_id: int | None, anim: int | None) -> float | None:
+        """Metres from the attacker's centre its attack (an animation with hit windows) can reach, with the
+        limb stretched out (not counting how far it moves meanwhile), or None when not known. From the game's
+        data: the animation's attack events name behaviour judges; with the character's behaviour variation
+        (NpcParam) they give BehaviorParam rows (200000000 + variation * 1000 + judge), whose AtkParam_Npc rows
+        are spheres or capsules of a radius on attachment points of the model (flver.py reach). A bullet
+        (refType 1): RANGED_REACH."""
+        if not model or type_id is None or anim is None:
+            return None
+        key = (model, type_id, anim)
+        cache = self.__dict__.setdefault('_reach_cache', {})
+        if key in cache:
+            return cache[key]
+        tables = getattr(self, '_atk_tables', None)
+        if tables is None:
+            return None        # not loaded yet (warm_up): ask again later
+        beh, atk, _w = tables
+        if self._attacks is None:
+            self.attack_windows(model, anim)      # loads attacks.json
+        data = self._attacks or {}
+        judges = ((data.get(model) or {}).get('judges') or (data.get(model[:4] + '0') or {}).get('judges')
+                  or {}).get(str(anim))
+        dummies = (data.get(model) or {}).get('dummy_reach') or (data.get(model[:4] + '0') or {}).get('dummy_reach') or {}
+        npc = self._load_npcs().get(type_id) if hasattr(self, '_load_npcs') else None
+        var = (npc or {}).get('behavior_variation')
+        best = None
+        for j in judges or ():
+            if var is None or var < 0:
+                break
+            b = beh.get(200000000 + var * 1000 + j)
+            if b is None:
+                continue
+            ref_type, ref_id = b[9], struct.unpack_from('<i', b, 0x0C)[0]
+            if ref_type == 1:
+                best = max(best or 0.0, RANGED_REACH)
+                continue
+            row = atk.get(ref_id)
+            if ref_type != 0 or row is None:
+                continue
+            for radius, d1, d2 in _spheres(row):
+                known = [dummies[str(d)] for d in (d1, d2) if d >= 0 and str(d) in dummies]
+                r = max(known, default=None)       # (0.0: at the body's centre, a body slam)
+                if r is not None:
+                    best = max(best or 0.0, r + radius)
+        cache[key] = round(best, 2) if best else None
+        return cache[key]
+
+    def player_weapon(self) -> tuple[int, int] | None:
+        """(right-hand weapon id, its EquipParamWeapon wepType: 1 dagger, 3 straight sword, 5 greatsword,
+        ...) or None. The primary right-hand slot."""
+        try:
+            self._load_attack_tables()
+        except Exception:
+            pass
+        tables = getattr(self, '_atk_tables', None)
+        try:
+            mem = Memory(self._map())
+            base = mem.modules().get('eldenring.exe', (0, 0))[0]
+            gdm = mem.u64(base + GAME_DATA_MAN_RVA)
+            pgd = mem.u64(gdm + 0x08) if gdm else 0
+            if not pgd:
+                return None
+            wid = struct.unpack_from('<i', mem.read(pgd + EQUIP_IDS_OFF + 4, 4), 0)[0]
+        except Exception:
+            return None
+        if wid <= 0:
+            return None
+        row = tables[2].get(wid - wid % 100) if tables else None
+        return (wid, struct.unpack_from('<H', row, 0x1A6)[0] if row else 0)
+
     def attack_windows(self, model: str | None, anim: int | None) -> list:
         """[(start, end)] seconds into the animation when it can hit (from the game's animation files,
         Get-GameData.bat attacks), or [] when it isn't an attack (or isn't known). Besides the swing's own
@@ -243,9 +375,11 @@ class EldenRingAdapter:
             except (OSError, ValueError):
                 self._attacks = {}
         data = self._attacks.get(model)
-        if data is None:
+        if data is None or 'attacks' not in data:
             # Variants (c4311 Godrick Soldier ... c4316) have no animation files of their own: they play
             # their base model's (c4310: live, c4311 played 3043000, one of c4310's 1,165 animations).
+            # (A variant's entry may hold only its model's reach, "dummy_reach": 2026-10-11, with the timings
+            # looked up there no attack was seen at all: no roll and no swing in a whole fight.)
             data = self._attacks.get(model[:4] + '0', {})
         out = sorted({tuple(w) for w in data.get('attacks', {}).get(str(anim), [])})
         if 3000 <= anim % 1_000_000 < 4000:   # attacks; other bullets are effects (flinch blood, the alert shout)
@@ -342,6 +476,7 @@ class EldenRingAdapter:
         try:
             if self.snapshot().in_world:
                 self._load_npcs()
+                self._load_attack_tables()
                 self._place_index()
                 if not self._graces_tried:
                     self._graces_tried = True
@@ -388,7 +523,8 @@ class EldenRingAdapter:
                 r = self._router.route(s, g, budget_s=budget_s, timeout=budget_s + 20,
                                        attrs={'area': me[0], 'banned': set(self._banned_links),
                                               'avoid': list(self._avoid), 'walls': list(self._walls),
-                                              'link_blocks': list(self._link_blocks)})
+                                              'link_blocks': list(self._link_blocks),
+                                              'stuck_spots': list(self._stuck_spots)})
                 if r is None:
                     return None
                 blocked = self._blocked_links(r.special or [], off)
@@ -411,7 +547,9 @@ class EldenRingAdapter:
         self._last_special = [(frm, to, ((pa[0] + pb[0]) / 2 - off[0], (pa[1] + pb[1]) / 2 - off[1],
                                           (pa[2] + pb[2]) / 2 - off[2]))
                               for k, pa, pb, frm, to, _land in (r.special or []) if k in (1, 2, 3, 8)]
-        route = Route([(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints], r.reaches_goal, 0)
+        pts = [(w[0] - off[0], w[1] - off[1], w[2] - off[2]) for w in r.waypoints]
+        route = Route(round_stuck_spots(pts, [(x - off[0], y - off[1], z - off[2]) for x, y, z in self._stuck_spots]),
+                      r.reaches_goal, 0)
         route.length_m, route.timed_out = r.length, r.timed_out
         route.bridged = False
         if not r.reaches_goal:  # (also after a timed-out search: the gap left is what matters)
@@ -426,6 +564,23 @@ class EldenRingAdapter:
                          for k, pa, pb, _f, _t, land in (r.special or []) if k in (2, 4, 5, 6)]
         return route
 
+    def note_wall(self, hit: Vec3, d: Vec3) -> bool:
+        """A wall a ray found across the walk's route (hit, met going along d; snapshot coordinates): the
+        navmesh crossing there is blocked for later plans (and kept)."""
+        try:
+            snap = self.snapshot()
+            me = self._place_index().player_world(int(snap.area, 16), snap.player.pos)
+        except Exception:
+            return False
+        if me is None:
+            return False
+        p0 = snap.player.pos
+        off = (me[1] - p0[0], me[2] - p0[1], me[3] - p0[2])
+        self._avoid.append((hit[0] + off[0], hit[1] + off[1], hit[2] + off[2], AVOID_RADIUS))
+        self._add_wall(hit, d, off)
+        self._save_blocks()
+        return True
+
     def avoid_spot(self, pos: Vec3, radius: float = 1.2) -> bool:
         """The character got stuck walking into pos (snapshot coordinates): routes keep clear of it this
         session (the navmesh has no props: a campfire, a cart)."""
@@ -439,6 +594,7 @@ class EldenRingAdapter:
         p0 = snap.player.pos
         off = (me[1] - p0[0], me[2] - p0[1], me[3] - p0[2])
         self._avoid.append((pos[0] + off[0], pos[1] + off[1], pos[2] + off[2], radius))
+        self._stuck_spots.append((pos[0] + off[0], pos[1] + off[1], pos[2] + off[2]))
         d = (pos[0] - p0[0], 0.0, pos[2] - p0[2])
         n = math.hypot(d[0], d[2]) or 1.0
         self._add_wall((pos[0], pos[1] + 0.5, pos[2]), (d[0] / n, 0.0, d[2] / n), off)   # and the crossing there
@@ -533,6 +689,7 @@ class EldenRingAdapter:
             got = json.loads(BLOCKS_FILE.read_text(encoding='utf-8'))
             self._walls = [(tuple(a), tuple(b)) for a, b in got.get('walls', [])]
             self._link_blocks = [tuple(x) for x in got.get('link_blocks', [])]
+            self._stuck_spots = [tuple(x) for x in got.get('stuck_spots', [])]
         except (OSError, ValueError, TypeError):
             pass
 
@@ -540,7 +697,8 @@ class EldenRingAdapter:
         try:
             BLOCKS_FILE.parent.mkdir(parents=True, exist_ok=True)
             BLOCKS_FILE.write_text(json.dumps({'walls': [[list(a), list(b)] for a, b in self._walls[-2000:]],
-                                               'link_blocks': [list(x) for x in self._link_blocks[-2000:]]}),
+                                               'link_blocks': [list(x) for x in self._link_blocks[-2000:]],
+                                               'stuck_spots': [list(x) for x in self._stuck_spots[-2000:]]}),
                                    encoding='utf-8')
         except OSError:
             pass

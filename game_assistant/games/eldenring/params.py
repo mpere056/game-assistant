@@ -28,6 +28,7 @@ HEADER_SIZE = 0x40
 NPC_PARAM_SIZE = 0x2E0
 NPC_FIELDS = {
     # name: (offset, struct format)
+    'behavior_variation': (0x04, 'i'),   # behaviorVariationId: its BehaviorParam rows (reach)
     'name_id': (0x0C, 'i'),
     'hp': (0x24, 'I'),
     'runes': (0x2C, 'I'),             # get_soul
@@ -122,8 +123,32 @@ def find_param_file(mem: Memory, struct_name: str) -> int:
                         '(the repository address is for Elden Ring 1.17.1)')
 
 
+# Tables that share a struct are told apart by their holder (measured 2026-10-11 on 1.17.1, the community's
+# table order): AtkParam_Npc 7 and AtkParam_Pc 8 (ATK_PARAM_ST, 0x1C8), BehaviorParam 12 and BehaviorParam_PC
+# 13 (BEHAVIOR_PARAM_ST, 0x20), EquipParamWeapon 0 (0x298).
+HOLDER = {'atk_npc': (7, 'ATK_PARAM_ST', 0x1C8), 'atk_pc': (8, 'ATK_PARAM_ST', 0x1C8),
+          'behavior_npc': (12, 'BEHAVIOR_PARAM_ST', 0x20), 'behavior_pc': (13, 'BEHAVIOR_PARAM_ST', 0x20),
+          'weapon': (0, 'EQUIP_PARAM_WEAPON_ST', 0x298)}
+
+
+def read_holder(mem: Memory, which: str) -> ParamTable:
+    """A table by its holder number (HOLDER), checked against its struct name."""
+    index, struct_name, row_size = HOLDER[which]
+    base = mem.modules().get('eldenring.exe', (0, 0))[0]
+    rep = mem.u64(base + SOLO_PARAM_REPOSITORY_RVA)
+    rescap = mem.u64(rep + HOLDERS + HOLDER_SIZE * index)
+    fd4 = mem.u64(rescap + 0x80) if rescap else 0
+    f = mem.u64(fd4 + 0x80) if fd4 else 0
+    if not f or struct_name_at(mem, f) != struct_name:
+        raise ParamNotFound(f'{which}: holder {index} is not {struct_name} (a different game version?)')
+    return _read_rows(mem, f, struct_name, row_size)
+
+
 def read_param(mem: Memory, struct_name: str, row_size: int) -> ParamTable:
-    f = find_param_file(mem, struct_name)
+    return _read_rows(mem, find_param_file(mem, struct_name), struct_name, row_size)
+
+
+def _read_rows(mem: Memory, f: int, struct_name: str, row_size: int) -> ParamTable:
     head = mem.read(f, HEADER_SIZE)
     count = struct.unpack_from('<H', head, 0x0A)[0]
     descs = mem.read(f + HEADER_SIZE, count * DESC_SIZE)

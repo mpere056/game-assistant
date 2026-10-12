@@ -42,16 +42,29 @@ STUCK_MOVE = 0.5
 STUCK_GIVE_UP = 3     # this many stucks within STUCK_WINDOW seconds: give up (re-planning takes seconds,
 STUCK_WINDOW = 60.0   # so "two within 10 s" never happened at a cave mouth: it said "something's in
                       # the way" again and again)
-UNSTICK_S = 0.8       # first, back off and sidestep this long before trying again
+UNSTICK_S = 0.35      # stuck: back off this long...
+# Stuck with nothing a ray can see ahead: most likely something breakable (barrels, crates, pots: they block the
+# character, no ray sees them). Swing at it (BREAK_SWINGS, BREAK_EVERY apart, walking on), then go on; at most
+# BREAK_TRIES times in one place before stepping round it instead. (The user: "maybe it should try hitting them,
+# because maybe it's likely they're breakable" - the walk is mostly in places it has never been.)
+BREAK_SWINGS = 2
+BREAK_EVERY = 0.7
+BREAK_TRIES = 2
+BREAK_PLACE = 2.0      # metres: tries within this of one another are the same place
+AROUND_S = 1.2        # ...then go diagonally forward to one side this long (sides in turn): round a stack of
+                      # barrels or crates the rays can't see (breakable objects: 2026-10-12 at Gatefront)
 CORNER_REACH = 1.0    # don't steer past the next corner of the route until this close to it (narrow
                       # passages: steering 3.5 m ahead cut corners into the rock)
-ENEMY_NEAR = 8.0      # metres from the player or from the next ENEMY_AHEAD metres of the route
-ENEMY_AHEAD = 30.0
-ENEMY_REPEAT = 30.0   # seconds before the same enemy is mentioned again
 ACTION_AT = 1.5       # metres from a ladder/lift/jump start to act on it
 # Walking to a character (and attacking it): steered at its live position every frame once within
 # CHASE_DIRECT metres; further away along the route, which the caller re-plans as it moves.
 CHASE_DIRECT = 20.0
+# Straight at the character only when the navmesh agrees: its route there bending ROUTE_BENDS off the straight
+# line means something the rays don't see is between (2026-10-12 at Gatefront: chasing a soldier 6-18 m off with
+# a clear line at chest height, it ran into a low obstacle twice, stuck 4-7 s each time, while the route went
+# round it). After getting stuck chasing, the route only for STUCK_ROUTE_S.
+ROUTE_BENDS = 2.0
+STUCK_ROUTE_S = 8.0
 RESUME_GRACE = 2.0    # seconds after a pause (the game window out of focus) before "stuck" counts again
 CHASE_LEVEL = 4.0     # ...and no more than this many metres above or below (an Eagle 35 m up a cliff, 18 m
                       # away on the map: straight at it walked into the cliff and got stuck)
@@ -104,7 +117,7 @@ class AutoWalk:
     route: list = field(default_factory=list)
     goal: Vec3 | None = None
     name: str | None = None
-    events: list = field(default_factory=list)   # 'arrived', 'stuck', 'gave_up', 'enemy:<id>', 'paused:<why>',
+    events: list = field(default_factory=list)   # 'arrived', 'stuck', 'gave_up', 'paused:<why>',
                                                  # 'target_gone', 'attacked'
     state: str = 'idle'                 # idle, walking, paused, ladder, lift
     t: float = 0.0
@@ -115,8 +128,11 @@ class AutoWalk:
         self._stuck_pos = None
         self._stucks: list[float] = []  # times of recent stucks
         self._unstick_until = -1.0
+        self._around_until = -1.0
+        self._break_swings: list = []        # times to swing (breaking something)
+        self._breaks: list = []              # (where, how many times) breaking was tried
         self._unstick_side = 'left'
-        self._enemy_said: dict[int, float] = {}
+        self._route_only_until = -1.0
         self._actions: list[_Action] = []
         self._special = None            # (action, started at)
         self._paused_why = None
@@ -129,6 +145,7 @@ class AutoWalk:
     # ---- commands ----
 
     clear_line: bool | None = None      # set by the app: a clear line to the target character (None: not known)
+    ahead_blocked: bool | None = None   # set by the app: a ray sees something just ahead in the walking direction
 
     def start(self, route: list[Vec3], goal: Vec3, name: str | None = None, actions=(),
               target_id: int | None = None, attack: bool = False) -> None:
@@ -171,6 +188,23 @@ class AutoWalk:
             self._resumed_at = self.t
         self._paused_why = None
         p = snap.player.pos
+        # (before both ways of walking: walking to a character said "let me smash it" and never swung,
+        # 2026-10-12, because the chase returned first)
+        if self._break_swings:            # breaking what blocks the way: swing at it, walking into it
+            self.state = 'breaking'
+            taps = ()
+            if self.t >= self._break_swings[0]:
+                self._break_swings.pop(0)
+                taps = ('attack',)
+            if not self._break_swings:
+                self._stuck_since = None
+            return Intent(frozenset({'forward'}), 0.0, taps)
+        if self.t < self._unstick_until:  # backing off after getting stuck...
+            self.state = 'unsticking'
+            return Intent(frozenset({'back', self._unstick_side}))
+        if self.t < self._around_until:   # ...then round it, diagonally forward to one side
+            self.state = 'unsticking'
+            return Intent(frozenset({'forward', self._unstick_side}))
         if self.target_id is not None:
             chase = self._chase(snap, p, dt)
             if chase is not None:
@@ -181,13 +215,9 @@ class AutoWalk:
             return Intent()
         if not self.route:
             return Intent()
-        self._watch_enemies(snap, p)
         special = self._special_action(snap, p)
         if special is not None:
             return special
-        if self.t < self._unstick_until:  # backing off and sidestepping after getting stuck
-            self.state = 'unsticking'
-            return Intent(frozenset({'back', self._unstick_side}))
         target, straight = self._pursuit(p)
         cam = snap.camera
         cam_yaw = _yaw(cam.forward)
@@ -233,9 +263,16 @@ class AutoWalk:
             self.stop()
             return Intent()
         # Straight at it only when close, on its level, with nothing between (a wall: round by the route)
-        if (_flat(p, e.pos) > CHASE_DIRECT or abs(e.pos[1] - p[1]) > CHASE_LEVEL or self.clear_line is False) \
+        if (_flat(p, e.pos) > CHASE_DIRECT or abs(e.pos[1] - p[1]) > CHASE_LEVEL or self.clear_line is False
+                or (_flat(p, e.pos) > 3.0 and (self.t < self._route_only_until or self._route_bends(p)))) \
                 and self.route:
             return None if not taps else Intent(taps=tuple(taps))
+        if self.clear_line is False and not self.route:
+            # A wall between and no route yet: wait for one rather than walk into the wall (eighteenth session:
+            # no route came for 10 s and it walked into the Gatefront barricade again)
+            self.state = 'waiting_route'
+            self._stuck_since = None
+            return Intent(taps=tuple(taps))
         # Close: straight at it. Locked on, the camera follows by itself: don't fight it with the mouse.
         keys = set(min(DIRECTIONS, key=lambda d: abs(_wrap(err - d[0])))[1])
         turn = 0.0 if self._locked else max(-TURN_RATE * dt, min(TURN_RATE * dt, err * TURN_GAIN * dt))
@@ -243,6 +280,22 @@ class AutoWalk:
         if self._check_stuck(p):
             return Intent()
         return Intent(frozenset(keys), turn, tuple(taps))
+
+    def _route_bends(self, p: Vec3) -> bool:
+        """Whether the route ahead strays more than ROUTE_BENDS from the straight line to its end."""
+        pts = self.route[self._progress + 1:]
+        if len(pts) < 2:
+            return False
+        end = pts[-1]
+        dx, dz = end[0] - p[0], end[2] - p[2]
+        n = math.hypot(dx, dz)
+        if n < 1e-6:
+            return False
+        for q in pts[:-1]:
+            t = ((q[0] - p[0]) * dx + (q[2] - p[2]) * dz) / (n * n)
+            if 0.0 < t < 1.0 and abs((q[0] - p[0]) * dz - (q[2] - p[2]) * dx) / n > ROUTE_BENDS:
+                return True
+        return False
 
     def _pause_reason(self, snap: Snapshot) -> str | None:
         if not snap.in_world or snap.player is None or snap.camera is None:
@@ -320,6 +373,21 @@ class AutoWalk:
             self._sprint_since = None
         return self._sprint_since is not None
 
+    def _try_break(self, p: Vec3) -> bool:
+        """Stuck with nothing seen ahead: swing at it (it is likely breakable), unless tried enough here."""
+        for i, (where, n) in enumerate(self._breaks):
+            if _flat(where, p) < BREAK_PLACE:
+                if n >= BREAK_TRIES:
+                    return False
+                self._breaks[i] = (where, n + 1)
+                break
+        else:
+            self._breaks.append((p, 1))
+        self._break_swings = [self.t + k * BREAK_EVERY for k in range(BREAK_SWINGS)]
+        self._stuck_since = None
+        self.events.append('break')
+        return True
+
     def _check_stuck(self, p: Vec3) -> bool:
         """True when the walk just gave up."""
         resumed = getattr(self, '_resumed_at', None)
@@ -330,6 +398,9 @@ class AutoWalk:
             return False
         if self._stuck_since is None:
             self._stuck_since, self._stuck_pos = self.t, p
+            return False
+        if self.ahead_blocked is False and _flat(p, self._stuck_pos) <= STUCK_MOVE \
+                and self.t - self._stuck_since >= STUCK_SECONDS and self._try_break(p):
             return False
         if _flat(p, self._stuck_pos) > STUCK_MOVE:
             self._stuck_since, self._stuck_pos = self.t, p
@@ -342,24 +413,17 @@ class AutoWalk:
             self.events.append('gave_up')
             self.stop()
             return True
-        if len(self._stucks) == 1:  # first: back off and sidestep, then try the same way again
-            self._unstick_until = self.t + UNSTICK_S
-            self._unstick_side = 'left' if self._unstick_side == 'right' else 'right'
+        if self.target_id is not None:   # chasing: the navmesh route from now on, for a while
+            self._route_only_until = self.t + STUCK_ROUTE_S
+        # back off, then round it to one side (the other side next time)
+        self._unstick_until = self.t + UNSTICK_S
+        self._around_until = self._unstick_until + AROUND_S
+        self._unstick_side = 'left' if self._unstick_side == 'right' else 'right'
+        if len(self._stucks) == 1:
             self.events.append('unstick')
             return False
-        self.events.append('stuck')  # again: the caller avoids what's here and plans a new route
+        self.events.append('stuck')  # again: the caller blocks what's here and plans a new route
         return False
-
-    def _watch_enemies(self, snap: Snapshot, p: Vec3) -> None:
-        ahead = self.route[self._progress:self._progress + 12]
-        for e in snap.entities:
-            if not e.hostile or e.dead or e.id == self.target_id:  # not the one we're going for
-                continue
-            near = _flat(e.pos, p) < ENEMY_NEAR or any(
-                _flat(e.pos, q) < ENEMY_NEAR and _flat(q, p) < ENEMY_AHEAD for q in ahead)
-            if near and self.t - self._enemy_said.get(e.id, -1e9) > ENEMY_REPEAT:
-                self._enemy_said[e.id] = self.t
-                self.events.append(f'enemy:{e.id}')
 
     def _special_action(self, snap: Snapshot, p: Vec3) -> Intent | None:
         """Ladders, lifts, jumps: None when walking normally."""

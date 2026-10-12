@@ -50,8 +50,18 @@ def _own_window_in_front() -> bool:
 
 
 LEDGE_STEP, LEDGE_ROLL = 1.5, 3.0   # metres out the ground is probed for a step and for a roll
+AHEAD_PROBE = 1.6                   # metres: the walk's look ahead for walls (stuck with none: break it)
+WALL_NEAR = 1.6                     # metres: a wall or rock this near blocks stepping that way
 LEDGE_DROP = 3.5                    # deeper than this below the feet: a ledge
 MAX_CHASES = 3
+ESCAPE_LINE_EVERY = 20.0            # seconds: "Too many! Getting some room!" at most this often
+REKEY_AFTER = 0.6                   # seconds a held movement key may leave the character idle (_rekey)
+COMING_RANGE = 20.0                 # metres: an enemy coming at the player this near is fought next
+ON_THE_WAY = 6.0                    # metres: an enemy this near coming at the player on the way is fought
+PLAN_TOO_LONG = 12.0                # a plan running this long is taken as hung
+LEG_CHECK_EVERY = 1.0               # seconds between re-checks of the walk's next legs (collision far off isn't
+                                    # loaded when a route is planned: a leg through a wall was accepted)
+NO_ROUTE_KICK = 2.5                 # seconds a walk may go without a route before planning is restarted
 # Orders the planner (core/plan.py) takes: several parts, or conditions, durations, shapes, "along the way"...
 _PLAN_WORDS = re.compile(r"\b(until|till|while|along the way|on the way|on your way|without|circles?|straight|"
                          r"seconds?|minutes?|everything|everyone|alternat\w*|encounter\w*|wander\w*|patrol\w*|"
@@ -114,18 +124,19 @@ class App:
         self._los: tuple = (None, None)    # (target, a clear line to it) from _ledge_loop
         self.fighter = Fighter(getattr(self.adapter, 'attack_windows', lambda m, a: []), self._poise_of,
                                lambda: self._ledges, self._load_chains(),
-                               lambda eid: self._los[1] if self._los[0] == eid else None)
+                               lambda eid: self._los[1] if self._los[0] == eid else None,
+                               reach_of=getattr(self.adapter, 'attack_reach', lambda m, t, a: None),
+                               weapon=getattr(self.adapter, 'player_weapon', lambda: None))
         self._fight_after = None          # the walk is going to a character to fight it
         self.resolver = CommandResolver(self.adapter, ask_model=self._model_order)
         self._walk_cmd = None             # ('start', point, name) or ('stop', why), applied by the fairy loop
         self._walk_route = None           # the companion route the walk follows
         self._route_goal = None           # where the route to a moving character was planned to
         self._took_over = 0.0             # when the player last pressed a movement key themselves
-        self._last_enemy_line = -1e9
         self.keys = self.turner = None
         if self.cfg['auto_walk'] and self.companion and sys.platform == 'win32':
             from .ui.win_input import Keys, KeyWatch, Turner
-            self.keys = Keys(dict(self.cfg['walk_keys']))
+            self.keys = Keys({**config.DEFAULTS['walk_keys'], **self.cfg['walk_keys']})   # (new keys: 'item')
             self.turner = Turner()
             KeyWatch(self._player_key)
         self.q: queue.Queue = queue.Queue()
@@ -431,6 +442,7 @@ class App:
                                                                                       snap.camera.forward[2])),
                                               roll=False)
                     self.keys.set(keys)
+                    self._rekey(snap, dt)
                     if intent.turn:
                         yaw = math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2]))
                         self.turner.turn(intent.turn, yaw)
@@ -449,6 +461,7 @@ class App:
             self._fight_step(snap, dt)
             return
         if not self.walk.active:
+            self.companion.walking = False
             if self.keys.held:
                 self.keys.release_all()
             self._walk_events()
@@ -457,6 +470,9 @@ class App:
             self._follow_entity(snap)
             if not self.walk.active:
                 return
+        self.companion.walking = True
+        if self.companion.mode != 'guide' and not self.walk.route and self.walk.goal is not None:
+            self.companion.guide(self.walk.goal, self.walk.name)   # (a line said meanwhile set it to follow)
         route = self.companion.route
         if route is not None and route is not self._walk_route:  # planned, re-planned or extended
             self.walk.set_route(route, self.companion.route_actions)
@@ -464,11 +480,24 @@ class App:
         if snap.player:
             self._last_player_pos = snap.player.pos
         self.walk.clear_line = self._los[1] if self._los[0] == self.walk.target_id else None
+        self._kick_planning()
+        wall, self._leg_wall = getattr(self, '_leg_wall', None), None
+        if wall is not None and hasattr(self.adapter, 'note_wall') \
+                and time.monotonic() - getattr(self, '_last_wall_replan', 0.0) > 3.0:
+            self._last_wall_replan = time.monotonic()   # a wall across a leg ahead: note it, plan round it now
+            self.adapter.note_wall(*wall)
+            self.companion._route_time = -1e9
+            self.companion.route = None
+            self.walk.events.append('wall_ahead')
+        if self._fight_on_the_way(snap):
+            return
         intent = self.walk.update(snap, dt)
         if snap.screen is not None and snap.screen.focused and self.walk.active:
             self.keys.set(intent.keys)
             for t in intent.taps:
                 self.keys.tap(t)
+            if self._rekey(snap, dt):
+                self.walk.events.append('rekey')
             if intent.turn and snap.camera:
                 yaw = math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2]))
                 self.turner.turn(intent.turn, yaw)
@@ -476,6 +505,76 @@ class App:
             self.keys.release_all()
         self._walk_trace(snap, intent, route)
         self._walk_events()
+
+    def _rekey(self, snap, dt: float) -> bool:
+        """A movement key held and the character standing idle (animation 0), not moving, for REKEY_AFTER s:
+        the game didn't take the press (sent as the window came back into focus, it was lost and never sent
+        again: walks "stuck" for 4 s with forward held and the character idle; 2026-10-12, three times).
+        Release everything; the next frame presses again."""
+        pl = snap.player
+        moving = self.keys.held & {'forward', 'back', 'left', 'right'}
+        if not moving or pl is None or pl.anim is None or pl.anim % 1_000_000 != 0:
+            self._idle_held = None
+            return False
+        held = getattr(self, '_idle_held', None)
+        if held is None or math.hypot(pl.pos[0] - held[1][0], pl.pos[2] - held[1][2]) > 0.1:
+            self._idle_held = (0.0, pl.pos)
+            return False
+        self._idle_held = (held[0] + dt, held[1])
+        if held[0] + dt < REKEY_AFTER:
+            return False
+        self._idle_held = None
+        self.keys.release_all()
+        return True
+
+    def _fight_on_the_way(self, snap) -> bool:
+        """Walking to the next enemy of a fight order (or a plan's fight), another enemy on the way comes at
+        the player: fight it here (the walk doesn't dodge: a hit on the way, twentieth session)."""
+        fighting = getattr(self, '_fight_after', None) is not None or getattr(self, '_fight_all', None) \
+            or (self.plan.active and self.plan.step is not None and self.plan.step.do == 'fight')
+        if not fighting or not snap.player:
+            return False
+        p = snap.player.pos
+        for e in snap.entities:
+            if not e.hostile or e.dead or abs(e.pos[1] - p[1]) > 4.0 or math.dist(e.pos, p) > ON_THE_WAY:
+                continue
+            attacking = any(self.fighter.windows(e.model, a) for a, _t, _l in (e.anims or ()) if a is not None)
+            facing = e.facing is not None and ((e.facing[0] * (p[0] - e.pos[0]) + e.facing[2] * (p[2] - e.pos[2]))
+                                               / (math.hypot(p[0] - e.pos[0], p[2] - e.pos[2]) or 1.0)) > 0.7
+            if attacking or facing:
+                self.walk.stop()
+                self.fighter.start(e.id, e.name)
+                self._fight_after = None
+                return True
+        return False
+
+    def _kick_planning(self) -> None:
+        """A walk without a route for NO_ROUTE_KICK s: restart the companion's planning (a plan that never came
+        back left the walk routeless for 10 s, walking into a barricade)."""
+        now = time.monotonic()
+        if not self.walk.active or self.walk.route or self.companion.route is not None or self.walk.state == 'paused':
+            self._routeless_since = None      # (not while paused: two minutes of restarts every 2.5 s, out of focus)
+            return
+        since = getattr(self, '_routeless_since', None)
+        if since is None:
+            self._routeless_since = now
+        elif now - since > NO_ROUTE_KICK:
+            # Only when no plan is running (or one has run far too long): restarting a running plan threw its
+            # result away, every 2.5 s, and a plan here takes longer: no route for 12 s (twentieth session).
+            planning = getattr(self.companion, '_planning', False)
+            began = getattr(self, '_plan_seen_since', None)
+            if planning:
+                if began is None:
+                    self._plan_seen_since = now
+                    return
+                if now - began < PLAN_TOO_LONG:
+                    return
+            self._plan_seen_since = None
+            self._routeless_since = now
+            self.companion._planning = False         # (a stale plan's result is ignored: its generation)
+            self.companion._route_time = -1e9
+            self.companion._plan_gen += 1
+            self.walk.events.append('replan')
 
     def _walk_trace(self, snap, intent, route) -> None:
         """runtime/walk-<date>.jsonl: where the walk was, what it pressed and why, twice a second and at
@@ -493,7 +592,9 @@ class App:
                'progress': getattr(self.walk, '_progress', None), 'route_points': len(self.walk.route),
                'cam_yaw': round(math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2])), 1)
                if snap.camera else None, 'anim': getattr(snap.player, 'anim', None) if snap.player else None,
-               'entity': getattr(self, '_walk_entity', None)}
+               'entity': getattr(self, '_walk_entity', None),
+               'planning': getattr(self.companion, '_planning', None), 'clear_line': self.walk.clear_line,
+               'companion': getattr(self.companion, 'mode', None)}
         if new_route:
             self._logged_route = route
             pts = getattr(route, 'waypoints', route)
@@ -501,6 +602,17 @@ class App:
                             'waypoints': [[round(v, 1) for v in w] for w in pts],
                             'actions': [str(a) for a in (self.companion.route_actions or [])][:20]}
         self._walk_log(row)
+
+    def _walk_heading_point(self, p):
+        """The point AHEAD_PROBE metres ahead of the player toward the walk's next waypoint (or its goal)."""
+        route, i = self.walk.route, getattr(self.walk, '_progress', 0)
+        q = route[min(i + 1, len(route) - 1)] if route else self.walk.goal
+        if q is None:
+            return None
+        d = math.hypot(q[0] - p[0], q[2] - p[2])
+        if d < 0.3:
+            return None
+        return (p[0] + (q[0] - p[0]) / d * AHEAD_PROBE, p[1], p[2] + (q[2] - p[2]) / d * AHEAD_PROBE)
 
     def _stuck_spot(self, p):
         """The point 1.2 m ahead of the player toward the walk's next waypoint (what it is stuck on)."""
@@ -543,13 +655,15 @@ class App:
             self.keys.set(intent.keys)
             for t in intent.taps:
                 self.keys.tap(t)
+            if self._rekey(snap, dt):
+                self.fighter.events.append('rekey')
             if intent.turn and snap.camera:
                 yaw = math.degrees(math.atan2(snap.camera.forward[0], snap.camera.forward[2]))
                 self.turner.turn(intent.turn, yaw)
         else:
             self.keys.release_all()
         now = time.monotonic()
-        if now - getattr(self, '_last_fight_log', 0.0) > 0.25 or self.fighter.events:
+        if (now - getattr(self, '_last_fight_log', 0.0) > 0.25 and self.fighter.debug) or self.fighter.events:
             self._last_fight_log = now
             self._fight_log({'t': round(now, 3), 'state': self.fighter.state, 'events': list(self.fighter.events),
                              'keys': sorted(intent.keys), 'taps': list(intent.taps),
@@ -565,15 +679,23 @@ class App:
             line = {'won': "Got it! It's down!", 'low_health': "You're hurt! Over to you: heal up!",
                     'target_gone': "It's gone!", 'timeout': "That's taking a while. Over to you!",
                     'next_target': "One down! Now the other one!",
-                    'unreachable': "I can't reach that one!"}.get(ev)
+                    'unreachable': "I can't reach that one!",
+                    'no_flask': "I can't heal: no flask left, or none in your item slot!",
+                    'escape': "Too many! Getting some room!",
+                    'surrounded': "Too many of them! Over to you!"}.get(ev)
             if ev == 'unreachable':     # go on as if it were done, with the others
                 ev = 'target_gone' if not getattr(self, '_fight_all', None) else 'won'
             if self.plan.active and ev != 'fled' and self.plan.on_event(ev):
                 pass                                              # the plan goes on by itself
             elif ev == 'won' and getattr(self, '_fight_all', None):   # 'kill all of them': the next one
-                got = self.resolver.character(self._fight_all, max_range=ALL_RANGE, same_level=True,
-                                              exclude=self.fighter.unreachable)
-                if got is not None:
+                coming = self._coming_at_me(snap)
+                got = None if coming is not None else                     self.resolver.character(self._fight_all, max_range=ALL_RANGE, same_level=True,
+                                            exclude=self.fighter.unreachable)
+                if coming is not None:      # first whatever is coming at us, whatever it is (a wolf, a bat)
+                    name = self._enemy_name(coming)
+                    self._walk_request('start', tuple(coming.pos), name, coming.id, 'fight')
+                    line = 'Got it! ' + (f'Now the {name} coming at us!' if name else 'Now the one coming at us!')
+                elif got is not None:
                     self._walk_request('start', got.point, got.name, got.entity_id, 'fight')
                     line = (line + ' ' if line and 'reach' in line else 'Got it! ') + f"Next {got.name or 'one'}!"
                 else:
@@ -583,10 +705,15 @@ class App:
                         line = "Got it! That's all of them! Now the next part!"
             elif ev in ('won', 'target_gone') and self._next_order():
                 line = "Got it! Now the next part!"
-            elif ev in ('low_health', 'timeout', 'fled'):
+            elif ev in ('low_health', 'timeout', 'fled', 'surrounded'):
                 self._fight_all = None if ev != 'fled' else getattr(self, '_fight_all', None)
                 if ev != 'fled':
                     self._then = []
+            if ev == 'escape':   # a crowd: find open ground to run to (in the background), say so once
+                threading.Thread(target=self._plan_escape, daemon=True).start()
+                if time.monotonic() - getattr(self, '_last_escape_line', -1e9) < ESCAPE_LINE_EVERY:
+                    line = None
+                self._last_escape_line = time.monotonic()
             if ev == 'walled':  # a wall between: round it by the navmesh, then the fight again
                 tid = self.fighter.target_id
                 e = next((x for x in snap.entities if x.id == tid), None)
@@ -616,7 +743,7 @@ class App:
         while True:
             time.sleep(0.1)
             moving = self.plan.active and self.plan.step is not None and self.plan.step.do == 'move'
-            walking_to = self.walk.active and self.walk.target_id is not None
+            walking_to = self.walk.active          # (any walk: what is just ahead, and the target if any)
             if not (self.fighter.active or moving or walking_to):
                 self._ledges = ((), ())
                 continue
@@ -631,6 +758,10 @@ class App:
                     for dist in (LEDGE_STEP, LEDGE_ROLL):
                         x, z = p[0] + math.sin(a) * dist, p[2] + math.cos(a) * dist
                         rays.append(((x, p[1] + 2.0, z), (x, p[1] - LEDGE_DROP, z)))
+                for k in range(8):   # walls and rocks within WALL_NEAR at chest height (backing off)
+                    a = math.radians(k * 45)
+                    rays.append(((p[0], p[1] + 1.0, p[2]),
+                                 (p[0] + math.sin(a) * WALL_NEAR, p[1] + 1.0, p[2] + math.cos(a) * WALL_NEAR)))
                 tid = self.fighter.target_id if self.fighter.active else self.walk.target_id
                 target = next((e for e in snap.entities if e.id == tid), None)
                 if target is not None:   # a clear line from the chest to it (a wall between: no swing)
@@ -640,13 +771,44 @@ class App:
                     if d > 0.5:
                         b = tuple(a[i] + (b[i] - a[i]) * (d - 0.4) / d for i in range(3))
                     rays.append((a, b))
+                legs_at, legs = None, []
+                if self.walk.active and self.walk.route and time.monotonic() - getattr(self, '_last_leg_check', 0.0) \
+                        > LEG_CHECK_EVERY:
+                    self._last_leg_check = time.monotonic()
+                    route, i = self.walk.route, getattr(self.walk, '_progress', 0)
+                    pts = [p] + list(route[i + 1:i + 3])
+                    legs = [(u, v) for u, v in zip(pts, pts[1:]) if math.hypot(v[0] - u[0], v[2] - u[2]) > 1.0]
+                    legs_at = len(rays)
+                    for u, v in legs:
+                        for h in (0.5, 1.2):
+                            rays.append(((u[0], u[1] + h, u[2]), (v[0], v[1] + h, v[2])))
+                ahead_at = None
+                if self.walk.active:     # just ahead along the walk, knee and chest high (walls; not barrels)
+                    q = self._walk_heading_point(p)
+                    if q is not None:
+                        ahead_at = len(rays)
+                        for h in (0.6, 1.2, 0.35):   # (shin high: low walls and rubble; slopes by their normal)
+                            rays.append(((p[0], p[1] + h, p[2]), (q[0], p[1] + h, q[2])))
                 hits = self.adapter.raycast(rays, timeout=0.5)
                 if target is not None:
-                    self._los = (target.id, not hits[16].hit)
+                    self._los = (target.id, not hits[24].hit)
+                low = hits[ahead_at + 2] if ahead_at is not None else None
+                self.walk.ahead_blocked = None if ahead_at is None else \
+                    any(hits[ahead_at + k].hit for k in range(2)) \
+                    or bool(low.hit and low.normal and abs(low.normal[1]) < 0.6)
+                if legs_at is not None:
+                    for k, (u, v) in enumerate(legs):
+                        for j in range(2):
+                            h = hits[legs_at + 2 * k + j]
+                            if h.hit and h.pos and h.normal and abs(h.normal[1]) < 0.6:
+                                n = math.hypot(v[0] - u[0], v[2] - u[2]) or 1.0
+                                self._leg_wall = (h.pos, ((v[0] - u[0]) / n, 0.0, (v[2] - u[2]) / n))
+                                break
+                walls = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8) if hits[16 + k].hit)
                 step = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8) if not hits[2 * k].hit)
                 roll = tuple(float((k * 45 + 180) % 360 - 180) for k in range(8)
                              if not hits[2 * k].hit or not hits[2 * k + 1].hit)
-                self._ledges = (step, roll)
+                self._ledges = (step, roll, walls)
             except Exception:
                 self._ledges = ((), ())
 
@@ -665,6 +827,93 @@ class App:
             self.fighter.chains_changed = False
         except OSError:
             pass
+
+    def _coming_at_me(self, snap):
+        """The nearest enemy of any kind coming at the player (fighter._engaged, out to COMING_RANGE): fought
+        before the next one of a 'kill all the soldiers' order (the user: "anything targeting me would get in
+        the way")."""
+        if not snap.player:
+            return None
+        p = snap.player.pos
+        best = None
+        for e in snap.entities:
+            if e.id in self.fighter.unreachable or not self.fighter._engaged(e, p, reach=COMING_RANGE):
+                continue
+            d = math.dist(e.pos, p)
+            if best is None or d < best[0]:
+                best = (d, e)
+        return best[1] if best else None
+
+    def _enemy_name(self, e) -> str | None:
+        if e.name:
+            return e.name
+        try:
+            return (self.adapter.knowledge(e.type_id) or {}).get('name') if hasattr(self.adapter, 'knowledge') else None
+        except Exception:
+            return None
+
+    def _plan_escape(self) -> None:
+        """Open ground to run to out of a crowd, and a navmesh route there (the fighter follows it). Candidate
+        spots 12 and 18 m away in 16 directions, none near an enemy nor toward them; scored on openness (rays
+        all round at chest height: a corner scores low), distance from the enemies and heading away; the best
+        few are planned to, the first reachable without a long detour taken. (Twenty-first session: running
+        straight away from them backed into an enclosed corner and rolled into its wall again and again.)"""
+        try:
+            snap = self.adapter.snapshot()
+            if not snap.in_world or not snap.player or not hasattr(self.adapter, 'route'):
+                return
+            p = snap.player.pos
+            self.fighter.escape_note = 'planning'
+            foes = [e for e in snap.entities if e.hostile and not e.dead and math.dist(e.pos, p) < 25.0]
+            close = [math.atan2(e.pos[0] - p[0], e.pos[2] - p[2]) for e in foes if math.dist(e.pos, p) < 10.0]
+            cands = []
+            for k in range(16):
+                a = math.radians(k * 22.5)
+                # how far this way is from the nearest enemy's direction (degrees): with them on every side the
+                # widest gap still counts (excluding all within 60 degrees of any left none when surrounded)
+                clear = min((abs(math.degrees(math.atan2(math.sin(a - b), math.cos(a - b)))) for b in close),
+                            default=180.0)
+                for dist in (12.0, 18.0):
+                    c = (p[0] + math.sin(a) * dist, p[1], p[2] + math.cos(a) * dist)
+                    near = min((math.hypot(e.pos[0] - c[0], e.pos[2] - c[2]) for e in foes), default=99.0)
+                    if near < 4.0 or clear < 25.0:
+                        continue
+                    cands.append((c, near, clear))
+            if not cands:
+                self.fighter.escape_note = 'no open way'
+                return
+            downs = self.adapter.raycast([((c[0], p[1] + 6.0, c[2]), (c[0], p[1] - 8.0, c[2])) for c, _n, _t in cands],
+                                         timeout=1.0)
+            grounded = [((c[0], h.pos[1], c[2]), n, t) for (c, n, t), h in zip(cands, downs) if h.hit and h.pos
+                        and abs(h.pos[1] - p[1]) < 4.0]
+            rays = []
+            for c, _n, _t in grounded:
+                for j in range(8):
+                    b = math.radians(j * 45)
+                    rays.append(((c[0], c[1] + 1.0, c[2]), (c[0] + math.sin(b) * 4.0, c[1] + 1.0,
+                                                              c[2] + math.cos(b) * 4.0)))
+            hits = self.adapter.raycast(rays, timeout=1.0) if rays else []
+            scored = []
+            for i, (c, near, clear) in enumerate(grounded):
+                open_ = sum(1 for h in hits[8 * i:8 * i + 8] if not h.hit) / 8.0
+                scored.append((open_ * 3.0 + min(near, 20.0) / 5.0 + min(clear, 90.0) / 45.0, c))
+            scored.sort(reverse=True)
+            for _score, c in scored[:3]:
+                if not self.fighter.active or self.fighter._escaping_since is None:
+                    return
+                r = self.adapter.route(p, c, budget_s=0.8)
+                if r is None or not r.reaches_goal:
+                    continue
+                length = sum(math.dist(u, v) for u, v in zip(r.waypoints, r.waypoints[1:]))
+                if length > 2.0 * math.dist(p, c) + 4.0:
+                    continue
+                self.fighter.escape_route = list(r.waypoints)
+                self.fighter.escape_note = f'route {length:.0f} m'
+                return
+            self.fighter.escape_note = 'no route'
+        except Exception as ex:
+            self.fighter.escape_note = f'error {type(ex).__name__}'
+            return
 
     def _poise_of(self, type_id: int | None) -> float | None:
         """The enemy kind's poise (how much it takes to flinch it), from the game's NpcParam."""
@@ -685,10 +934,8 @@ class App:
     def _walk_events(self) -> None:
         while self.walk.events:
             ev = self.walk.events.pop(0)
-            if ev.startswith('enemy:'):
-                if time.monotonic() - self._last_enemy_line > 10.0:
-                    self._last_enemy_line = time.monotonic()
-                    self._navi_line('Careful, an enemy ahead!')
+            if ev == 'break':
+                self._navi_line("Something's in the way. Let me smash it!")
             elif ev == 'stuck':  # avoid what's here (a gap link that doesn't work) and plan again
                 if snap_pos := getattr(self, '_last_player_pos', None):
                     if hasattr(self.adapter, 'avoid_links_near'):
@@ -824,7 +1071,8 @@ class App:
             self.companion.speaking = bool(self.speaker and self.speaker.speaking)
             if hasattr(self.adapter, 'observe'):  # the route planner learns where the player goes
                 self.adapter.observe(snap)
-            view = self.companion.update(snap, start - last)
+            frame_dt = min(0.1, max(1e-3, start - last))   # the real time since the last frame (when frames are
+            view = self.companion.update(snap, start - last)   # slow, the fighter's timing must still be real)
             self.last_view = view
             while self.companion.events:  # e.g. arrived somewhere it was guiding to
                 event = self.companion.events.pop(0)
@@ -867,7 +1115,7 @@ class App:
                         self.speaker.say(line)
             last = start
             try:
-                self._walk_step(snap, 1 / FPS)
+                self._walk_step(snap, frame_dt)
             except Exception as e:  # never leave keys held down
                 if self.keys:
                     self.keys.release_all()

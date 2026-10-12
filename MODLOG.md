@@ -985,3 +985,225 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
 - Live: from the stuck spot the route now goes north round the barricade (27 m, every leg clear); from
   where the walk began, east round it (36 m); a fresh adapter loads the blocks and goes round at once.
 - 173 tests pass.
+
+## 2026-10-11: real reach; groups; terrain when backing off; healing
+- Eleventh session (user): navigation round the barricade worked; combat good; but a bat's reach was
+  misjudged, and a fight against several enemies ended in death (log: 45 s, 32 rolls, 4 swings, 47 target
+  switches). The user asked for each enemy's real reach and the player's weapon's, steady targeting that
+  still reacts to every enemy, backing off with terrain in mind, and healing only when safe.
+- Reach from the game's data: an attack animation's hit events name behaviour judges (TAE event 1, param 2);
+  BehaviorParam row 200000000 + the NPC's behaviorVariationId * 1000 + judge (holder 12; refType 0 ->
+  AtkParam_Npc, holder 7; 1 -> a bullet); AtkParam hit spheres (16: radius, one or two attachment points);
+  attachment points' reach from the model's centre with the limb stretched out (games/eldenring/flver.py,
+  FLVER2 dummies and bones from chr/c####.chrbnd.dcx; get_attacks now also saves "judges" and
+  "dummy_reach"). Godrick Soldier swings: 2.6 m from its centre (sword tip 2.3 + 0.3; the thrust 2.34);
+  bat: wings/claws 2.2-2.3 m, dives a 1.0 m body slam (all the distance is the dive).
+- How far an attack carries the enemy (a lunge, a dive) is learned live per attack (kept with the combos),
+  1.5 m until seen, or its current speed toward the player times the time to the hit if more. An attack
+  threatens when the player is within reach + travel + 0.4 + 0.4 m; unknown reach: the old fixed 4 m.
+- The player's weapon: the right-hand slot from the player's game data (GameDataMan 0x3D61F98 -> +0x08
+  -> equipped ids at +0x398, found by scanning and checked against EquipParamWeapon: Longsword +2) and its
+  wepType; reach by type (straight sword 1.8 m from the target's edge, spear 2.4, ...), raised by swings
+  that took health off the target at longer gaps (at most +0.7). "Armoured" now needs the hit to have
+  landed (health down) without a flinch; "shield" needs the swing to have been in reach.
+- Bat: a target flying off fast (> 2.5 m/s away) isn't chased; a moving target's gap not shrinking isn't a
+  wall. Learning (combos, lunges) now runs every frame, also while a roll's direction is held.
+- Groups: a target is kept 2.5 s at least (sooner: dead, far, unreachable); when the game's lock drifts to
+  another enemy meanwhile it unlocks and locks back on to its own; a new target by score: in front, then
+  the weakest, then the nearest. In a group (2+ within 6 m) it waits 1 m further out and backs away from
+  the enemies' middle.
+- Terrain: 8 rays at chest height find walls and rocks within 1.6 m (with the ledge probes); stepping and
+  backing off go the nearest clear way (no wall, no drop).
+- Healing: at 50 % health a flask (the item key, R by default; new keys are now merged into saved
+  settings) only when no hit is predicted within the 1.6 s the drinking leaves no roll, and no enemy can
+  close in and swing by then (its speed, a lunge, its reach); otherwise it backs away to make room first.
+  A drink that heals nothing twice: "no flask left, or none in your item slot", no more tries. Handing
+  back at 20 % health while it can heal, 35 % when it can't.
+- 183 tests pass.
+- Twelfth session (user, 23:53): flask drinking worked (331 -> 581 health), but the last soldier was fought
+  for 33 s with no roll and one swing. Log: target_windows empty for every attack. Cause (a regression from
+  this round): get_attacks now gives variant models (c4311) an entry of their own holding only
+  "dummy_reach", and attack_windows used that entry instead of falling back to the base model (c4310) with
+  the timings: no attack was seen, so no rolls and no openings. Fixed (fall back when an entry has no
+  "attacks"); a regression test. 184 tests pass.
+
+## 2026-10-12: crowds: out of the middle
+- Thirteenth session (user): fights better; six soldiers killed one after another without damage; then a
+  group: up to eight soldiers within 6 m (runtime/combat-20261012.jsonl, 22 s, 18 rolls, 1 swing, 673 -> 173,
+  death). Every hit came the same way: swings from different soldiers ~0.5 s apart, while a second roll
+  (pressed 0.46-0.68 s into the first) waited to come out at ~0.95 s.
+- Rolling can't answer a crowd. Now with 3+ enemies within 5 m it sprints away from their middle (the
+  nearest clear way; still rolling when a hit comes, with the sprint let go 0.6 s before a predicted hit:
+  sprint and roll share a key) until at most one is within 8 m (or 8 s), then fights the nearest (chasers
+  string out). Caught in a crowd a fourth time in a fight: "Too many of them! Over to you!". 187 tests pass.
+- Fourteenth session (user): the crowd escape ran "ok" but hits still landed and the player died; and many
+  openings were missed. Log: a 24 s fight with one soldier, 5 swings: several times in reach with the camera
+  90 degrees off the target (no swing: the game had dropped the lock when the soldier walked 9 m off, the
+  fighter still believed in it; and its "unlock" press then locked someone else); a swing pressed during a
+  roll was swallowed but still held the next swing back 0.9 s. The crowd (5-7 soldiers): the escape was a
+  backpedal (locked on) without sprint (dropped near hits, nearly always), so they kept pace; hits landed
+  while a second roll waited; "surrounded" handed back in the middle of them.
+- Now: no lock press when the camera stays off the target: the belief is dropped, the camera turned to the
+  target, and lock on once it's in front; a swing press with no attack animation 0.35 s later doesn't count;
+  the escape turns the lock off and keeps the sprint held (a roll lets go of it for one frame first); giving
+  up on a crowd, or low health with enemies within 8 m, first runs clear (nobody within 15 m, or 12 s), then
+  hands back. 189 tests pass.
+
+## 2026-10-12: imported attacks, attacking when safe, reach learned from hits
+- Fifteenth session (user): still many missed openings; hits even one on one ("maybe it's not taking the
+  enemies' weapons into account"); and on arrival it waited for soldiers to draw their weapons.
+- Hits: five of 179 came from 5003008 (a weapon moveset), which had no hit timings: its TAE entry has no
+  events and imports another animation's (anim file header type 1, source id at +0x18: 1003008). The parser
+  ignored imports. Now tae.imports and get_attacks follow them (14 more attack animations; 5003008:
+  1.533-1.6 s, reach 2.6 m). The other hits: rolls that couldn't come out in time (a roll right after a
+  roll, or during a drink).
+- Weapons: all 221 Godrick Soldier NpcParam rows share behaviour variation 43100, and all six model
+  variants (c4311-c4316) have the same sword attachment points: the weapon models aren't in the character
+  files. So reach is now also learned from hits: when health drops while an enemy's hit window is out, an
+  attack's reach is raised to the distance it hit from (kept with the combos, as "_reach").
+- Attacking: a normal enemy (known poise <= 60) is now struck whenever no hit from anyone can land within
+  0.75 s (a light attack lands in ~0.35 s and flinches it), no shield seen: no waiting for an opening or for
+  it to draw its weapon. 193 tests pass.
+- Sixteenth session (user): attacks now start at once, but many openings still went by; one on one it
+  "kept dodging and barely attacked", the camera often facing away. Log (89 s, 47 rolls, 5 swings): of 199
+  moments in reach without a swing, many had nothing coming and the fighter free, but the camera was more
+  than 40 degrees off the target (no swing allowed): it only turned the camera when it believed the lock
+  was off, a belief the game often breaks; "closing in" at 0.45 m then sidestepped as "blocked" (9 times);
+  and one swing that went wide was taken for a shield, which turned the attack-when-safe rule off for the
+  rest of the fight.
+- Now: the camera is turned to the target whenever it is more than 25 degrees off, lock or no lock (a lock
+  on another enemy moves along); in reach with the camera off it turns instead of walking; a swing more than
+  10 degrees off holds the direction to the target (unlocked, the character turns into it); a shield is
+  only concluded from a swing within 20 degrees of the target, and believed 8 s. The fight log has the
+  camera's offset ("cam_err") and the lock belief. The test simulation now turns its camera. 197 tests pass.
+
+## 2026-10-12: after an escape, the middle tier, no "enemy ahead"
+- Seventeenth session (user): better; but after getting room it ran back into a group; several hits; a
+  stronger unit among the soldiers; and remove "Careful, an enemy ahead!".
+- Log: (1) the escape got 20 m clear, then its old target (in the group) was "fleeing" (> 14 m), so the walk
+  chased it straight back into four enemies: a 424-damage hit. Now during an escape and for 6 s after it
+  there is no chase; the fight takes the nearest enemy, and waits for chasers further than 5 m instead of
+  running at them. (2) A swing from 2.4 m fell short and the soldier's attack landed: attack-when-safe now
+  only from 0.3 m inside the reach. (3) The stronger unit (c4351, poise 65, multi-hit attacks) was fought
+  with the rules for tough enemies (poise > 60): openings needing 1.35 s it never left, a 2.5 s idle wait:
+  27 s without a swing, 521 -> 10 health. Now a middle tier up to poise 120: openings with 0.8 s left, an
+  idle wait of 0.5 s, the closer spacing (interrupting and attack-when-safe stay for <= 60).
+- The "Careful, an enemy ahead!" warning is gone (autowalk no longer watches for enemies along the route).
+- 200 tests pass.
+- Eighteenth session (user): attacks waited for soldiers to draw again, and the walk got stuck at the Gatefront
+  barricade again. (1) A regression from the last change: the "0.3 m inside the reach" margin was put on the
+  decision to go in, so an idle soldier just out of reach was never walked up to. Now the margin is only on
+  the swing (it walks in that far first); a regression test. (2) Walk log: the walk to the soldier behind the
+  barricade had no route for its whole 10 s (the planner, asked afterwards from the same spot, routed round it
+  in 2.1 s), so it went straight at the soldier into the barricade. Now a walk with a wall between it and its
+  target and no route waits for one instead; a walk without a route for 2.5 s restarts the companion's
+  planning; the walk log has the planning flag, the clear line and the companion's mode. 202 tests pass.
+
+## 2026-10-12: barrels; a soldier running in
+- Nineteenth session (user, screenshot): stuck against a stack of barrels at Gatefront; and a hit that should
+  have been dodged.
+- Barrels: live rays pass through them with every filter tried (terrain 0x5D and 18 others): breakable
+  objects block the character but no ray sees them; and they stand inside the 6.6 m navmesh face the
+  character stood on, so no face (or crossing) could be avoided: the re-plan after "stuck" was the same
+  straight leg. Now: a stuck spot is kept (world_blocks.json, "stuck_spots"); its face is not used by later
+  plans; a route leg passing within 1 m of one gets a waypoint 1.8 m beside it (the shorter side not near
+  another stuck spot); and a stuck walk backs off 0.35 s then goes diagonally forward to one side 1.2 s
+  (sides in turn) before trying again. Live: the Gatefront route now goes round the barrels at (60.2, 65.5).
+- The hit: the third swing of a combo on one soldier while the next ran in from 5.4 m; it swung on arrival,
+  during ours (no roll possible). Now no swing or combo press while another enemy runs toward the player
+  (> 1.5 m/s) close enough to arrive and swing before a roll is possible again.
+- 205 tests pass.
+- The user: learning from bumping into things only helps the second time, and the assistant mostly goes
+  where it has never been; things that block the character but no ray sees are likely breakable: hit them.
+  Now a stuck walk with nothing seen just ahead (two rays, knee and chest high, 1.6 m toward the next
+  waypoint, cast with the ledge probes during any walk) swings at it twice while walking into it ("Something's
+  in the way. Let me smash it!"), at most twice in one place; a wall seen ahead, or breaking that didn't clear
+  it: stepping round and re-planning as before (stuck spots are still kept as a fallback). 207 tests pass.
+
+## 2026-10-12: smashing for real; walls found on the way; rolls away by default
+- Twentieth session (user): many hits that should have been dodged; stuck at walls the navigation should know;
+  "Something's in the way. Let me smash it!" without a swing.
+- Smashing (and stepping round) never happened when walking to a character: the chase returned before those
+  moves (four "smash" lines, no swing). Now they come first, in both ways of walking; a test.
+- Walls: (a) a leg through a wall was accepted at planning time (17+ m off; that collision likely wasn't
+  loaded yet): the walk now re-checks its next two legs with rays every second, and a wall found blocks that
+  crossing (kept) and the route is planned again at once. (b) After "stuck", no route came for 12 s: my
+  planning restart (every 2.5 s) threw away the running plan's result each time (a plan here takes longer).
+  Now it restarts only when no plan runs, or one has run 12 s.
+- Hits (9): five came from an attack following too soon after another (a roll only every ~0.95 s), after
+  forward rolls. The soldiers chain a lot (the logs: 42 attacks seen followed by another, 2 ending alone), so
+  rolls now go away from the attacker unless the attack is known to end on its own (seen twice: learned and
+  kept, "_solo"; seeded from the logs). One swing in a wind-up met an attack that doesn't flinch: attack-when-
+  safe no longer fires in an attack's wind-up (the interrupt rule, which knows armoured attacks, does). One
+  hit while walking between fights: during a fight order, an enemy within 6 m coming at the player is fought
+  there. Rolls in a sprint mostly didn't come out (9 of 12): the escape lets go of the sprint 0.25 s before a
+  predicted hit (rolls in 221xx animations came out 34 of 35: fine).
+- 212 tests pass.
+
+## 2026-10-12: escaping to open ground
+- Twenty-first session (user, screenshot): "Too many! Getting some room!" again and again while it rolled
+  into a wall: the escape ran straight away from the enemies' middle (walls only checked 1.6 m round, rolls
+  not at all) into an enclosed corner. The user: escape with proper navigation, toward open space.
+- Now the app picks open ground when an escape starts: spots 12 and 18 m away in 16 directions, none within
+  6 m of an enemy nor toward one; scored on openness (8 rays round each at chest height, 4 m: a corner scores
+  low), distance from the enemies and heading away; the best three are planned to on the navmesh, the first
+  reachable without a long detour taken. The fighter follows that route at a sprint, and rolls along it;
+  until it comes, straight away round walls and drops as before. Rolls never go into a wall the probes see
+  when another way is clear. The escape line is said at most every 20 s. Live (no enemies): open ground 12 m
+  west, route in 2.2 s. 214 tests pass.
+
+## 2026-10-12: rolls chosen in the world, whatever comes at the player, lost key presses
+- Twenty-second session (user): "kill all the soldiers around here" still took too many hits (673 -> 59 health
+  in a crowd it never got out of, 673 -> 26 in a fight with soldiers and a wolf); other enemies joining (wolves,
+  bats) must be fought too; navigation still gets stuck.
+- The day's 62 hits, by what came before: 39 right after a roll, 10 while staggered, 9 during our own swing,
+  4 unpredicted. The rolls: keys "back"/"forward" are relative to the camera, and with the lock off (escaping,
+  or the game dropped it) the camera points anywhere, so "away" rolls landed by other soldiers or into walls;
+  pressed in a roll's tail they only come out ~0.95 s in, after the next hit. Now each of the 8 directions is
+  turned into the world and judged by where the roll lands (2.6 m on): away from the attacker when its next hit
+  follows too soon (sideways to a lunge), else past its side; away from every other enemy near the landing
+  spot; along the escape route; not into a wall while another way is clear; never off a ledge.
+- Backing off and escaping head for the widest gap between the enemies near (16 headings, each enemy weighted
+  by nearness, walls and drops counted), not away from their middle; the escape no longer sidesteps when slow
+  (rolls cut its steps short: it flailed for 15 s pinned at 0.45 m). The open-ground search no longer drops
+  every direction within 60 degrees of an enemy (surrounded, it found none): it scores how far each way is
+  from them. The combat log now has the player's position, every enemy near (attack, timing, heading,
+  facing), the roll's heading and how the open-ground search went (hits from others couldn't be told apart).
+- Swings: none while another enemy stands within 2 m facing the player (it can hit mid-swing). A soldier's
+  long thrust (x003008) doesn't flinch: a swing into its wind-up landed, a reaction layer played over it and it
+  hit anyway (three times). Seeded as armoured, and the learning fixed: a reaction alone doesn't count as
+  interrupted when the attack goes on (learned ones kept with the combos).
+- Whatever is on the player is fought: an engaged enemy (attacking, or facing and near or coming closer) that
+  is a much better target than the current one is switched to (a wolf biting while the soldier stands off);
+  when a target dies the next is any engaged enemy within 8 m; a "kill all the soldiers" order fights whatever
+  is coming at the player (any kind, 20 m) before walking to the next soldier.
+- Navigation: three walks "stuck" with forward held and the character idle (animation 0): the press sent as the
+  window came back into focus was lost and never sent again. Now a movement key held 0.6 s with the character
+  idle and not moving is released and pressed again. Chasing a soldier with a clear line at chest height, it ran
+  into something low twice (stuck 4-7 s; smashing didn't help) while the navmesh route went round: now it goes
+  straight at a character only when the route there is straight (no waypoint 2 m off the line), and after
+  getting stuck chasing it follows the route for 8 s; the walk's look-ahead also probes shin-high (walls only,
+  by the hit's normal). No planning restarts while paused; the walk and fighter get the real frame time.
+- 224 tests pass.
+
+## 2026-10-12: fighting packs instead of fleeing them; a walk left without a route
+- Twenty-third session (user): better, but it still didn't kill all the soldiers. The log: four soldiers killed
+  one at a time, and no hit taken in the whole fight (the rolls chosen in the world: 0 damage in 36 s among 3-6
+  soldiers). Then a pack of 6-8: an escape from every 3 within 5 m, four in 36 s, the pack (as fast as a sprint)
+  back on it each time, not one swing, and "surrounded" handed back with full health (673/673). In that pack
+  4+ were within 5 m only 5 of 38 s.
+- Now an escape needs 4 within 5 m (or 3 while it is being hit: a hit within 4 s); "surrounded" only when it is
+  also hurt (below half health); otherwise it goes on. A soldier running in held back every swing in a pack
+  (someone always runs in): for one swing it now counts only one that could arrive and still wind up its hit
+  within the swing (a combo keeps the full time). The fight's 90 s limit is per target, not per fight.
+- A boar asked for was left for a soldier coming over (the game's lock-on moved to it): the enemy named in the
+  order is only left for one that attacks (or one right there, nearer), and after that one is down it goes
+  back to the named one.
+- A walk to a soldier behind a wall waited 15 s with no route: the fairy took "within 15 m" as arrived,
+  switched to showing it and threw away the route it was planning. While the character walks itself and has
+  no route, the fairy keeps planning (and is put back to guiding if a line switched it to following).
+- The old assistant (before a restart) kept a fight "on" through a death and logged that frozen moment 4 times
+  a second for three hours (17 MB): a fight now ends after 20 s without a live game frame, and nothing is
+  logged while out of the game.
+- A rough pack simulation (scratch) reproduced the flee-forever loop; it is too harsh on long thrusts to tune
+  damage with. 229 tests pass.
