@@ -5,7 +5,7 @@ I looking at, and what is it weak to?", from the game's own data, and later walk
 does tasks for you. It is built to work across games: everything game-specific lives in one
 adapter per game, and the rest is shared.
 
-**Games:** Elden Ring (connected). Minecraft planned next. Others possible later.
+**Games:** Elden Ring (connected). Minecraft Java 26.3: connected (questions, the fairy, places, walking with mining and building, gathering and crafting, orders thought through, fighting; docs/games/minecraft.md). Others possible later.
 
 **Status:** phase 1 done (the Elden Ring adapter passes its live tests). Built and tested without
 the game, waiting on a game test: questions (phase 2), voice (2b), the fairy companion (3) and route

@@ -1291,3 +1291,237 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   only counts if it reaches the player when it hits; the unchecked table is ignored. Bats now 2.5 of 3 killed,
   7.8 hits landed, 6 taken; the c4351 duel and the pack unchanged (no learned c4350 table hurts there).
   244 tests pass.
+
+## 2026-10-12: Minecraft Java 26.3: the bridge mod and the adapter (phase 7)
+- The user: make the assistant work for Minecraft Java 26.3. Choices (asked): the bridge inside this repository
+  (`bridges/minecraft/`), build tools downloaded into the project, Fabric and the mod installed by me, talking
+  and the fairy first.
+- Fabric chosen: Fabric API has full 26.3 releases (0.162.0+26.3, 2026-10-06); NeoForge only betas. Versions
+  from Fabric's example mod (26.3 branch): Loader 0.19.5, Loom 1.18-SNAPSHOT, Gradle 9.7.1, Java 25.
+  Minecraft 26.x is no longer obfuscated: the mod uses the game's own names, checked with javap against the
+  26.3 jars (several changed since 1.21: `Camera.forwardVector()/upVector()/leftVector()/getFov()`,
+  `GameRenderer.mainCamera()`, `Gui.screen()`; the window and input are SDL now, not GLFW).
+- Downloads (allowed): Temurin JDK 25.0.4.1 (141 MB zip) into `.local/tools/`; the Fabric example mod template;
+  the Fabric installer 1.1.2 (sha1 checked) and Fabric API 0.162.0+26.3 (sha512 checked). The build fetched
+  Gradle, Loom and Minecraft into `.local/gradle`. The installer added "fabric-loader-26.3" to the launcher
+  (profiles backed up to `.local/tools/dl-fabric/`); Fabric API and `gabridge-0.1.0.jar` are in
+  `%APPDATA%\.minecraft\mods`. Minecraft and its launcher were running meanwhile: the new installation shows
+  after a restart.
+- The bridge (Bridge.java, Snapshots.java, Rays.java, a mixin at the end of `Minecraft.runTick`): every frame
+  while asked, a snapshot made on the game's thread; raycasts queued to the next frame; a local socket.
+  Publishes nothing on a server. Builds clean (`Build-MinecraftBridge.bat`).
+- The adapter: thread-local connections, a 10 ms snapshot cache, X mirrored both ways (Minecraft is
+  right-handed; the core's "clockwise is right"), creature kinds keyed by a CRC of their id, the game's
+  crosshair creature as the target and its block for "what is that?" (a new optional `crosshair_facts()`
+  the look-at tool adds), Minecraft Wiki web search, speech vocabulary, Minecraft's controls (sprint Ctrl,
+  jump Space) as the game's key defaults (the user's own changes still win).
+- The core: the agent's instructions had Elden Ring-only parts (resistance fields, the offline wiki, Sites
+  of Grace, example answers, picture hints); moved word for word to the Elden Ring adapter
+  (`prompt_notes`, `prompt_examples`, `look_hints`); its prompt is the same apart from one line's place and
+  "use the wiki for what it does" now "look up what it does". The fighter's learned data is per game
+  (`.local/<game>/chains.json`). The adapter check's messages name the game.
+- Tests: 6 for the adapter against a stand-in bridge (left/right, camera, window, creatures, crosshair,
+  rays both ways, menus, servers, no bridge). Not yet run in the game.
+
+## 2026-10-13: Minecraft live; places and walking
+- First run in the game (user, screenshot): connected; snapshot 0.9 ms, two rays 4.5 ms; "what is that animal?"
+  (panda, 13 blocks; ocelot) right; taming answered from the Minecraft Wiki; the speech bubble shows. "Where am
+  I?" had no tool ("I can't read your exact location").
+- Bridge: `world` in each snapshot (biome, the overworld clock's time of day and day, rain, thunder, light;
+  26.x keeps time in world clocks: `Level.getOverworldClockTime()`); `names` and `locate` (structures, structure
+  tags, biomes: the game's own findNearestMapStructure / findClosestBiome3d, run on the single-player server's
+  thread); `grid` (one byte per block for walking).
+- Adapter: where_am_i (dimension, biome, F3 coordinates, day, time, weather, light), locate (what players call
+  places matched to the game's ids: tags first, then structures, then biomes; a few aliases such as "temple",
+  "end portal"), route (A* over the grid, legs of up to 48 blocks planned on as the player walks; step-ups as
+  jump actions). Capabilities: places and navmesh. The agent hides tools the game lacks (Elden Ring's kinds of
+  place, items near me); "take me to the nearest X" uses the game's own search when it has no fixed kinds; F10
+  "go to the nearest village" likewise.
+- Tests: 7 for the pathfinder on built worlds (flat, a terrace jump, round a wall, a lava strip, a 3-block drop,
+  a water channel, a ladder up a cliff, a far goal planned on). Not yet tried in the game.
+
+## 2026-10-13: Minecraft walking, first try (user): stuck in a grove, fall damage
+- "Take me to the nearest village" (1004 blocks north-west, a snowy grove on a mountain): walked 45 blocks
+  down the slope, said "Jump across here!" at every step up, then stood at the end of its first leg, backed
+  off blind into powder snow, and found no way on ("I can't find a way to walk toward Village"). The user took
+  fall damage on the way down.
+- Why (walk log, and the planner run on the live blocks): the grove's powder snow counted as deadly, so the
+  planner was walled in (61 places reachable); walking off a 3-block drop carries the player 1-2 blocks on, and
+  past a narrow ledge that was a 6-7 block fall (89.8 -> 82, 2.7 blocks in 0.17 s); backing off when stuck
+  doesn't look where it goes.
+- Fixes: powder snow is its own kind (the bridge), waded through at a cost (the game slows you 10% in it and
+  boosts jumps; freezing starts after 7 s); a drop is only taken when the cells past its landing don't add up to
+  more than 3 blocks; stands beside a deadly drop cost more; step-ups are silent 'step' actions; in Minecraft
+  the walk walks (no sprint: farther past ledges, and food), never swings at what's ahead (breaks blocks), and
+  sneaks while backing off (sneaking never walks off an edge). With powder snow wadeable, the planner gets out
+  of that grove (310 places, a leg to the box's edge). Tests: 3 more (a narrow ledge over a long fall, powder
+  snow, keeping off a cliff edge). Not yet tried in the game.
+
+## 2026-10-13: Minecraft: breaking and building on the way (Baritone-style)
+- The user: the walk "should be able to break blocks and place blocks where helpful, just like baritone would".
+- Bridge: the grid also gives each block's hardness (127: bedrock, obsidian, lava...; +128: sand and gravel);
+  the snapshot gives the hotbar, the selected slot, the first slot of throwaway blocks (dirt, cobblestone,
+  stone, netherrack, planks...) and how many, and the slot that breaks the crosshair's block fastest.
+- Planner (games/minecraft/blocks.py): more moves, each with its work: walk on, step up or step down breaking
+  what's in the way (the top block first); dig straight down; pillar up (jump, place under the feet); bridge
+  (place the missing floor against the block stood on). Never breaks next to water or lava, under sand or
+  gravel, doors, or what can't be broken. Weighted A* (heuristic x1.5): a 60-block mountain crossing went from
+  out of time (15k nodes, 1.5 s) to 0.7 s.
+- Walk (core/autowalk.py): 'break' and 'place' route actions: stop where the work is, aim the camera at the
+  block (turn and tilt: Intent.pitch, Turner.look), pick the fastest tool, hold the attack button while the
+  block is under the crosshair (Keys holds mouse buttons now), done when it's gone; pillar: look down, jump,
+  place at the top; bridge: sneak to the edge, turn round, place against the side of the block stood on.
+  Snapshot.extra carries the crosshair's block and the hotbar for this. Gives up on one block after 15 s.
+- Tests: 5 planner (a tunnel through a wall, never by water, pillaring a cliff, bridging a gap, digging down),
+  2 walk (mining the block in the way then walking on; pillaring). Not yet tried in the game.
+
+## 2026-10-13: Minecraft walking, second try (user): cut corners into a tree; Elden Ring words in an order
+- "Please take me to some cobblestone": the order model offered "the nearest Site of Grace or a landmark".
+  The order and plan prompts and the tools' descriptions named Elden Ring's places and characters. Now each
+  adapter gives its `order_words` (and `place_kinds`); the core has neutral defaults; Minecraft's prompts and
+  tools were checked to hold no Elden Ring words. walk_to_nearest is offered only to games with fixed kinds.
+- "Take me to the nearest village": no breaking or placing ever started; it walked into an oak log, backed off
+  blind, and gave up. The planned route went round the log (the planner run on the live blocks there): the
+  walk's smooth pursuit (aiming 3.5 m ahead along the route) cut the corner. Built for Elden Ring's open
+  ground, it doesn't fit a world of one-block obstacles.
+- The user: build it into the assistant (not the Baritone mod), so what works here carries to other games;
+  at least as good as Baritone.
+- Walk: a precise mode (any game with a grid can turn it on: `walk_precise`): the route is every cell; the walk
+  goes from cell middle to cell middle, turning first and walking only when facing the next cell within 25
+  degrees; holds jump when the next cell is higher (steps, ladders, water); off the line to the next cell by
+  1.4 or fallen below it, or stuck: re-plans at once from where it is (no blind backing off). A route
+  extended while walking carries on from the player's cell. Breaking and placing start within 0.45 of the
+  cell.
+- Planner costs as Baritone reckons them, in game ticks (shown in blocks walked, 4.63 ticks each): breaking
+  takes the time the game would with the best tool in the hotbar (the bridge works it out per block: tool
+  speed / hardness / 30, or / 100 without the right tool), plus 2 ticks; a block placed 20 ticks.
+- Places: kinds of block too ("take me to some cobblestone": stone or cobblestone; wood, iron, coal, diamond...;
+  any block by name): the bridge's find_blocks searches the loaded world round the player (8 to 64 blocks
+  out, 32 up and down), nearest first.
+- Tests: 2 precise walk (round a corner without clipping it; a route extended mid-walk). Not yet tried in game.
+
+## 2026-10-13: Minecraft walking, third try (user): "here we are" on dirt; the village walk stopped
+- "Take me to some cobblestone": stone 1-2 blocks under the player; the walk began digging, then said "Here we
+  are: Stone!" (within 3 blocks of the goal counted as there). The user: it must be in front of me; I need to
+  see it.
+- "Take me to the nearest village": walked well for 80 s, then stood still. A fresh route arrived, the walk
+  took itself to be off it (planned from where the player stood a moment before) and asked for a new plan
+  while the planning thread was still extending the old one; that thread then failed on the route it had just
+  lost (None), and the "planning" flag stayed set: no plan ever again.
+- Fixes: the planning thread always clears the flag (try/finally) and stops extending a route that's gone;
+  companion.replan() drops a running plan; off the route, the walk first carries on from the route's cell
+  nearest the player. Goals as Baritone's: a block (stand beside it, facing an open side of it, at the feet,
+  the head, or just below the feet, then turn to look at it: a new 'look' route action), a column (a
+  village or a biome: that far across at any height; far legs too), else near the point. Step by step, the
+  walk says it's there only at the end of a complete route (else it waits there for the rest; 12 s with
+  nothing: gives up), and the fairy leaves it to the walk.
+- Live (read only): cobblestone 3 blocks down: dig 3, stand beside the stone, look at it; the village: a 45-cell
+  first leg. Tests: 3 more (a block goal, a column goal, arriving and looking). Not yet tried in the game.
+
+## 2026-10-13: Minecraft walking, fourth try (user): cobblestone and the village both reached
+- The user: it brought me to cobblestone, then to a village, walking well. At the village the fairy said
+  "It's right below us, about 33 metres down": a structure's /locate position has no height (the player's
+  height when asking was used), and the fairy's arrival check compared heights. The user: a village is an
+  area; anywhere in it counts.
+- Places can be areas: the bridge's structure_box gives a structure's whole bounding box once its chunk is
+  loaded (asked when within 192 blocks); adapter.goal_shape(point) tells the core what counts as there
+  ({'area'}, {'column'}: height unknown, or the point); the fairy counts anywhere in the area (4 m round its
+  edge) as arrived, and never "above/below" for an area or a column; the planner ends at the first block
+  inside the area; the distance to a place with an area is to its nearest edge. "Here we are" was also said
+  twice (by the walk, then by the fairy still guiding): the fairy stops guiding when the walk arrives.
+- Tests: 1 (an area goal reached at its edge). Not yet tried in the game.
+
+## 2026-10-13: orders: "some iron" went to the Iron Golem; gathering and crafting (built, not yet tried)
+- "Take me to some iron": "There's a Iron Golem 27 metres away". A character whose name was only partly said
+  ('iron' of Iron Golem) now loses to a place or kind of block that matches; then "Wait, stop, no, not the Iron
+  Golem, but like Iron Blocks" was "Stopping." (only one stop word at the start was taken off; no "not X but
+  Y"): several stop words in a row come off, and "not X, but Y" just after a walk order walks to Y, never to X.
+  Kinds of block (iron ore or deepslate iron ore) go to the nearest without asking which. "a"/"an" and the
+  game's distance unit (Minecraft: blocks) in Navi's line.
+- Getting items, for any game with recipes and gathering (the user: it should mine and craft for me):
+  core/crafting.py plans from the game's own data (a Book: recipes, what each block drops and the least tool
+  for it, what's near) what to gather and craft, in order, choosing the cheapest way (the kind of wood that
+  grows near; what's held first); tools kept, ingredients used up; one trip per kind of thing gathered (merged
+  where the plan still replays). "A stone pickaxe from nothing": 3 logs, 12 planks, a crafting table (placed),
+  sticks, a wooden pickaxe, 3 cobblestone, the stone pickaxe. core/tasks.py does it: walk to the nearest source
+  (digging), mine it with the best tool, pick up the drop; open the inventory (2x2) or walk to a crafting table
+  (3x3) and use it; click the ingredients into the grid (pick a stack up, one per cell with the right button,
+  put the rest back), shift-click the result, close; place the table beside the player.
+- Bridge: recipes (every shaped and shapeless crafting recipe, from the server's recipe manager), sources (each
+  block's drops and least tool, from the game's loot tables tried with no tool, then each tool), the whole
+  inventory, dropped items' ids, and the open container screen's slots (where each is on the window, what's in
+  it, the grid and the result).
+- Orders: "get me a stone pickaxe", "mine 10 cobblestone", "craft some sticks", "chop some trees" ("get me to
+  the village" stays a walk). Tests: 4 planner, 3 tasks (filling a table's grid, gathering), 2 orders.
+
+## 2026-10-13: crafting, first tries (user); orders thought through
+- "Craft me some sticks": 8 sticks came, but Navi said "The stick didn't come out". Shift was pressed in the
+  same instant as the click on the result, and the game took a plain click: one craft onto the cursor, which
+  the inventory count doesn't hold; after 3 s it gave up and closed the screen, which put the cursor's sticks
+  into the inventory. Same with the crafting table, which then landed in the main inventory, and "get me a
+  stone pickaxe" couldn't place it ("not in your hotbar"). Also "Draft me some sticks" (speech recognition):
+  the rules didn't know 'draft' and the fallback model had no crafting action ("I can't craft items").
+- Fixes: Shift is held (as a key, through the frames) for 0.15 s before the click on the result; anything on
+  the cursor is put down in an empty slot and counted; moving an item into the hotbar (open the inventory, pick
+  it up, an empty hotbar slot or a swap) before placing it, and before mining with a tool that's only in the
+  main inventory; 'draft' is 'craft'; the fallback model has get_item. A task log: runtime/task-<date>.jsonl.
+- The user: give it generic orders and let it think through what's needed, not fixed steps. core/doer.py: a
+  model (Haiku, medium effort, through the spending guard) gets the order and the state (holding, where,
+  health, what's around) and acts one simple order at a time through the rules and skills ('get me a stone
+  pickaxe', 'mine 10 cobblestone', 'take me to the village', 'kill the zombie'), each run in the game till done;
+  it gets back what Navi said meanwhile and the new state, and decides the next; it can check where something
+  is, search the game's wiki, wait, tell the player something; at most 30 actions; a new order or "stop" ends
+  it. Used where the adapter says so (Minecraft: use_doer): for orders of several parts and orders the rules
+  don't get. Elden Ring keeps its plan steps.
+- Tests: 2 crafting screen (shift held first; a result on the cursor put down), 1 doer (acts, sees a failure
+  and outcomes, finishes). Not yet tried in the game.
+
+## 2026-10-13: crafting, second tries (user)
+- "Craft me two sticks": 4 (a stick recipe makes 4; two can't be made). Navi now says so first ("Sticks come 4
+  at a time, so I'll make 4").
+- "Get me a stone pickaxe": placed the table (moved into the hotbar first: worked), mined 3 cobblestone, opened
+  the table, 8 clicks to lay out the pickaxe, then no pickaxe in the result slot ("didn't come out"); the
+  items went back to the inventory when the screen closed. The task log didn't say what the grid held. Now:
+  0.4 s for a just-opened screen to fill in before the first click; after the last click the grid is checked
+  against the recipe, and if it's wrong everything in it is shift-clicked back and it's laid out once more,
+  twice as slowly; the clicks, the grid's slots (where on the window) and what they held go to the task log.
+  Not yet tried in the game.
+
+## 2026-10-13: crafting, third try (user): stuck picking up; cobblestone thrown away
+- "Get me a stone pickaxe" mined one cobblestone, then walked to it over and over (0.03 s apart, 26 s): it lay
+  in the hole one block below; the walk counted 1.6 blocks off as there, and the player never came within
+  pick-up reach. Also 7 cobblestone lay 19 blocks away: the two earlier tries at the crafting table had
+  clicked outside the window with the stack held, which throws it (and is why no pickaxe came out). The
+  inventory's own clicks had landed right; the table's hadn't (cause not known from the log).
+- Clicks are checked now (any game with a "slot under the pointer" readout can do the same): the pointer is
+  moved onto the slot, the game is asked which slot is under it (the bridge: the screen's hovered slot, the
+  pointer's position, the window's frame), and only then is it clicked; if it's another, the pointer's error is
+  measured from where the game says it is, corrected for (kept for the next clicks), and it points again; after
+  4 tries nothing is clicked and the task stops. Dropped items are walked onto (their own block: 'item' goals),
+  and one walked to twice without coming is left.
+- Tests: the pointer landing 7 and 12 pixels off is corrected before any click (the crafting done).
+- Fourth try: "I couldn't get the pointer onto the crafting grid": the game still ran the bridge from before
+  (no "hovered" in its answers: Minecraft hadn't been restarted). The user had seen the try before: sticks on
+  the grid, but all 3 cobblestone in one cell. That fits the cause: each click was sent in the same instant as
+  the pointer's move and the game took it where the pointer had been (three right-clicks into the first cell;
+  a stack thrown when a click landed outside the window). Now, with a bridge that can't say what's under the
+  pointer, each click waits 0.2 s after the move. The bridge has a version (ping); the adapter says when the
+  game runs an older one ("Restart Minecraft to load the new one!").
+
+## 2026-10-13: a stone pickaxe from nothing (user); fighting in Minecraft
+- The user spawned with nothing but a crafting table nearby: "Give me a stone pickaxe" got wood, made planks,
+  sticks and a wooden pickaxe, mined cobblestone and made the stone pickaxe ("That was great"). The order went
+  through the doer ("Okay! Let me think..."), which gave it to the task and summed it up after.
+- Fighting (core/melee.py, any game where a swing charges and is aimed with the camera; the adapter's
+  fighter_style 'melee'): the best weapon into the hand (a sword, an axe, a tool, an empty hand: not a block);
+  the camera on the target's body every frame; a swing only when charged (attack strength from the bridge),
+  the crosshair on it and in reach (3 blocks); back off for a moment after each hit (twice as long from a
+  creeper); zig-zag in on shooters (skeletons, pillagers...); a shield (off hand) up against a drawn bow or a
+  hit coming while the swing charges; from a swelling creeper, run till 7 blocks off; a step up: jump; no
+  nearer for 6 s: unreachable; over to the player at 30% health; a minute: timeout. The bridge: attack
+  strength and delay, hurt time, on the ground, the off hand, blocking; each mob's aggression, swelling
+  (creepers), item in use (a bow drawn). Bridge version 8.
+- During a task, a hostile mob after the player (3.5 blocks, or 6 when just hurt) is fought off first, then the
+  task goes on from its step's start.
+- Tests: 4 in a simulated arena (a zombie killed with full swings only; running from a creeper; zig-zag and a
+  shield against a skeleton; low health). Not yet tried in the game.

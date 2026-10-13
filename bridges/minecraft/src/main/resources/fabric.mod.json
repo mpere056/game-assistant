@@ -1,0 +1,22 @@
+{
+	"schemaVersion": 1,
+	"id": "gabridge",
+	"version": "${version}",
+	"name": "Game Assistant Bridge",
+	"description": "Lets the Game Assistant (Navi) see the game in single-player: the player, the camera, the creatures around, what the crosshair is on, and rays through the world. Read-only; off on servers.",
+	"authors": ["mpere056"],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["gabridge.Bridge"]
+	},
+	"mixins": [
+		{"config": "gabridge.client.mixins.json", "environment": "client"}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

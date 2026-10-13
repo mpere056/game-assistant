@@ -361,3 +361,35 @@ class TwentySeventhSessionTests(unittest.TestCase):
         a = r.handle('kill one more')
         self.assertEqual((a.name, a.every), ('Godrick Soldier', None))
         self.assertIsNone(r.handle('kill this one').count)
+
+
+class BlockAdapter(FakeAdapter):
+    """A game that finds places and kinds of block by name (Minecraft): an Iron Golem near, iron ore further."""
+    place_kinds = ()
+
+    def __init__(self):
+        from game_assistant.core.interface import Entity
+        golem = Entity(7, 3, None, (20.0, 0.0, 0.0), (20.0, 1.0, 0.0), 0.7, 2.7, False, False, name='Iron Golem')
+        super().__init__([], [], [golem])
+
+    def locate(self, query):
+        if 'iron' in query.lower() and 'golem' not in query.lower():
+            return {'results': [{'name': 'Iron Ore', 'kind': 'block', 'position': (3.0, -5.0, 4.0)},
+                                {'name': 'Deepslate Iron Ore', 'kind': 'block', 'position': (9.0, -30.0, 4.0)}]}
+        return {'results': []}
+
+
+class PlaceOrCharacterTests(unittest.TestCase):
+    def test_a_half_said_name_goes_to_the_place_not_the_character(self):
+        r = CommandResolver(BlockAdapter())
+        a = r.handle('Take me to some iron')
+        self.assertEqual((a.kind, a.name), ('walk', 'Iron Ore'))      # the nearest block, no question
+        b = r.handle('take me to the iron golem')
+        self.assertEqual((b.kind, b.name, b.entity_id), ('walk', 'Iron Golem', 7))
+        self.assertIn('an Iron Golem', b.say)
+
+    def test_not_x_but_y_corrects_the_last_walk(self):
+        r = CommandResolver(BlockAdapter())
+        r.handle('take me to the iron golem')
+        a = r.handle('Wait, stop, no, not the Iron Golem, but like Iron Blocks')
+        self.assertEqual((a.kind, a.name), ('walk', 'Iron Ore'))

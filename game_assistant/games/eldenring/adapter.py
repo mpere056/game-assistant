@@ -157,7 +157,50 @@ def _spheres(row: bytes):
     return out
 
 
+# For the model (core/agent.py): what is particular to Elden Ring in its instructions and picture hints.
+PROMPT_NOTES = """- damage_taken_percent: 100 is normal damage, above 100 is a weakness, below 100 a resistance.
+  status_buildup_needed: lower numbers trigger sooner; immune_to: statuses that never build up.
+  weak_to: types clearly above the enemy's usual; takes_extra_from_everything: every type does extra
+  damage (say that rather than listing every type).
+- For "where is X", "where do I find X", "what drops X": call search_game_data and give the one or two
+  most useful places, not the whole list, unless asked for all.
+- wiki: an offline copy of the Elden Ring wiki. Use it for attack patterns and boss strategies
+  (aspect fight), where to find things (location), what a place holds (here), questlines (quest),
+  mechanics and anything else the game data can't say. web_search only if the wiki has nothing.
+- "What is there to do here?", "where am I?": call where_am_i, then wiki with its wiki_page_for_here
+  and aspect "here". "Where is X?": where_is. "Anything good near me?": items_near_me."""
+PROMPT_EXAMPLES = """Examples of the right length:
+  "Can you see that?" -> "Yes! A Giant Dog, about 50 metres ahead."
+  "What about those over there?" -> "Three Putrid Corpses, about 45 metres to the right."
+  "What's it weak to?" -> "Fire and slash!"
+  "Lead me to the Forsaken Ruins." -> "This way! About 150 metres west."
+  "Where's the Moonveil?" -> "In Gael Tunnel, guarded by a Magma Wyrm."
+"""
+LOOK_HINTS = """ Elden Ring things that are easy to miss:
+- Spiritspring: a tall column of pale white mist or wind against a cliff, rising from a misty swirl on the ground. It
+  looks like a waterfall, but in Elden Ring a white misty column at a cliff foot is usually a Spiritspring (jump into it
+  on Torrent to be carried up the cliff). Say waterfall only if you see falling water landing in a pool or stream.
+- Site of Grace: a small golden light with gold rays pointing the way; Stake of Marika: a wooden stake with a faint glow.
+- Lift: a round stone platform with a pressure plate or a small pedestal; Waygate / Sending Gate: a glowing portal or archway.
+- Fog wall: a golden or white mist in a doorway (a boss or area); an Evergaol: a stone circle with a blue barrier.
+- Items on the ground: small white-gold glowing motes; messages: glowing orange writing on the ground; bloodstains: red pools.
+- Chests, Imp statues (need Stonesword Keys), Minor Erdtrees, ruins, churches, caves, catacomb doors, Divine Towers.
+Then use the wiki for what it does or how to use it."""
+
+
 class EldenRingAdapter:
+    # how orders and tools talk about Elden Ring's places and characters (core/agent.py ORDER_WORDS)
+    order_words = {'places': 'a Site of Grace, a landmark, a ruin, a castle, a cave, a dungeon',
+                   'named': "'Groveside Cave', 'Gatefront Ruins'",
+                   'nearest': "'nearest site of grace', 'nearest landmark'",
+                   'nearest_hint': 'For "the nearest grace", pass place "nearest site of grace" (or "nearest '
+                                   'landmark").',
+                   'character': "'Godrick Soldier'", 'characters': "'Godrick Soldier', 'Boar'",
+                   'character_plural': 'soldiers'}
+    place_kinds = ('site of grace', 'landmark')
+    prompt_notes = PROMPT_NOTES
+    prompt_examples = PROMPT_EXAMPLES
+    look_hints = LOOK_HINTS
     game = 'Elden Ring'
     capabilities = frozenset({CAP_PLAYER, CAP_CAMERA, CAP_ENTITIES, CAP_RAYCAST, CAP_KNOWLEDGE, CAP_SEARCH, CAP_SCREEN, CAP_PLACES})
     # Wikis the assistant may search for attack patterns, strategies, lore and quests.

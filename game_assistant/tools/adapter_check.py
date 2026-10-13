@@ -73,7 +73,7 @@ def run_checks(a) -> int:
         r.say(str(e))
         return 1
     if not live:
-        r.result('bridge', 'FAIL', 'the bridge exists but Elden Ring is not ticking (paused, closed or crashed?)')
+        r.result('bridge', 'FAIL', f'the bridge exists but {a.game} is not ticking (paused, closed or crashed?)')
         r.save()
         return 1
     s = a.snapshot()
@@ -162,7 +162,7 @@ def run_checks(a) -> int:
     failed = [n for n, o in r.results if o == 'FAIL']
     skipped = [n for n, o in r.results if o == 'SKIP']
     r.say(f'\n{passed} passed, {len(failed)} failed, {len(skipped)} skipped.'
-          + (' Elden Ring is CONNECTED.' if not failed and not skipped else ''))
+          + (f' {a.game} is CONNECTED.' if not failed and not skipped else ''))
     r.say(f'Saved to runtime/{r.save().name}')
     return 1 if failed else 0
 

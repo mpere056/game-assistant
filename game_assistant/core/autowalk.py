@@ -56,6 +56,16 @@ AROUND_S = 1.2        # ...then go diagonally forward to one side this long (sid
 CORNER_REACH = 1.0    # don't steer past the next corner of the route until this close to it (narrow
                       # passages: steering 3.5 m ahead cut corners into the rock)
 ACTION_AT = 1.5       # metres from a ladder/lift/jump start to act on it
+WORK_AT = 0.45        # blocks from where a block is broken or placed to start on it (Minecraft)
+STEP_AT = 0.4         # precise walking: this near a cell's middle is on it...
+STEP_LOOK = 6         # ...looking this many cells ahead for the one the player is on
+STEP_OFF = 1.4        # this far from the line to the next cell: off the route, re-plan
+STEP_FACING = 25.0    # walk on only when facing the next cell within this (else turn first: no drifting into a
+                      # corner)
+STEP_TURN_RATE = 540.0
+STEP_WAIT = 12.0      # seconds at the end of a part-planned route with no more of it coming: give up
+STEP_TURN_GAIN = 14.0
+WORK_TIMEOUT = 15.0   # seconds: give up on breaking or placing one block
 # Walking to a character (and attacking it): steered at its live position every frame once within
 # CHASE_DIRECT metres; further away along the route, which the caller re-plans as it moves.
 CHASE_DIRECT = 20.0
@@ -87,6 +97,7 @@ class Intent:
     keys: frozenset = frozenset()       # held this frame: forward, back, left, right, sprint
     turn: float = 0.0                   # degrees to turn the camera now (+ to the right)
     taps: tuple = ()                    # pressed once now: 'interact', 'jump'
+    pitch: float = 0.0                  # degrees to tilt the camera now (+ down): aiming at a block
 
 
 @dataclass
@@ -95,11 +106,29 @@ class _Action:
     start: Vec3
     end: Vec3
     done: bool = False
+    info: dict = field(default_factory=dict)   # break/place: the block ('key'), face, kind...
+    t0: float | None = None                    # working on it since
+    held: float | None = None                  # mining since (the crosshair on the block)
+    seen: bool = False
+    phase: str = ''
+    last: float = -1e9                         # the last press (slot, place, jump)
 
 
 def _yaw(v) -> float:
     """Heading of a vector, degrees clockwise from +z (north) toward +x (east)."""
     return math.degrees(math.atan2(v[0], v[2]))
+
+
+def aim_at(cam, point: Vec3, dt_k: float = 0.35) -> tuple[float, float, float]:
+    """(turn, tilt, error in degrees) to bring the crosshair onto point: dt_k of the way this frame."""
+    d = (point[0] - cam.pos[0], point[1] - cam.pos[1], point[2] - cam.pos[2])
+    ey = _wrap(_yaw(d) - _yaw(cam.forward))
+    want_pitch = math.degrees(math.atan2(-d[1], math.hypot(d[0], d[2])))
+    cur_pitch = math.degrees(math.asin(max(-1.0, min(1.0, -cam.forward[1]))))
+    ep = want_pitch - cur_pitch
+    if math.hypot(d[0], d[2]) < 0.15:
+        ey = 0.0                                  # straight down: any heading will do
+    return ey * dt_k, ep * dt_k, math.hypot(ey, ep)
 
 
 def _wrap(a: float) -> float:
@@ -113,6 +142,11 @@ def _flat(a: Vec3, b: Vec3) -> float:
 @dataclass
 class AutoWalk:
     sprint: bool = True                 # run on long straight stretches (setting auto_walk_sprint)
+    breaks: bool = True                 # stuck with nothing seen ahead: swing at it (the adapter's walk_breaks)
+    # Step by step (the adapter's walk_precise): the route is every cell of a grid (Minecraft's blocks); the walk
+    # goes from cell to cell, never cutting a corner, jumping where the next cell is higher, and re-plans at
+    # once when it can't go on or is off the route (Baritone's way). Else: smooth pursuit (open ground).
+    precise: bool = False
     active: bool = False
     route: list = field(default_factory=list)
     goal: Vec3 | None = None
@@ -153,15 +187,19 @@ class AutoWalk:
         self.target_id, self.attack, self._locked, self._swung_at = target_id, attack, False, None
         self.set_route(route, actions)
         self._stuck_since = self._stuck_pos = None
+        self._waiting_since = None
         self._stucks = []
         self._unstick_until = -1.0
         self._special = None
 
-    def set_route(self, route: list[Vec3], actions=()) -> None:
-        """A new or extended route (re-planned, or planned further while walking)."""
+    def set_route(self, route: list[Vec3], actions=(), complete: bool = True) -> None:
+        """A new or extended route (re-planned, or planned further while walking). complete: it ends at the
+        goal (else at the end of what's planned so far)."""
         self.route = list(route)
+        self.route_complete = complete
         self._progress = 0
-        self._actions = [_Action(a[0], a[1], a[2] if len(a) > 2 else a[1]) for a in actions]
+        self._actions = [_Action(a[0], a[1], a[2] if len(a) > 2 else a[1], info=a[3] if len(a) > 3 else {})
+                         for a in actions]
 
     def stop(self, why: str = '') -> None:
         if self.active and why:
@@ -199,17 +237,19 @@ class AutoWalk:
             if not self._break_swings:
                 self._stuck_since = None
             return Intent(frozenset({'forward'}), 0.0, taps)
+        # (sneaking, where the game has it: Minecraft's sneak never walks off an edge; backing off blind
+        # walked off a mountain ledge, 2026-10-13)
         if self.t < self._unstick_until:  # backing off after getting stuck...
             self.state = 'unsticking'
-            return Intent(frozenset({'back', self._unstick_side}))
+            return Intent(frozenset({'back', self._unstick_side, 'sneak'}))
         if self.t < self._around_until:   # ...then round it, diagonally forward to one side
             self.state = 'unsticking'
-            return Intent(frozenset({'forward', self._unstick_side}))
+            return Intent(frozenset({'forward', self._unstick_side, 'sneak'}))
         if self.target_id is not None:
             chase = self._chase(snap, p, dt)
             if chase is not None:
                 return chase
-        elif self.goal and _flat(p, self.goal) < ARRIVE and abs(self.goal[1] - p[1]) < ARRIVE_UP:
+        elif self.goal and not self.precise and _flat(p, self.goal) < ARRIVE and abs(self.goal[1] - p[1]) < ARRIVE_UP:
             self.events.append('arrived')
             self.stop()
             return Intent()
@@ -218,6 +258,8 @@ class AutoWalk:
         special = self._special_action(snap, p)
         if special is not None:
             return special
+        if self.precise:
+            return self._step(snap, p, dt)
         target, straight = self._pursuit(p)
         cam = snap.camera
         cam_yaw = _yaw(cam.forward)
@@ -233,6 +275,72 @@ class AutoWalk:
         return Intent(frozenset(keys), turn)
 
     # ---- parts ----
+
+    def _step(self, snap: Snapshot, p: Vec3, dt: float) -> Intent:
+        """Precise walking: on to the next cell of the route."""
+        pts = self.route
+        i = self._progress
+        if _flat(p, pts[i]) > 1.2 or abs(p[1] - pts[i][1]) > 1.5:
+            # (a new or extended route starts counting from its first cell: find where the player is on it)
+            near = min(range(len(pts)), key=lambda j: _flat(p, pts[j]) + abs(p[1] - pts[j][1]))
+            if _flat(p, pts[near]) + abs(p[1] - pts[near][1]) < 2.0:
+                i = near
+        for j in range(min(len(pts) - 1, i + STEP_LOOK), i, -1):   # (on a cell further on: from there)
+            if _flat(p, pts[j]) < STEP_AT and abs(p[1] - pts[j][1]) < 0.8:
+                i = j
+                break
+        self._progress = i
+        target = pts[min(i + 1, len(pts) - 1)]
+        here = pts[i]
+        # off the route: too far from the line between this cell and the next, or fallen below them
+        a, b = here, target
+        ab = (b[0] - a[0], b[2] - a[2])
+        L2 = ab[0] ** 2 + ab[1] ** 2
+        t = 0.0 if L2 < 1e-9 else max(0.0, min(1.0, ((p[0] - a[0]) * ab[0] + (p[2] - a[2]) * ab[1]) / L2))
+        off = math.hypot(p[0] - (a[0] + ab[0] * t), p[2] - (a[2] + ab[1] * t))
+        if off > STEP_OFF or p[1] < min(a[1], b[1]) - 1.5:
+            # (a fresh route planned from where the player stood a moment ago: on from its cell nearest the
+            # player, if one is near; else plan again from here)
+            near = min(range(len(pts)), key=lambda j: _flat(p, pts[j]) + abs(p[1] - pts[j][1]))
+            if near != i and _flat(p, pts[near]) < STEP_OFF and abs(p[1] - pts[near][1]) < 1.3:
+                self._progress = near
+                return self._step(snap, p, dt)
+            self.state = 'off_route'
+            self.events.append('replan')
+            self.route, self._progress, self._stuck_since = [], 0, None
+            return Intent()
+        cam = snap.camera
+        flat = _flat(p, target)
+        rise = target[1] - p[1]
+        keys = set()
+        turn = 0.0
+        if flat > 0.12:
+            err = _wrap(_yaw((target[0] - p[0], 0.0, target[2] - p[2])) - _yaw(cam.forward))
+            turn = max(-STEP_TURN_RATE * dt, min(STEP_TURN_RATE * dt, err * STEP_TURN_GAIN * dt))
+            if abs(err) < STEP_FACING:
+                keys.add('forward')
+        if rise > 0.4 and flat < 1.4:
+            keys.add('jump')                  # a step up (held: the game jumps as soon as it can), a ladder, water
+        if i >= len(pts) - 1 or (i == len(pts) - 2 and flat < STEP_AT and abs(rise) < 0.8):
+            # at the end of the route: arrived (its last actions done: looking at the block), or wait for
+            # the rest of it to be planned
+            if any(not a.done and _flat(a.start, p) < 1.5 for a in self._actions):
+                return Intent(frozenset(keys), turn)
+            if self.route_complete:
+                self.events.append('arrived')
+                self.stop()
+                return Intent()
+            self.state = 'waiting'
+            self._waiting_since = self._waiting_since or self.t
+            if self.t - self._waiting_since > STEP_WAIT:
+                self.events.append('gave_up')     # no way on found from here
+                self.stop()
+            return Intent(frozenset(keys), turn)
+        self._waiting_since = None
+        self.state = 'walking'
+        if self._check_stuck(p):
+            return Intent()
+        return Intent(frozenset(keys), turn)
 
     def _chase(self, snap: Snapshot, p: Vec3, dt: float) -> Intent | None:
         """Walking to or attacking a character: live position every frame. None: follow the route."""
@@ -399,7 +507,7 @@ class AutoWalk:
         if self._stuck_since is None:
             self._stuck_since, self._stuck_pos = self.t, p
             return False
-        if self.ahead_blocked is False and _flat(p, self._stuck_pos) <= STUCK_MOVE \
+        if self.breaks and self.ahead_blocked is False and _flat(p, self._stuck_pos) <= STUCK_MOVE \
                 and self.t - self._stuck_since >= STUCK_SECONDS and self._try_break(p):
             return False
         if _flat(p, self._stuck_pos) > STUCK_MOVE:
@@ -415,6 +523,10 @@ class AutoWalk:
             return True
         if self.target_id is not None:   # chasing: the navmesh route from now on, for a while
             self._route_only_until = self.t + STUCK_ROUTE_S
+        if self.precise:                 # the route is exact: re-plan from here at once rather than back off blind
+            self.events.append('replan')
+            self.route, self._progress = [], 0
+            return False
         # back off, then round it to one side (the other side next time)
         self._unstick_until = self.t + UNSTICK_S
         self._around_until = self._unstick_until + AROUND_S
@@ -426,7 +538,15 @@ class AutoWalk:
         return False
 
     def _special_action(self, snap: Snapshot, p: Vec3) -> Intent | None:
-        """Ladders, lifts, jumps: None when walking normally."""
+        """Ladders, lifts, jumps, breaking and placing blocks: None when walking normally."""
+        if self._special is not None and self._special[0].what in ('break', 'place', 'look'):
+            act = self._special[0]
+            got = self._work(act, snap, p)
+            if got is not None:
+                return got
+            act.done, self._special = True, None
+            self._stuck_since = None
+            return None
         if self._special is not None:
             act, since = self._special
             if act.what == 'ladder':
@@ -453,7 +573,94 @@ class AutoWalk:
                 self._special = (act, self.t)
                 self._stuck_since = None
                 return Intent()
-            if act.what == 'jump':
+            if act.what == 'step' and self.precise:
+                continue                                  # (the step walk jumps at every step up by itself)
+            if act.what in ('jump', 'step'):
                 act.done = True
                 return Intent(frozenset({'forward'}), taps=('jump',))
+            if act.what in ('break', 'place', 'look'):
+                if _flat(p, act.start) > WORK_AT or abs(p[1] - act.start[1]) > 1.2:
+                    return None                           # walk on up to it first (nothing after it before it)
+                act.t0 = self.t
+                self._special = (act, self.t)
+                self.events.append(f'work:{act.what}')
+                return self._special_action(snap, p)
         return None
+
+    def _aim(self, cam, point: Vec3, dt_k: float = 0.35) -> tuple[float, float, float]:
+        return aim_at(cam, point, dt_k)
+
+    def _work(self, act: _Action, snap: Snapshot, p: Vec3) -> Intent | None:
+        """Breaking or placing a block for the route (Minecraft): aim, choose the hotbar slot, mine or place.
+        None: done (or given up: the walk goes on, and gets stuck and re-plans if it must)."""
+        ex, cam, info = snap.extra or {}, snap.camera, act.info
+        if cam is None or self.t - act.t0 > WORK_TIMEOUT:
+            if cam is not None:
+                self.events.append(f'work_failed:{act.what}')
+            return None
+        if act.what == 'look':                            # turn to face it (what the player came for)
+            turn, tilt, err = self._aim(cam, act.end)
+            self.state = 'looking'
+            if err < 3.0 or self.t - act.t0 > 3.0:
+                return None
+            return Intent(frozenset(), turn, (), tilt)
+        key = tuple(info.get('key') or ())
+        aimed = ex.get('aim_block') is not None and tuple(ex['aim_block']) == key
+        keys, taps = {'sneak'}, []
+        self.state = 'breaking' if act.what == 'break' else 'building'
+        if act.what == 'break':
+            turn, tilt, err = self._aim(cam, act.end)
+            if aimed:
+                act.seen = True
+                tool = ex.get('tool_slot', -1)
+                if tool is not None and tool >= 0 and ex.get('slot') != tool and self.t - act.last > 0.3:
+                    taps.append(f'slot{tool + 1}')
+                    act.last = self.t
+                keys.add('attack')
+                act.held = act.held or self.t
+            elif act.held is not None and err < 10.0:
+                return None                               # it was on the crosshair and is gone: broken
+            elif not act.seen and err < 2.0 and self.t - act.t0 > 1.5:
+                return None                               # never in sight (already gone, or something else in front)
+            return Intent(frozenset(keys), turn, tuple(taps), tilt)
+        into = tuple(info.get('into') or ())
+        if ex.get('aim_block') is not None and tuple(ex['aim_block']) == into:
+            return None                                   # placed: the crosshair is on the new block
+        slot = ex.get('block_slot', -1)
+        if slot is None or slot < 0:
+            self.events.append('work_failed:no_blocks')
+            return None
+        if ex.get('slot') != slot and self.t - act.last > 0.3:
+            taps.append(f'slot{slot + 1}')
+            act.last = self.t
+        if info.get('kind') == 'pillar':                  # look down, jump, place under the feet at the top
+            turn, tilt, err = self._aim(cam, act.end)
+            rise = p[1] - act.start[1]
+            if rise > 0.95 and act.phase == 'placed' and self.t - act.last > 0.35:
+                return None                               # standing on it
+            if err < 12.0 and rise < 0.1 and act.phase != 'jumped' or (act.phase == 'jumped' and
+                                                                         self.t - act.last > 1.2):
+                taps.append('jump')
+                act.phase, act.last = 'jumped', self.t
+            elif act.phase in ('jumped', 'placed') and rise > 1.0 and aimed and self.t - act.last > 0.12:
+                taps.append('interact')
+                act.phase, act.last = 'placed', self.t
+            return Intent(frozenset({'sneak'}) if rise < 0.1 else frozenset(), turn, tuple(taps), tilt)
+        # a bridge: sneak to the edge (sneaking never walks off it), then turn round and place the floor ahead
+        gap = info.get('gap') or act.end
+        if act.phase == '':
+            d = (gap[0] - act.start[0], gap[2] - act.start[2])
+            n = math.hypot(*d) or 1.0
+            out = ((p[0] - act.start[0]) * d[0] + (p[2] - act.start[2]) * d[1]) / n
+            moving = act.held is None or _flat(p, act.end) < act.held - 0.02
+            act.held = _flat(p, act.end)
+            if out < 0.72 and (moving or self.t - act.t0 < 0.4) and self.t - act.t0 < 3.0:
+                want = _yaw((gap[0] - p[0], 0.0, gap[2] - p[2]))
+                err = _wrap(want - _yaw(cam.forward))
+                return Intent(frozenset({'sneak', 'forward'}), err * 0.35, tuple(taps))
+            act.phase = 'edge'
+        turn, tilt, err = self._aim(cam, act.end)
+        if aimed and ex.get('aim_face') == info.get('face') and ex.get('slot') == slot and self.t - act.last > 0.3:
+            taps.append('interact')
+            act.last = self.t
+        return Intent(frozenset({'sneak'}), turn, tuple(taps), tilt)

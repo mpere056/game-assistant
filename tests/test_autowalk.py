@@ -353,3 +353,145 @@ class ChaseBreakTests(unittest.TestCase):
             taps += list(aw.update(w.snap(), 1 / 30).taps)
         self.assertIn('break', aw.events)
         self.assertGreaterEqual(taps.count('attack'), 2)
+
+
+class BlockWorld(World):
+    """World plus looking up and down, and one block on the way that breaks after 0.5 s of mining while it is
+    under the crosshair (Minecraft's route work)."""
+
+    def __init__(self, block, **kw):
+        super().__init__(**kw)
+        self.pitch, self.block, self.mined, self.held_attack = 0.0, block, 0.0, False
+
+    def snap(self):
+        r, pr = math.radians(self.yaw), math.radians(self.pitch)
+        fwd = (math.sin(r) * math.cos(pr), -math.sin(pr), math.cos(r) * math.cos(pr))
+        right = (math.cos(r), 0.0, -math.sin(r))
+        eye = (self.pos[0], self.pos[1] + 1.6, self.pos[2])
+        cam = Camera(eye, fwd, right, (0.0, 1.0, 0.0), 70, 16 / 9)
+        aim = None
+        if self.block is not None:
+            d = [self.block[i] - eye[i] for i in range(3)]
+            n = math.sqrt(sum(v * v for v in d))
+            if sum(d[i] / n * fwd[i] for i in range(3)) > math.cos(math.radians(4)):
+                aim = (1, 2, 3)
+        return Snapshot('test', 1, True, Player(tuple(self.pos), fwd, 'alive'), cam, (), None, screen=SCREEN,
+                        extra={'aim_block': aim, 'aim_face': 'west', 'tool_slot': 2, 'slot': 0, 'block_slot': -1})
+
+    def apply(self, intent, dt):
+        self.pitch = max(-90.0, min(90.0, self.pitch + intent.pitch))
+        if 'attack' in intent.keys:
+            self.held_attack = True
+            if self.snap().extra['aim_block'] is not None:
+                self.mined += dt
+                if self.mined >= 0.5:
+                    self.block = None
+        if self.block is not None and self.pos[2] > self.block[2] - 1.3:
+            intent = type(intent)(frozenset(intent.keys - {'forward'}), intent.turn, intent.taps, intent.pitch)
+        super().apply(intent, dt)
+
+
+class RouteWorkTests(unittest.TestCase):
+    def test_mines_the_block_in_the_way_then_walks_on(self):
+        w = BlockWorld((0.0, 0.5, 5.5), yaw=0.0)
+        aw = AutoWalk(sprint=False)
+        route = [(0.0, 0.0, 0.0), (0.0, 0.0, 4.5), (0.0, 0.0, 12.0)]
+        aw.start(route, route[-1], 'There', actions=[('break', (0.0, 0.0, 4.5), (0.0, 0.5, 5.5), {'key': (1, 2, 3)})])
+        walk(aw, w, 20)
+        self.assertTrue(w.held_attack)
+        self.assertIsNone(w.block)
+        self.assertGreater(w.pitch, 20.0)               # it looked down at the block (feet height)
+        self.assertIn('slot3', w.taps)                  # the best tool for it
+        self.assertIn('arrived', aw.events)
+
+    def test_pillars_up_jumping_and_placing_under_the_feet(self):
+        class Pillar(BlockWorld):
+            def __init__(self):
+                super().__init__(None)
+                self.vy, self.floor, self.placed = 0.0, 0.0, 0
+
+            def snap(self):
+                s = super().snap()
+                down = s.camera.forward[1] < -0.97
+                s.extra.update(aim_block=((0, self.floor, 0) if down else None), aim_face='up', block_slot=4,
+                               slot=0 if 'slot5' not in self.taps else 4)
+                if down and self.placed and self.pos[1] < self.floor + 1.0:
+                    s.extra['aim_block'] = (0, self.floor, 0)
+                return s
+
+            def apply(self, intent, dt):
+                self.pitch = max(-90.0, min(90.0, self.pitch + intent.pitch))
+                self.taps += list(intent.taps)
+                if 'jump' in intent.taps and self.pos[1] <= self.floor + 0.001:
+                    self.vy = 8.4                       # a Minecraft jump: about 1.25 blocks
+                if 'interact' in intent.taps and self.pos[1] >= self.floor + 1.0 \
+                        and self.snap().extra['aim_block'] == (0, self.floor, 0):
+                    self.floor += 1                     # the new block under the feet
+                    self.placed += 1
+                self.vy -= 28.0 * dt
+                self.pos[1] = max(self.floor, self.pos[1] + self.vy * dt)
+                if self.pos[1] == self.floor:
+                    self.vy = 0.0
+
+        w = Pillar()
+        aw = AutoWalk(sprint=False)
+        route = [(0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 3.0)]
+        aw.start(route, route[-1], 'Up', actions=[
+            ('place', (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), {'key': (0, 0, 0), 'face': 'up', 'into': (0, 1, 0),
+                                                          'kind': 'pillar'})])
+        walk(aw, w, 6)
+        self.assertEqual(w.placed, 1)
+        self.assertIn('slot5', w.taps)
+
+
+class PreciseWalkTests(unittest.TestCase):
+    def test_goes_round_a_corner_cell_by_cell_without_cutting_it(self):
+        # a block at (1, 1) (cells of 1 m): the route goes north two cells, then east two
+        w = World(yaw=0.0)
+        aw = AutoWalk(sprint=False, precise=True)
+        route = [(0.5, 0.0, 0.5), (0.5, 0.0, 1.5), (0.5, 0.0, 2.5), (1.5, 0.0, 2.5), (2.5, 0.0, 2.5),
+                 (3.5, 0.0, 2.5), (4.5, 0.0, 2.5), (5.5, 0.0, 2.5)]
+        w.pos = [0.5, 0.0, 0.5]
+        aw.start(route, route[-1], 'There')
+        inside = []
+        for _ in range(30 * 10):
+            intent = aw.update(w.snap(), 1 / 30)
+            w.apply(intent, 1 / 30)
+            if 1.0 - 0.3 < w.pos[0] < 2.0 + 0.3 and 1.0 - 0.3 < w.pos[2] < 2.0 + 0.3:
+                inside.append(tuple(w.pos))
+            if not aw.active:
+                break
+        self.assertIn('arrived', aw.events)
+        self.assertEqual(inside, [])                    # never clipped the block at (1, 1)
+
+    def test_an_extended_route_carries_on_from_where_the_player_is(self):
+        w = World(yaw=0.0)
+        aw = AutoWalk(sprint=False, precise=True)
+        route = [(0.5, 0.0, 0.5 + k) for k in range(40)]
+        aw.start(route[:20], route[-1], 'There')
+        walk(aw, w, 3)
+        z = w.pos[2]
+        aw.set_route(route)                            # planned further: the whole route again from its start
+        w2 = []
+        for _ in range(15):
+            intent = aw.update(w.snap(), 1 / 30)
+            w.apply(intent, 1 / 30)
+            w2.append(w.pos[2])
+        self.assertGreater(w2[-1], z)                  # still going on, not back to the start
+        self.assertNotIn('replan', aw.events)
+
+    def test_arrives_only_at_the_end_of_a_complete_route_and_looks_at_the_block(self):
+        w = BlockWorld(None, yaw=0.0)
+        w.pos = [0.5, 0.0, 0.5]
+        aw = AutoWalk(sprint=False, precise=True)
+        route = [(0.5, 0.0, 0.5 + k) for k in range(4)]
+        aw.start(route, (0.5, -1.0, 4.5), 'Stone',
+                 actions=[('look', route[-1], (0.5, 0.5, 4.5), {})])   # a block in front, at the feet
+        aw.set_route(route, aw_actions := [('look', route[-1], (0.5, 0.5, 4.5), {})], complete=False)
+        walk(aw, w, 3)
+        self.assertNotIn('arrived', aw.events)          # the route isn't all planned yet: wait at its end
+        self.assertEqual(aw.state, 'waiting')
+        aw.set_route(route, aw_actions, complete=True)
+        walk(aw, w, 3)
+        self.assertIn('arrived', aw.events)
+        self.assertGreater(w.pitch, 30.0)               # looking down at the block at its feet

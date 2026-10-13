@@ -101,6 +101,7 @@ class Entity:
     anim_speed: float = 1.0        # playback speed (1 normal)
     anims: tuple = ()              # every animation playing now (several blend or layer):
                                    # ((anim id, seconds into it, length), ...), the main one first
+    extra: dict | None = None      # game-specific state for fighting (Minecraft: 'swell', 'aggressive', 'using_item')
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,9 @@ class Snapshot:
     target_id: int | None = None  # the game's own target (lock-on, interaction), if known
     screen: Screen | None = None  # for overlays (the fairy); None if the game doesn't report it
     menu: bool | None = None      # a menu or loading screen is up (None: the game can't tell)
+    # Game-specific state for route actions that work on the world (Minecraft: the block under the crosshair
+    # 'aim_block' and its 'aim_face', the hotbar 'slot', the best 'tool_slot' for it, the 'block_slot')
+    extra: dict | None = None
 
 
 # Capability names an adapter may list. The core checks these before using a part.

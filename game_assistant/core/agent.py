@@ -39,21 +39,10 @@ How to answer:
   facts from game_view_now or tools.
 - Never invent names, numbers, abilities, locations or lore. If there is no name, say you don't know
   its name. If a fact is missing, say so.
-- damage_taken_percent: 100 is normal damage, above 100 is a weakness, below 100 a resistance.
-  status_buildup_needed: lower numbers trigger sooner; immune_to: statuses that never build up.
-  weak_to: types clearly above the enemy's usual; takes_extra_from_everything: every type does extra
-  damage (say that rather than listing every type).
-- Facts are base values from the game data; mention that only if asked how exact they are.
-- For "where is X", "where do I find X", "what drops X": call search_game_data and give the one or two
-  most useful places, not the whole list, unless asked for all.
-- wiki: an offline copy of the Elden Ring wiki. Use it for attack patterns and boss strategies
-  (aspect fight), where to find things (location), what a place holds (here), questlines (quest),
-  mechanics and anything else the game data can't say. web_search only if the wiki has nothing.
-- "What is there to do here?", "where am I?": call where_am_i, then wiki with its wiki_page_for_here
-  and aspect "here". "Where is X?": where_is. "Anything good near me?": items_near_me.
+{notes}- Facts are base values from the game data; mention that only if asked how exact they are.
 - look_at_screen shows you the game picture. Use it when the question is about something visible that
   game_view_now doesn't cover: scenery, a structure, a gust or glow, an item on the ground, a sign, a
-  puzzle. Then name what you see and use the wiki for what it does ("that's a Spiritspring: ...").
+  puzzle. Then name what you see and look up what it does.
   For "what is that?" or "how do I get up/past this?", if the game facts only show ground or a wall
   at the crosshair, always look_at_screen before answering: never answer "just a wall". Pictures
   from earlier questions are gone: look again for each new question about what is visible. Navi
@@ -68,13 +57,7 @@ How to answer:
 - Plain text, no markdown, no lists. Don't mention ids, refs or other internal numbers.
 - Mention only the thing asked about; leave out other things nearby unless the player asks.
 
-Examples of the right length:
-  "Can you see that?" -> "Yes! A Giant Dog, about 50 metres ahead."
-  "What about those over there?" -> "Three Putrid Corpses, about 45 metres to the right."
-  "What's it weak to?" -> "Fire and slash!"
-  "Lead me to the Forsaken Ruins." -> "This way! About 150 metres west."
-  "Where's the Moonveil?" -> "In Gael Tunnel, guarded by a Magma Wyrm."
-"""
+{examples}"""
 
 PERSONA = """
 You are a small glowing fairy companion floating beside the player's character, like the guiding
@@ -83,8 +66,8 @@ fairy in an adventure game. Talk like one: bright, quick, a little eager ("Look!
 You move only when the player asks you to; never fly anywhere on your own.
 - "Go to", "fly to", "show me" or "lead me to" something nearby (an enemy, what they're looking at):
   use the fairy tool. Your range for those is {leash:.0f} metres.
-- "Take me to", "guide me to" or "lead me to" a place or an item somewhere in the world (a grace, a
-  ruin, a castle, "the Moonveil"): use guide_to. You fly ahead toward it, up to {guide:.0f} metres in
+- "Take me to", "guide me to" or "lead me to" a place or an item somewhere in the world ({places}):
+  use guide_to. You fly ahead toward it, up to {guide:.0f} metres in
   front of the player, and keep going as they follow, so tell them which way and roughly how far."""
 
 
@@ -137,10 +120,9 @@ TOOLS = [
     },
     {
         'name': 'guide_to',
-        'description': 'Guide the player to a named place anywhere in this world (a Site of Grace, a ruin, a '
-                       'castle, a cave) or to where an item is found: you fly ahead along a walkable route until '
-                       'they arrive. Returns its distance and compass direction. For "the nearest grace", pass '
-                       'place "nearest site of grace" (or "nearest landmark").',
+        'description': 'Guide the player to a named place anywhere in this world ({places}) or to where an '
+                       'item is found: you fly ahead along a walkable route until they arrive. Returns its '
+                       'distance and compass direction. {nearest_hint}',
         'input_schema': {
             'type': 'object',
             'properties': {'place': {'type': 'string', 'description': 'Place or item name, e.g. "Forsaken Ruins".'}},
@@ -150,12 +132,12 @@ TOOLS = [
     },
     {
         'name': 'nearest_places',
-        'description': 'The Sites of Grace (or landmarks) nearest the player, nearest first, with distance and '
-                       'compass direction. Use for "nearest grace", "closest site of grace", "what is near me". '
+        'description': 'The places of a kind ({kinds}) nearest the player, nearest first, with distance and '
+                       'compass direction. Use for "the nearest ...", "what is near me". '
                        'Never answer "nearest" questions from search_game_data: it does not know distances.',
         'input_schema': {
             'type': 'object',
-            'properties': {'kind': {'type': 'string', 'enum': ['site of grace', 'landmark']}},
+            'properties': {'kind': {'type': 'string', 'enum': ['KINDS']}},
             'additionalProperties': False,
         },
     },
@@ -175,8 +157,8 @@ TOOLS = [
     },
     {
         'name': 'where_am_i',
-        'description': "The player's surroundings by name: nearest Sites of Grace and landmarks with distance and "
-                       'direction, the world, and the wiki page that best describes this spot.',
+        'description': "Where the player is, by name: the region or biome, nearby named places with distance and "
+                       'direction, and anything else the game reports about this spot (coordinates, time, weather).',
         'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     },
     {
@@ -229,16 +211,8 @@ SCREEN_WORDS = re.compile(
     r"what does (this|it) say|read (this|that))\b", re.I)
 
 LOOK_HINTS = """Picture 1: the whole game screen now. Picture 2: its middle third, zoomed (the crosshair is its centre).
-Name the most notable thing near the centre, as the game calls it. Elden Ring things that are easy to miss:
-- Spiritspring: a tall column of pale white mist or wind against a cliff, rising from a misty swirl on the ground. It
-  looks like a waterfall, but in Elden Ring a white misty column at a cliff foot is usually a Spiritspring (jump into it
-  on Torrent to be carried up the cliff). Say waterfall only if you see falling water landing in a pool or stream.
-- Site of Grace: a small golden light with gold rays pointing the way; Stake of Marika: a wooden stake with a faint glow.
-- Lift: a round stone platform with a pressure plate or a small pedestal; Waygate / Sending Gate: a glowing portal or archway.
-- Fog wall: a golden or white mist in a doorway (a boss or area); an Evergaol: a stone circle with a blue barrier.
-- Items on the ground: small white-gold glowing motes; messages: glowing orange writing on the ground; bloodstains: red pools.
-- Chests, Imp statues (need Stonesword Keys), Minor Erdtrees, ruins, churches, caves, catacomb doors, Divine Towers.
-Then use the wiki for what it does or how to use it. If nothing stands out, say what is there in a few words."""
+Name the most notable thing near the centre, as the game calls it.{hints}
+If nothing stands out, say what is there in a few words."""
 
 
 
@@ -267,13 +241,25 @@ def direction(cam, pos) -> str:
     return 'right' if angle > 0 else 'left'
 
 
+# How orders and tools talk about the game's places and characters: the adapter's order_words over these.
+ORDER_WORDS = {
+    'places': 'a named place in the game',                 # what kinds of place there are, as examples
+    'named': "'the place's name'",                         # two place names, quoted
+    'nearest': "'nearest' and the kind of place",          # how to ask for the nearest one
+    'nearest_hint': 'For "the nearest X", pass place "nearest X".',
+    'character': "'Enemy Name'",                           # one character kind, quoted
+    'characters': "'Enemy Name', 'Other Enemy'",
+    'character_plural': 'enemies of one kind',
+}
+
 COMMAND_SYSTEM = """The player of {game} gave an order for their character (it walks there by itself, with
 Navi leading), or attacks. Turn it into exactly one action by calling one action tool: fight_character
 (fight or attack an enemy until it's down: any attack order), attack_character (land one hit, only
 when the player asks for one: "hit it once"), walk_to_character (a
 character or enemy near the player, by name, or "enemy" for the nearest hostile one: the list of
-characters around is given), walk_to_place (a named place: a Site of Grace, landmark, dungeon, ruin),
-walk_to_nearest (the nearest place of a kind), walk_to_crosshair ("that", "over there"), stop_walking,
+characters around is given), walk_to_place (a named place: {places}),
+walk_to_nearest (the nearest place of a kind: {nearest}), get_item (gather and craft an item, where the
+game has crafting), walk_to_crosshair ("that", "over there"), stop_walking,
 or ask_player when it is unclear (one short question, at most two options). Enemies and characters are
 not places: never send the player to where an item is found instead. Use where_is or nearest_places
 first only to check a place name. Never answer with text alone."""
@@ -281,15 +267,16 @@ first only to check a place name. Never answer with text alone."""
 PLAN_SYSTEM = """The player of {game} gave an order for their character: the character walks, moves and
 fights by itself, step by step, until the order is done. Turn the order into steps by calling make_plan once.
 Step kinds:
-- go: walk to `target`: a place name ('Groveside Cave', 'Gatefront Ruins'), 'nearest site of grace',
-  'nearest landmark', a character kind from the characters around ('Godrick Soldier'), 'found' (the
+- go: walk to `target`: a place name ({named}), {nearest}, a character kind from the characters
+  around ({character}), 'found' (the
   character an until_see found), 'crosshair' (what the player looks at), 'start' (where the order was
   given: "come back here"). engage: 'none' (walk past enemies: "without fighting"), 'attackers' (fight only
   what attacks), 'all' (fight every enemy met on the way, then go on: "kill anything you meet on the way").
   until_see: stop as soon as a character of this kind is in sight ("until you encounter a soldier").
-- fight: `target` a kind ('Godrick Soldier', 'Boar'), 'enemy' (any hostile) or 'found'. count 'one' or
+- fight: `target` a kind ({characters}), 'enemy' (any hostile) or 'found'. count 'one' or
   'all' (until none of them is left nearby: "kill everything", "all the soldiers"). cycle: kinds to take in
-  turn ("alternating soldiers and other things": ['Godrick Soldier', 'other']; 'other' = any other enemy).
+  turn ("alternating {character_plural} and other things": [{character}, 'other']; 'other' = any other
+  enemy).
 - move: shape 'circle', 'line' (straight ahead), 'wander' (around, to random places nearby); seconds; until_see
   as for go ("walk around until you meet a soldier": wander with until_see, no seconds).
 - wait: seconds.
@@ -330,9 +317,14 @@ COMMAND_TOOLS = [
     {'name': 'walk_to_place', 'description': 'Walk to a named place (as the game names it).',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
                       'additionalProperties': False}},
-    {'name': 'walk_to_nearest', 'description': "Walk to the nearest place of a kind: 'site of grace' or 'landmark'.",
-     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['site of grace', 'landmark']}},
+    {'name': 'walk_to_nearest', 'description': "Walk to the nearest place of a kind ({kinds}).",
+     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['KINDS']}},
                       'required': ['kind'], 'additionalProperties': False}},
+    {'name': 'get_item', 'description': "Get the player an item: gather it and craft it, with whatever that "
+     "takes (mining, crafting tools and stations on the way). For 'craft me some sticks', 'get me a stone "
+     "pickaxe', 'mine cobblestone', 'chop wood'. item: its name; count: how many (leave out for some).",
+     'input_schema': {'type': 'object', 'properties': {'item': {'type': 'string'}, 'count': {'type': 'integer'}},
+                      'required': ['item'], 'additionalProperties': False}},
     {'name': 'walk_to_crosshair', 'description': 'Walk to what the player is looking at.',
      'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'name': 'stop_walking', 'description': 'Stop walking.',
@@ -344,6 +336,25 @@ COMMAND_TOOLS = [
 ]
 
 
+
+def _worded(tool: dict, words: dict, adapter) -> dict:
+    """A tool with this game's words in its description, and its kinds of place in a 'KINDS' enum."""
+    import copy
+    t = copy.deepcopy(tool)
+    kinds = list(getattr(adapter, 'place_kinds', None) or ())
+    if 'description' in t:
+        t['description'] = t['description'].replace('{places}', words['places']) \
+            .replace('{nearest_hint}', words['nearest_hint']).replace('{kinds}', ', '.join(kinds) or 'any')
+    props = (t.get('input_schema') or {}).get('properties') or {}
+    for v in props.values():
+        if v.get('enum') == ['KINDS']:
+            if kinds:
+                v['enum'] = kinds
+            else:
+                v.pop('enum')
+    return t
+
+
 class Agent:
     def __init__(self, adapter: GameAdapter, guard: SpendGuard | None = None, client: anthropic.Anthropic | None = None,
                  companion: Companion | None = None):
@@ -351,8 +362,12 @@ class Agent:
         self.guard = guard or SpendGuard()
         self.client = client or anthropic.Anthropic()
         self.companion = companion
-        persona = PERSONA.format(leash=companion.leash, guide=companion.guide_ahead) if companion else ''
-        self.system = SYSTEM.format(game=adapter.game, persona=persona)
+        self.words = {**ORDER_WORDS, **(getattr(adapter, 'order_words', None) or {})}
+        persona = PERSONA.format(leash=companion.leash, guide=companion.guide_ahead,
+                                 places=self.words['places']) if companion else ''
+        notes = (getattr(adapter, 'prompt_notes', '') or '').rstrip('\n')
+        self.system = SYSTEM.format(game=adapter.game, persona=persona, notes=notes + '\n' if notes else '',
+                                    examples=getattr(adapter, 'prompt_examples', '') or '')
         self.messages: list[dict] = []
         self.tools = [t for t in TOOLS
                       if (t['name'] != 'search_game_data' or CAP_SEARCH in adapter.capabilities)
@@ -360,8 +375,15 @@ class Agent:
                       and (t['name'] != 'guide_to' or (companion is not None and CAP_PLACES in adapter.capabilities))
                       and (t['name'] not in ('nearest_places', 'where_am_i', 'where_is', 'items_near_me')
                            or CAP_PLACES in adapter.capabilities)
+                      # (Elden Ring's kinds of place and its item lists; Minecraft finds places by name)
+                      and (t['name'] != 'nearest_places' or getattr(adapter, 'place_kinds', None) != ())
+                      and (t['name'] != 'items_near_me' or hasattr(adapter, 'items_near_me'))
                       and (t['name'] != 'wiki' or getattr(adapter, 'wiki', None) is not None)
                       and (t['name'] != 'look_at_screen' or CAP_SCREEN in adapter.capabilities)]
+        self.tools = [_worded(t, self.words, adapter) for t in self.tools]
+        self.command_tools = [_worded(t, self.words, adapter) for t in COMMAND_TOOLS
+                              if (t['name'] != 'walk_to_nearest' or getattr(adapter, 'place_kinds', None) != ())
+                              and (t['name'] != 'get_item' or hasattr(adapter, 'book'))]
         sources = getattr(adapter, 'web_sources', None)
         if sources:  # Anthropic's server-side web search, limited to the game's wikis ($0.01 per search)
             self.tools.append({'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 2,
@@ -376,7 +398,7 @@ class Agent:
         around = self._characters_around()
         context = f'<recent_conversation>{heard}</recent_conversation>\n' if heard else ''
         msgs = [{'role': 'user', 'content': f'<characters_around>{around}</characters_around>\n{context}\n{text}'}]
-        system = PLAN_SYSTEM.format(game=self.adapter.game)
+        system = PLAN_SYSTEM.format(game=self.adapter.game, **self.words)
         for _ in range(3):
             self.guard.check()
             msg = self.client.messages.create(model=MODEL, max_tokens=MAX_TOKENS * 2, system=system, tools=tools,
@@ -398,10 +420,10 @@ class Agent:
     def command(self, text: str) -> dict | None:
         """One action for an order, from Haiku: {'tool': name, 'input': {...}} or None. Its own short
         exchange (not the question history); a few cents of a cent; through the spending guard."""
-        tools = [t for t in self.tools if t.get('name') in ('where_is', 'nearest_places')] + COMMAND_TOOLS
+        tools = [t for t in self.tools if t.get('name') in ('where_is', 'nearest_places')] + self.command_tools
         around = self._characters_around()
         msgs = [{'role': 'user', 'content': f'<characters_around>{around}</characters_around>\n\n{text}'}]
-        system = COMMAND_SYSTEM.format(game=self.adapter.game)
+        system = COMMAND_SYSTEM.format(game=self.adapter.game, **self.words)
         for _ in range(3):
             self.guard.check()
             msg = self.client.messages.create(model=MODEL, max_tokens=MAX_TOKENS, system=system, tools=tools,
@@ -410,7 +432,7 @@ class Agent:
             self.guard.record(MODEL, msg.usage, 'command')
             uses = [b for b in msg.content if b.type == 'tool_use']
             for b in uses:
-                if b.name in {t['name'] for t in COMMAND_TOOLS}:
+                if b.name in {t['name'] for t in self.command_tools}:
                     return {'tool': b.name, 'input': dict(b.input)}
             if not uses:
                 return None
@@ -455,7 +477,17 @@ class Agent:
         snap = self.adapter.snapshot()
         if not snap.in_world:
             return {'error': 'no character in the world right now (loading, menu or title screen)'}
-        return lookat.facts(lookat.resolve(snap, self.adapter.raycast), self._knowledge)
+        return self._with_crosshair(lookat.facts(lookat.resolve(snap, self.adapter.raycast), self._knowledge))
+
+    def _with_crosshair(self, facts: dict) -> dict:
+        """The game's own word on what the crosshair is on, when the adapter has one (Minecraft: the block)."""
+        more = getattr(self.adapter, 'crosshair_facts', None)
+        if more is not None:
+            try:
+                facts.update(more() or {})
+            except (GameNotRunning, TimeoutError, RuntimeError):
+                pass
+        return facts
 
     def tool_nearby_characters(self, inp: dict) -> dict:
         radius = max(1.0, min(80.0, float(inp.get('max_distance_m') or 40.0)))
@@ -541,8 +573,10 @@ class Agent:
         if not place or self.companion is None:
             return {'error': 'need a place name'}
         low = place.lower()
-        if any(w in low for w in ('nearest', 'closest', 'nearby')) and hasattr(self.adapter, 'nearest_places'):
-            found = self.adapter.nearest_places('landmark' if 'landmark' in low else 'site of grace', limit=3)
+        kinds = tuple(getattr(self.adapter, 'place_kinds', None) or ())
+        if any(w in low for w in ('nearest', 'closest', 'nearby')) and hasattr(self.adapter, 'nearest_places') \
+                and kinds:   # (a game with fixed kinds of place; others, Minecraft, find the nearest by name)
+            found = self.adapter.nearest_places(next((k for k in kinds if k in low), kinds[0]), limit=3)
         else:
             found = self.adapter.locate(place)
         if 'error' in found:
@@ -562,7 +596,8 @@ class Agent:
         return {'error': 'no reachable place with that name', 'details': notes or found.get('note')}
 
     def tool_nearest_places(self, inp: dict) -> dict:
-        res = self.adapter.nearest_places(inp.get('kind') or 'site of grace', limit=5)
+        kinds = tuple(getattr(self.adapter, 'place_kinds', None) or ()) or ('',)
+        res = self.adapter.nearest_places(inp.get('kind') or kinds[0], limit=5)
         for r in res.get('results', []):
             r.pop('position', None)  # internal
         return res
@@ -617,7 +652,8 @@ class Agent:
             im.save(buf, 'JPEG', quality=82)
             return {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg',
                                                 'data': base64.b64encode(buf.getvalue()).decode('ascii')}}
-        return [block(img), block(centre), {'type': 'text', 'text': LOOK_HINTS}]
+        return [block(img), block(centre),
+                {'type': 'text', 'text': LOOK_HINTS.format(hints=getattr(self.adapter, 'look_hints', '') or '')}]
 
     def capture_screen(self) -> None:
         """Take the picture now (the talk key went down), so look_at_screen shows what the player was
@@ -685,7 +721,7 @@ class Agent:
                 res = lookat.resolve(snap, self.adapter.raycast)
                 if res.kind in ('entity', 'target') and res.best and res.confidence >= 0.6:
                     ans.view_entity = res.best.entity.id
-                view = json.dumps(lookat.facts(res, self._knowledge))
+                view = json.dumps(self._with_crosshair(lookat.facts(res, self._knowledge)))
             else:
                 view = json.dumps({'error': 'no character in the world right now (loading, menu or title screen)'})
         except (GameNotRunning, TimeoutError, RuntimeError) as e:
