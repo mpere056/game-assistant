@@ -35,8 +35,9 @@ NAME_MATCH = 0.72   # how alike a heard word and a name word must be (difflib ra
 
 _STOP = re.compile(r"\b(stop|halt|cancel|never ?mind|wait)\b", re.I)  # in a short order (STOP_WORDS words)
 # ...unless another order follows it: 'wait, kill the bat actually' is that order (2026-10-12 21:36: it stopped)
-_STOP_LEAD = re.compile(r"^\W*(?:(?:no|oh|okay|ok|sorry|hmm)\b[\s,.!-]*)*(?:wait|stop|hold on|cancel(?: that)?|"
-                        r"never ?mind|scratch that)\b[\s,.!-]*(?:(?:no|actually|instead)\b[\s,.!-]*)*", re.I)
+_STOP_LEAD = re.compile(r"^\W*(?:(?:no|oh|okay|ok|sorry|hmm)\b[\s,.!-]*)*(?:(?:wait|stop|hold on|cancel(?: that)?|"
+                        r"never ?mind|scratch that)\b[\s,.!-]*(?:(?:no|actually|instead)\b[\s,.!-]*)*)+", re.I)
+# (several in a row: 'wait, stop, no, not the Iron Golem...')
 STOP_WORDS = 5
 _NEAREST = re.compile(r"\b(nearest|closest|next|near(?:est)?by)\s+(?P<what>[a-z' -]+)", re.I)
 _TARGET = re.compile(r"\b(go|walk|run|head|move|take|lead|bring|get|travel|guide)\b.*?\b(to|towards?|for)\s+"
@@ -72,6 +73,20 @@ _VERBS = r"(?:kill|attack|fight|hit|strike|defeat|beat|take|go|walk|run|head|mov
 _THEN = re.compile(r"\s*,?\s*\b(?:and then|and after that|after that|afterwards|then|and also|and)\b\s*,?\s*"
                    r"(?=(?:[a-z']+\s+){0,3}?" + _VERBS + r"\b)", re.I)
 _AFTER_CLAUSE = re.compile(r"^(?:after|once|when)\b[^,]*?(?:,\s*|\s+(?=(?:please\s+)?" + _VERBS + r"\b))", re.I)
+# Getting items (a game with recipes and gathering): 'get me a stone pickaxe', 'mine 10 cobblestone', 'craft
+# some sticks'. ('get to the village', 'get me to the village' are walking. 'Draft': speech recognition's
+# 'craft', 2026-10-13.)
+_GET = re.compile(r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:go\s+)?(?:get|gather|collect|mine|chop|"
+                  r"craft|draft|make|build|fetch|obtain|grab)\b(?:\s+(?:me|us|myself))?\s+(?!to\b|towards?\b|back\b|"
+                  r"there\b|over\b|me\s+to\b)(?P<what>.+)$", re.I)
+_AMOUNT = re.compile(r"^(?:(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|a couple of|a few|a stack of)|"
+                     r"(?P<one>an?|one)|some|more)\s+", re.I)
+ONE_OF = re.compile(r"(pickaxe|axe|shovel|sword|hoe|table|furnace|chest|bed|door|boat|bucket|shield|helmet|"
+                    r"chestplate|leggings|boots|bow)s?$", re.I)
+SOME = 8              # 'get me some cobblestone': this many
+# A correction of the last walk order: 'no, not the Iron Golem, but like iron blocks' (2026-10-13: it stopped)
+_CORRECTION = re.compile(r"^\W*not (?:the |that |this |those |an? )?(?P<no>[a-z' ]+?)\s*[,.]?\s*(?:but |rather |"
+                         r"instead |i mean )+(?:like |the |some |a |an |more )*(?P<yes>[a-z' ]+?)\W*$", re.I)
 _NOT_THIS = re.compile(r"\bnot (?:the |that |those |these |an? )?([a-z']+)", re.I)  # 'not the Eagle'
 # How many: 'kill two soldiers', 'just two more', 'a couple of bats', '3 more' (2026-10-12: 'kill just two more'
 # went to the planner as 'any enemy' twice; 'kill these soldiers' killed one and stopped).
@@ -99,6 +114,7 @@ class WalkAction:
     count: int | None = None      # 'kill two soldiers': that many of them (with every), None: all
     then: list = field(default_factory=list)  # 'kill the boar and then the soldiers': the orders after this
     options: list = field(default_factory=list)  # for 'ask': [(name, point)]
+    steps: list = field(default_factory=list)    # for 'task': what to gather and craft (core/crafting.py)
 
 
 def split_orders(text: str) -> list[str]:
@@ -137,6 +153,7 @@ class CommandResolver:
         self.last_kind: str | None = None                # the last enemy kind attacked ('the next one')
         self.last_attack_t = -1e9                        # when the last attack order was understood
         self._heard: list = []                           # (time, text) of the conversation, newest last
+        self.last_walk_t = -1e9                          # when the last walk order was understood
 
     def heard(self, text: str) -> None:
         """Something said in the conversation (a question and Navi's answer): 'kill all of them' right after
@@ -144,11 +161,17 @@ class CommandResolver:
         now = time.monotonic()
         self._heard = [(t, x) for t, x in self._heard if now - t < CONTEXT_SECONDS] + [(now, text)]
 
-    def handle(self, text: str) -> WalkAction:
+    def handle(self, text: str, use_model: bool = True) -> WalkAction:
+        """use_model False: the rules only (what they don't get is 'none': the caller thinks it through)."""
+        saved = self.ask_model
+        if not use_model:
+            self.ask_model = None
         try:
             return self._handle(text)
         except GameNotRunning:
             return WalkAction('none', "I can't see the game right now.")
+        finally:
+            self.ask_model = saved
 
     def _handle(self, text: str) -> WalkAction:
         t = normalize(text).strip().rstrip('?')
@@ -172,8 +195,19 @@ class CommandResolver:
         rest = _STOP_LEAD.sub('', t).strip()
         if rest != t and rest and (_ATTACK.search(rest) or _TARGET.search(rest) or _NEAREST.search(rest)):
             return self._handle(rest)                    # a new order instead of the current one
+        m = _CORRECTION.match(rest)
+        if m and time.monotonic() - self.last_walk_t < FOLLOW_UP_SECONDS and not _ATTACK.search(rest):
+            # 'not X, but Y' just after a walk order: walk to Y instead (and not to anything called X)
+            got = self._place_or_character(_clean(m.group('yes')), avoid=_clean(m.group('no')))
+            if got is not None:
+                return got
         if _STOP.search(t) and len(t.split()) <= STOP_WORDS:
             return WalkAction('stop', 'Stopping.')
+        m = _GET.match(rest or t)
+        if m and hasattr(self.adapter, 'book'):
+            got = self._get_item(m.group('what'))
+            if got is not None:
+                return got
         m = _ATTACK.search(t)
         if m:
             return self._attack(_ONE_HIT.sub(' ', m.group('target')), 'hit' if _ONE_HIT.search(t) else 'fight',
@@ -188,6 +222,9 @@ class CommandResolver:
         m = _NEAREST.search(t)
         if m:
             what = _clean(m.group('what'))
+            if getattr(self.adapter, 'place_kinds', None) == ():   # a game that finds the nearest by name
+                got = self._place_or_character(what)
+                return got or WalkAction('none', f"I can't find any {what or 'of those'} near you.")
             if what in KINDS:
                 return self._nearest(KINDS[what] or 'site of grace')
             got = self.character(what)
@@ -201,7 +238,7 @@ class CommandResolver:
         if m and (_THAT.match(target) or not target):
             return self._crosshair()
         if target:
-            got = self.character(target) or self._named(target)
+            got = self._place_or_character(target)
             if got is not None:
                 return got
         if self.ask_model is not None:
@@ -271,7 +308,10 @@ class CommandResolver:
             return None
         d, e, name = best
         label = name or 'that enemy'
-        return WalkAction('walk', f"There's a {label} {round(d)} metres away. Let's go!", tuple(e.pos), label, e.id)
+        self.last_walk_t = time.monotonic()
+        unit = getattr(self.adapter, 'distance_unit', 'metres')
+        an = 'an' if label[:1].lower() in 'aeiou' else 'a'
+        return WalkAction('walk', f"There's {an} {label} {round(d)} {unit} away. Let's go!", tuple(e.pos), label, e.id)
 
     def _attack(self, target: str, mode: str = 'fight', text: str = '', ask: bool = True) -> WalkAction:
         """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and fight it
@@ -432,6 +472,62 @@ class CommandResolver:
             return self._walk(None, r.surface.pos)
         return WalkAction('none', "I can't tell where you mean.")
 
+    def _get_item(self, what: str) -> WalkAction | None:
+        """'a stone pickaxe', '10 cobblestone', 'some sticks': a task (gather and craft), or None (not an item)."""
+        from .crafting import CantMake, plan
+        what = _FILLER.sub(' ', what.lower()).strip(' .!?')
+        n = None
+        m = _AMOUNT.match(what + ' ')
+        if m:
+            word = (m.group('n') or '').lower()
+            n = 1 if m.group('one') else int(word) if word.isdigit() else \
+                {'a couple of': 2, 'a few': 3, 'a stack of': 64}.get(word, _NUMBERS.get(word))
+            what = what[m.end():].strip() if m.end() <= len(what) else ''
+        items = self.adapter.match_item(what)
+        if not items:
+            return None
+        if n is None:
+            n = 1 if ONE_OF.search(what) else SOME
+        snap = self.adapter.snapshot()
+        have = dict(((snap.extra or {}).get('inventory') or {}))
+        why = ''
+        for item in items:
+            try:
+                steps = plan(self.adapter.book(), item, have.get(item, 0) + n if have.get(item, 0) else n, have)
+            except CantMake as e:
+                why = why or str(e)
+                continue
+            name = item.split(':')[-1].replace('_', ' ')
+            if not steps:
+                return WalkAction('none', f'You already have {name}!')
+            said = name if n == 1 or name.endswith(('s', 'ore', 'iron', 'gold', 'copper', 'dirt', 'stone'))                 else name + 's'
+            say = f"On it! I'll get {'a' if n == 1 else n} {said}."
+            last = steps[-1]
+            if last[0] == 'craft' and last[1].result == item and last[1].count > 1                     and (n - have.get(item, 0)) % last[1].count:
+                made = last[1].count * last[2]        # ('craft 2 sticks': they come 4 at a time)
+                say = f"{name.capitalize()}s come {last[1].count} at a time, so I'll make {made}."
+            return WalkAction('task', say, name=item, count=n, steps=steps)
+        return WalkAction('none', f"{why or 'I do not know how to get that'}.")
+
+    def _place_or_character(self, what: str, avoid: str = '') -> WalkAction | None:
+        """A character near the player by that name, or a place (or kind of block) by that name. A character
+        whose name was only partly said loses to a place that matches ('some iron': iron ore, not the Iron
+        Golem, 2026-10-13); avoid: words of what the player said not to go to."""
+        heard = set(re.findall(r"[a-z0-9']+", what))
+        no = set(re.findall(r"[a-z0-9']+", avoid))
+        got = self.character(what)
+        if got is not None and no and got.name and all(any(_word_like(w, n) for n in got.name.lower().split())
+                                                       for w in no):
+            got = None                                   # that's the one they said not to
+        if got is not None and got.name:
+            name_words = [n for n in re.findall(r"[a-z0-9']+", got.name.lower()) if n not in _NOT_NAME]
+            whole = all(any(_word_like(h, n) for h in heard) for n in name_words)
+            if not whole:
+                place = self._named(what)
+                if place is not None:
+                    return place
+        return got or self._named(what)
+
     def _named(self, name: str) -> WalkAction | None:
         got = self.adapter.locate(name)
         if got.get('found_via_item'):  # an item's location is not a place to walk to by name
@@ -444,6 +540,8 @@ class CommandResolver:
             if r['name'] not in [n for n, _ in names]:
                 names.append((r['name'], r['position']))
         exact = [x for x in names if x[0].lower() == name.lower().strip()]
+        if all(r.get('kind') == 'block' for r in res):   # kinds of block (iron ore or deepslate iron ore): the nearest
+            return self._walk(res[0]['name'], res[0]['position'])
         if exact or len(names) == 1:
             return self._walk(*(exact or names)[0])
         return self._ask(names[:2])
@@ -451,6 +549,7 @@ class CommandResolver:
     # ---- helpers ----
 
     def _walk(self, name: str | None, point) -> WalkAction:
+        self.last_walk_t = time.monotonic()
         return WalkAction('walk', f"Let's go to {name}!" if name else "On my way!", tuple(point), name)
 
     def _ask(self, options: list) -> WalkAction:

@@ -57,6 +57,7 @@ TRAIL_SECONDS = 2.0      # the trail: world positions of the last 2 s (the user 
 TRAIL_SAMPLES = 30
 TRAIL_MIN_SPEED = 2.5    # m/s: a place where it moved slower than this leaves no trail dot
 ARRIVE = 15.0            # guide mode: this close (horizontally)...
+AREA_EDGE = 4.0          # metres: this near a place's area (a village) counts as in it
 ARRIVE_HEIGHT = 6.0      # ...and this close in height counts as arrived (the user was told "here we are"
                          # standing on the ground above a grace that was 67 m down inside a tunnel)
 GROUND_EVERY = 20        # guide mode: frames between ground checks under the fairy
@@ -108,6 +109,8 @@ class Companion:
         self._sight_ahead: float | None = None  # guide mode: how far ahead the player can still see it
         self.plan_async = True        # plan routes on a background thread (tests plan inline)
         self.walking = False          # set by the app: the character walks this route itself (auto-walk)
+        self.shape_fn = None          # adapter.goal_shape: what counts as there (an area, any height), if any
+        self.walk_decides = False     # walking step by step (Minecraft): the walk says when it's there
         self.plan_close = False       # plan a route even to a goal within ARRIVE (the character walks there
                                       # itself: 20:34, a soldier 13 m away behind a wall got no route at all)
         # The game's own navmesh, when the adapter has one (adapter.route): exact walkable routes of
@@ -157,6 +160,12 @@ class Companion:
         self._said_no_way = False
         self._plan_gen += 1
 
+    def replan(self) -> None:
+        """Throw the route away and plan afresh from where the player is now (a plan still running is
+        dropped)."""
+        self._plan_gen += 1
+        self.route, self.route_complete, self._route_time = None, False, -1e9
+
     def _cast(self, rays):
         return self.raycast(rays)
 
@@ -167,6 +176,14 @@ class Companion:
         gen = self._plan_gen
 
         def work():
+            try:
+                plan()
+            finally:
+                # (always: a plan that failed half-way left this set, and the walk waited for a route forever,
+                # 2026-10-13)
+                self._planning = False
+
+        def plan():
             if self.route_fn is not None:
                 try:
                     route = self.route_fn(start, goal)
@@ -187,7 +204,7 @@ class Companion:
                             route = self.route_fn(route.waypoints[-1], goal)
                         except Exception:
                             route = None
-                        if route is None or len(route.waypoints) < 2 or gen != self._plan_gen:
+                        if route is None or len(route.waypoints) < 2 or gen != self._plan_gen or self.route is None:
                             break
                         self.route = list(self.route) + list(route.waypoints[1:])
                         self.route_complete = route.reaches_goal
@@ -295,11 +312,23 @@ class Companion:
         goal, p = self.target.point, snap.player.pos
         if self.plan_close and self.route is None and not self._planning and self.t - self._route_time > 1.0:
             self._start_plan(p, goal)
-        if math.hypot(goal[0] - p[0], goal[2] - p[2]) < ARRIVE and not (self.walking and self.route is None):
+        shape = None
+        if self.shape_fn is not None:
+            try:
+                shape = self.shape_fn(goal)
+            except Exception:
+                shape = None
+        area = (shape or {}).get('area')
+        if area is not None:     # a place that's an area (a village): anywhere in it, at any height
+            (x0, _y0, z0), (x1, _y1, z1) = area
+            near = x0 - AREA_EDGE <= p[0] <= x1 + AREA_EDGE and z0 - AREA_EDGE <= p[2] <= z1 + AREA_EDGE
+        else:
+            near = math.hypot(goal[0] - p[0], goal[2] - p[2]) < ARRIVE
+        if near and not (self.walking and self.route is None) and not (self.walking and self.walk_decides):
             # (the character walking there itself with no route yet: keep planning; switching to 'show' here
             # threw the plan away and left the walk waiting 15 s behind a wall, twenty-third session)
             dy = goal[1] - p[1]
-            if abs(dy) <= ARRIVE_HEIGHT:
+            if abs(dy) <= ARRIVE_HEIGHT or shape:   # (an area's or a column's height says nothing: there)
                 self.events.append(f'arrived:{self.target.name or "there"}')
             else:  # right above or below it (a cave, a tunnel, a cliff): show where it really is
                 self.events.append(f'level:{self.target.name or "it"}:{round(dy)}')

@@ -1,5 +1,14 @@
 # Status
 
+**2026-10-13, latest: Minecraft (Java 26.3), phase 7.** Tried in the game: questions and the wiki, "where am
+I", walking to places, structures and kinds of block (Baritone-like: block by block, mining and building on the
+way; a village counts as its area), and "give me a stone pickaxe" from nothing (wood, planks, sticks, a wooden
+pickaxe, cobblestone, the stone pickaxe: core/crafting.py plans from the game's recipes and loot tables,
+core/tasks.py gathers and crafts, clicks checked against the slot under the pointer). Orders the rules don't
+get are thought through by a model acting one simple order at a time (core/doer.py). Built, not yet tried:
+fighting (core/melee.py: charged swings, hit and back off, shields, creepers), fighting off mobs during tasks.
+See docs/games/minecraft.md. Elden Ring: combat and orders work well (PRs #11-#16).
+
 **2026-10-10, latest: F10 orders and auto-walk (phase 4b), learned links, ladders and lifts.** Built and
 tested offline only (73 tests); the user chose to test later. Hold F10 (or type "/go to ...") and say
 "go to the nearest site of grace": the character walks Navi's route by itself (mouse turns the camera,

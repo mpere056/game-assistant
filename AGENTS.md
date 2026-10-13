@@ -14,7 +14,8 @@ first (through the Attack on Elden Ring bridge), Minecraft planned next.
 2. **`.gitignore` is a whitelist.** It ignores everything and includes only source and docs.
 3. **Do not run `git commit` unless the user asked.**
 4. **Do not touch anything outside this project folder** unless the user explicitly names the path.
-   Game installs are read-only. Each game's bridge lives in its own repository.
+   Game installs are read-only. Each game's bridge lives in its own repository, except Minecraft's
+   (`bridges/minecraft/`, kept here at the user's choice; only its source is committed).
 5. **Offline single-player only.** Never play online, never circumvent, patch or probe anti-cheat.
    The assistant never writes game memory itself; game effects (the fairy's in-world body, damage,
    aggro) are requests carried out by the game's bridge, only when the player asked for them.

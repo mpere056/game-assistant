@@ -30,7 +30,8 @@ LLKHF_INJECTED = 0x10
 
 # Scan codes (set 1) of keys auto-walk may use.
 SCAN = {'W': 0x11, 'A': 0x1E, 'S': 0x1F, 'D': 0x20, 'E': 0x12, 'F': 0x21, 'Q': 0x10, 'R': 0x13, 'X': 0x2D,
-        'SPACE': 0x39, 'LSHIFT': 0x2A, 'LCTRL': 0x1D, 'TAB': 0x0F, 'C': 0x2E, 'V': 0x2F}
+        'SPACE': 0x39, 'LSHIFT': 0x2A, 'LCTRL': 0x1D, 'TAB': 0x0F, 'C': 0x2E, 'V': 0x2F,
+        **{str(i): 0x01 + i for i in range(1, 10)}, 'ESC': 0x01}
 # Virtual-key codes the watcher treats as "the player is moving": WASD, space, shift.
 MOVE_VKS = {0x57, 0x41, 0x53, 0x44, 0x20, 0x10, 0xA0, 0xA1}
 
@@ -91,13 +92,21 @@ class Keys:
 
     def set(self, actions) -> None:
         self._release_taps()
-        want = {a for a in actions if self.bindings.get(a) in SCAN}
+        want = {a for a in actions if self.bindings.get(a) in SCAN or self.bindings.get(a) in MOUSE_BUTTONS}
         tapped = {a for a, _t in self._tapped}
         want -= tapped  # a tapped key still down is released by its tap, not held
-        items = [_key(SCAN[self.bindings[a]], True) for a in self.held - want]
-        items += [_key(SCAN[self.bindings[a]], False) for a in want - self.held]
+        items = [self._input(a, True) for a in self.held - want]
+        items += [self._input(a, False) for a in want - self.held]
         _send(items)
         self.held = want
+
+    def _input(self, action: str, up: bool) -> INPUT:
+        k = self.bindings[action]
+        if k in MOUSE_BUTTONS:     # (held: the walk mining a block in Minecraft)
+            i = INPUT(type=INPUT_MOUSE)
+            i.u.mi = MOUSEINPUT(0, 0, 0, MOUSE_BUTTONS[k][1 if up else 0], 0, MARK)
+            return i
+        return _key(SCAN[k], up)
 
     def tap(self, action: str) -> None:
         """Press now; released TAP_HOLD seconds later (by a later set(), never waiting here), so a roll
@@ -134,8 +143,41 @@ class Keys:
     def release_all(self) -> None:
         self._release_taps(force=True)
         if self.held:
-            _send([_key(SCAN[self.bindings[a]], True) for a in self.held])
+            _send([self._input(a, True) for a in self.held])
         self.held = set()
+
+
+def point_at(x: int, y: int) -> None:
+    """The pointer to (x, y) on the desktop (a game's menu: onto one of its slots)."""
+    user32.SetCursorPos(int(round(x)), int(round(y)))
+
+
+def press(button: str = 'left') -> None:
+    """A click where the pointer is."""
+    down, up = MOUSE_BUTTONS['RMB' if button == 'right' else 'LMB']
+    items = []
+    for flag in (down, up):
+        i = INPUT(type=INPUT_MOUSE)
+        i.u.mi = MOUSEINPUT(0, 0, 0, flag, 0, MARK)
+        items.append(i)
+    _send(items)
+
+
+def click_at(x: int, y: int, button: str = 'left', shift: bool = False) -> None:
+    """Move the pointer to (x, y) on the desktop and click there (a game's menu: clicking its slots); shift held
+    for a shift-click."""
+    user32.SetCursorPos(int(x), int(y))
+    down, up = MOUSE_BUTTONS['RMB' if button == 'right' else 'LMB']
+    items = []
+    if shift:
+        items.append(_key(SCAN['LSHIFT'], False))
+    for flag in (down, up):
+        i = INPUT(type=INPUT_MOUSE)
+        i.u.mi = MOUSEINPUT(0, 0, 0, flag, 0, MARK)
+        items.append(i)
+    if shift:
+        items.append(_key(SCAN['LSHIFT'], True))
+    _send(items)
 
 
 class Turner:
@@ -158,6 +200,12 @@ class Turner:
         if counts:
             _send([_mouse(counts, 0)])
         self._yaw0, self._sent = cam_yaw, counts
+
+    def look(self, degrees: float) -> None:
+        """Tilt the camera (+ down), at the rate learned from turning."""
+        counts = max(-400, min(400, int(round(degrees / self.k))))
+        if counts:
+            _send([_mouse(0, counts)])
 
 
 class KeyWatch:

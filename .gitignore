@@ -16,8 +16,22 @@
 !/game_assistant/**/*.py
 !/tests/**/*.py
 
+# The Minecraft bridge (a Fabric mod): its source and build scripts only
+!/bridges/minecraft/build.gradle
+!/bridges/minecraft/settings.gradle
+!/bridges/minecraft/gradle.properties
+!/bridges/minecraft/gradlew
+!/bridges/minecraft/gradlew.bat
+!/bridges/minecraft/gradle/wrapper/gradle-wrapper.properties
+!/bridges/minecraft/gradle/wrapper/gradle-wrapper.jar
+!/bridges/minecraft/src/**/*.java
+!/bridges/minecraft/src/**/*.json
+
 # Never, even if matched above
 /.venv/
 /.local/
 /runtime/
 **/__pycache__/
+/bridges/minecraft/build/
+/bridges/minecraft/.gradle/
+/bridges/minecraft/run/

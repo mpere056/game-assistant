@@ -22,6 +22,28 @@ skills, navigation) only talks to that interface, so it runs unchanged on every 
 | Companion body | the fairy's in-world character: spawn and remove, place at a position each frame, ignored by or visible to enemies, strike an entity (damage plus hit reaction), draw an entity's attention | Attack on Elden Ring bridge (to build: spawn, NoDead, hide and pin like the stand-in; the damage queue; the "attract attention" throw) | phase 5 |
 | Capabilities | which parts this game has | listed in the adapter | yes |
 
+## Per-game settings (adapter class attributes, all optional; the core's defaults otherwise)
+
+Each game's own words and ways stay in its adapter, so nothing of one game leaks into another (2026-10-13:
+a Minecraft order was answered with Elden Ring's Sites of Grace).
+
+| Attribute | What it sets | Elden Ring | Minecraft |
+|---|---|---|---|
+| `prompt_notes`, `prompt_examples`, `look_hints` | the game's lines in the answer prompt | its rules, examples | half-hearts, blocks, the wiki |
+| `order_words` | how orders and tools name places and characters (`core/agent.py` ORDER_WORDS) | Sites of Grace, Godrick Soldier | villages, biomes, kinds of block; Zombie |
+| `place_kinds` | fixed kinds of place for "the nearest X" (`()`: found by name) | site of grace, landmark | `()` |
+| `default_keys` | key bindings over the core's | (settings) | Minecraft's defaults, Shift sneaks, 1-9 hotbar |
+| `walk_precise` | the route is every cell of a grid, walked cell by cell, re-planned at once when blocked | no (smooth pursuit) | yes |
+| `walk_sprint`, `walk_breaks` | run on long straights; swing blind at what blocks the way when stuck | yes, yes | no, no |
+| `goal_shape(point)` | what counts as there for a located place: `{'area': (min, max)}` (anywhere inside, any height: a village), `{'column': True}` (its height unknown), or None (the point) | none | structures: their area once loaded |
+| `use_doer`, `doer_examples` | orders of several parts, and orders the rules don't get, are thought through by a model acting one simple order at a time (core/doer.py); the simple orders it may give | no (plan steps) | yes |
+| `book()`, `match_item(words)`, `items_near`, `place_spot`, `locate_blocks` | getting items: the game's recipes and drops for core/crafting.py; the task's world for core/tasks.py | none | from the bridge |
+| `Snapshot.extra` | game state for route work (Minecraft: the crosshair's block, the hotbar) | none | yes |
+
+Route actions the walk knows (any game may use them): `ladder`, `lift`, `jump`, `step` (a jump up one step),
+`break` (aim at a point, hold the attack button until what's there is gone) and `place` (`bridge` or
+`pillar`).
+
 Later, for games without a single character to steer, two optional parts are added when the first
 such game arrives (not before): **units and selection** (strategy, tower defence) and **menus and
 turns** (turn-based games).
@@ -61,4 +83,4 @@ A game is **connected** when every test passes. The report is saved to
 | Game | Status | Notes |
 |------|--------|-------|
 | Elden Ring | connected (9/9 PASS, 2026-10-08) | [games/eldenring.md](games/eldenring.md) |
-| Minecraft | planned | client-side mod bridge; exact crosshair target from the game |
+| Minecraft | bridge and adapter built 2026-10-12, not yet checked in game | [games/minecraft.md](games/minecraft.md): a client-side Fabric mod (`bridges/minecraft/`); exact crosshair target from the game |
