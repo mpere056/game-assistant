@@ -261,7 +261,9 @@ characters around is given), walk_to_place (a named place: {places}),
 walk_to_nearest (the nearest place of a kind: {nearest}), get_item (gather and craft an item, where the
 game has crafting), walk_to_crosshair ("that", "over there"), stop_walking,
 or ask_player when it is unclear (one short question, at most two options). Enemies and characters are
-not places: never send the player to where an item is found instead. Use where_is or nearest_places
+not places: never send the player to where an item is found instead. Only a character that is what the player
+asked for (another name for the same kind is fine); never a different kind of creature because it is near: if
+none around is it, ask_player. Use where_is or nearest_places
 first only to check a place name. Never answer with text alone."""
 
 PLAN_SYSTEM = """The player of {game} gave an order for their character: the character walks, moves and

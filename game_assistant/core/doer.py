@@ -15,6 +15,7 @@ actions an order; the player's "stop" ends it.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Protocol
 
@@ -25,6 +26,8 @@ from .spend import SpendGuard
 MODEL = 'claude-haiku-5-5'
 MAX_TOKENS = 2048
 MAX_ACTIONS = 30
+THINK_SAY = 5.0         # seconds of thinking before a word to the player that it's still working it out
+PROGRESS_EVERY = 25.0   # seconds between progress lines while an action runs
 START_WAIT = 2.0        # seconds for an order to get going (the frame thread picks it up)
 ACTION_TIMEOUT = 900.0  # seconds one order may run
 
@@ -35,17 +38,29 @@ How you act: call `act` with one simple order in plain words, the kind the chara
 {examples}
 Each runs in the game until it's done; then you get what came of it and the game's state again. Think about
 what the order needs first (what has to be got or made before what; what's already held), then act step by
-step. If an action fails, think about why (the outcome says) and try another way; don't repeat the same
-failing action more than twice. Use where_is to check how far something is before setting off for it, and
-the wiki search for what you don't know about the game. When the order is done, or can't be done, call
-finish with one or two short sentences for the player. Never act beyond what the order asks.
+step. Do exactly what the player asked for: never take something else instead because it's near or alike
+(not another kind of creature, not another item); if the player said which one, it's that one. When there is
+no direct way (none near), reason about where it would be and how to get to it: where_is finds places, kinds
+of block and creatures anywhere the game has loaded; the wiki tells you about the game (where things live or
+spawn, what they need, when); then go there, explore (an order like 'explore 80 blocks north'), or wait for
+the right time, and check again. Be efficient: before a long job, think whether getting
+something first makes it much quicker overall (a pickaxe before digging down through stone: where_is gives how
+long digging there would take with what's held and with each pickaxe; better tools for a lot of mining), and
+do whatever is quickest in all. If an action fails, think about why (the outcome says) and try another way;
+don't repeat the same failing action more than twice. Keep the player told: each act's `say` says what you're
+doing and why, in a few words. When the order is done, or can't be done, call finish
+with one or two short sentences for the player. Never act beyond what the order asks. The recent
+conversation (if given) says what earlier orders were: a follow-up ("no, a zombie specifically") changes or
+narrows the last one.
 {notes}"""
 
 TOOLS = [
     {'name': 'act', 'description': 'Give the character one simple order and wait until it is done. Returns '
-     'what came of it (what Navi said while doing it) and the state after.',
-     'input_schema': {'type': 'object', 'properties': {'order': {'type': 'string'}}, 'required': ['order'],
-                      'additionalProperties': False}},
+     'what came of it (what Navi said while doing it) and the state after. say: one short line for the player '
+     'on what you are doing and why (spoken as it starts: "No pickaxe, and it\'s stone all the way down: making '
+     'one first!").',
+     'input_schema': {'type': 'object', 'properties': {'order': {'type': 'string'}, 'say': {'type': 'string'}},
+                      'required': ['order'], 'additionalProperties': False}},
     {'name': 'where_is', 'description': 'How far and which way the nearest place, kind of block or character of '
      'this name is (nothing is done).',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
@@ -91,18 +106,29 @@ class Doer:
         self.cancelled = True
         self.world.doer_stop()
 
-    def run(self, order: str) -> str:
-        """Do the order (blocking: on a worker thread). What was said at the end."""
+    def run(self, order: str, recent: str = '') -> str:
+        """Do the order (blocking: on a worker thread). What was said at the end. recent: the conversation
+        just before (earlier orders and what came of them), for follow-ups."""
         self.cancelled = False
-        msgs = [{'role': 'user', 'content': f'<state>{self.world.doer_state()}</state>\n\nThe order: {order}'}]
+        convo = f'<recent_conversation>{recent}</recent_conversation>\n' if recent else ''
+        msgs = [{'role': 'user',
+                 'content': f'{convo}<state>{self.world.doer_state()}</state>\n\nThe order: {order}'}]
         actions = 0
         for _turn in range(MAX_ACTIONS * 2):
             if self.cancelled:
                 return ''
             self.guard.check()
-            msg = self.client.messages.create(model=self.model, max_tokens=MAX_TOKENS, system=self.system,
-                                              tools=self.tools, messages=msgs, thinking={'type': 'adaptive'},
-                                              output_config={'effort': 'medium'})
+            # (thinking for more than THINK_SAY s: the player hears it's still being worked out)
+            timer = threading.Timer(THINK_SAY, lambda: self.cancelled or self.world.doer_say(
+                'Still thinking this through...' if actions else 'Working out how to do that...'))
+            timer.daemon = True
+            timer.start()
+            try:
+                msg = self.client.messages.create(model=self.model, max_tokens=MAX_TOKENS, system=self.system,
+                                                  tools=self.tools, messages=msgs, thinking={'type': 'adaptive'},
+                                                  output_config={'effort': 'medium'})
+            finally:
+                timer.cancel()
             self.guard.record(self.model, msg.usage, 'doer')
             uses = [b for b in msg.content if b.type == 'tool_use']
             if not uses:
@@ -124,6 +150,8 @@ class Doer:
                     if actions > MAX_ACTIONS:
                         self.world.doer_say("That's a lot of steps. I'll stop here.")
                         return ''
+                    if inp.get('say'):
+                        self.world.doer_say(str(inp['say']))
                     out = self._act(str(inp.get('order') or ''))
                 elif b.name == 'where_is':
                     out = self.world.doer_where(str(inp.get('name') or ''))
@@ -150,8 +178,14 @@ class Doer:
         started = time.monotonic()
         while not self.world.doer_busy() and time.monotonic() - started < START_WAIT and not self.cancelled:
             time.sleep(0.1)
+        told = time.monotonic()
         while self.world.doer_busy() and time.monotonic() - started < ACTION_TIMEOUT and not self.cancelled:
             time.sleep(0.2)
+            if time.monotonic() - told > PROGRESS_EVERY:          # a long one: how it's going
+                told = time.monotonic()
+                line = getattr(self.world, 'doer_progress', lambda: None)()
+                if line:
+                    self.world.doer_say(line)
         said = self.world.doer_said_since(t0)
         state = self.world.doer_state()
         return json.dumps({'outcome': said or ['(nothing was said)'], 'seconds': round(time.monotonic() - t0)}) \

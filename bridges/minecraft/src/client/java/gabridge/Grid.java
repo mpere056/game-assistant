@@ -87,6 +87,98 @@ final class Grid {
 		return o;
 	}
 
+	/** Tools whose digging time the estimate also gives (what one could make first). */
+	static final String[] WOULD_HAVE = {"minecraft:wooden_pickaxe", "minecraft:stone_pickaxe", "minecraft:iron_pickaxe",
+			"minecraft:wooden_shovel", "minecraft:wooden_axe"};
+
+	/**
+	 * How long digging the straight way from one point to another would take ({"op":"dig_estimate","from":[x,y,z],
+	 * "to":[x,y,z]}): the blocks in the way (2 high: the body), the seconds with the hotbar's best tools, and with
+	 * each of WOULD_HAVE besides, and the commonest kinds of block. A guide for whether to make a tool first.
+	 */
+	static JsonObject digEstimate(Minecraft mc, JsonArray from, JsonArray to) {
+		JsonObject o = new JsonObject();
+		ClientLevel level = mc.level;
+		if (level == null || mc.player == null || !Bridge.singleplayer(mc)) {
+			o.addProperty("error", "not in a single-player world");
+			return o;
+		}
+		java.util.List<ItemStack> tools = new java.util.ArrayList<>();
+		for (int s = 0; s < 9; s++) {
+			tools.add(mc.player.getInventory().getItem(s));
+		}
+		double x0 = from.get(0).getAsDouble(), y0 = from.get(1).getAsDouble(), z0 = from.get(2).getAsDouble();
+		double x1 = to.get(0).getAsDouble(), y1 = to.get(1).getAsDouble(), z1 = to.get(2).getAsDouble();
+		double len = Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + (z1 - z0) * (z1 - z0));
+		int steps = Math.max(1, (int) Math.ceil(len * 3));
+		java.util.Set<Long> seen = new java.util.HashSet<>();
+		java.util.Map<String, Integer> kinds = new java.util.HashMap<>();
+		double now = 0;
+		double[] would = new double[WOULD_HAVE.length];
+		int count = 0;
+		boolean unknown = false;
+		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+		for (int i = 0; i <= steps; i++) {
+			double k = (double) i / steps;
+			for (int up = 0; up < 2; up++) {
+				pos.set(Math.floor(x0 + (x1 - x0) * k), Math.floor(y0 + (y1 - y0) * k) + up, Math.floor(z0 + (z1 - z0) * k));
+				if (!seen.add(pos.asLong())) {
+					continue;
+				}
+				if (!level.isLoaded(pos)) {
+					unknown = true;
+					continue;
+				}
+				BlockState st = level.getBlockState(pos);
+				if (st.isAir() || st.getCollisionShape(level, pos).isEmpty()) {
+					continue;
+				}
+				float h = st.getDestroySpeed(level, pos);
+				if (h < 0) {
+					continue;
+				}
+				count++;
+				String id = String.valueOf(BuiltInRegistries.BLOCK.getKey(st.getBlock()));
+				kinds.merge(id, 1, Integer::sum);
+				now += ticks(st, h, tools);
+				for (int w = 0; w < WOULD_HAVE.length; w++) {
+					java.util.List<ItemStack> with = new java.util.ArrayList<>(tools);
+					with.add(new ItemStack(BuiltInRegistries.ITEM.getValue(net.minecraft.resources.Identifier.parse(WOULD_HAVE[w]))));
+					would[w] += ticks(st, h, with);
+				}
+			}
+		}
+		o.addProperty("blocks", count);
+		o.addProperty("seconds_now", Math.round(now / 20.0));
+		JsonObject w = new JsonObject();
+		for (int i = 0; i < WOULD_HAVE.length; i++) {
+			w.addProperty(WOULD_HAVE[i], Math.round(would[i] / 20.0));
+		}
+		o.add("seconds_with", w);
+		JsonObject top = new JsonObject();
+		kinds.entrySet().stream().sorted((a, b) -> b.getValue() - a.getValue()).limit(5)
+				.forEach(e -> top.addProperty(e.getKey(), e.getValue()));
+		o.add("kinds", top);
+		o.addProperty("partly_unloaded", unknown);
+		return o;
+	}
+
+	static double ticks(BlockState st, float h, java.util.List<ItemStack> tools) {
+		if (h == 0) {
+			return 1;
+		}
+		boolean needsTool = st.requiresCorrectToolForDrops();
+		double best = 1.0 / h / (needsTool ? 100.0 : 30.0);
+		for (ItemStack t : tools) {
+			if (t.isEmpty()) {
+				continue;
+			}
+			boolean right = !needsTool || t.isCorrectToolForDrops(st);
+			best = Math.max(best, t.getDestroySpeed(st) / h / (right ? 30.0 : 100.0));
+		}
+		return Math.ceil(1.0 / best) + 6;            // (and a moment to aim at the next)
+	}
+
 	static byte breakTime(ClientLevel level, BlockPos pos, java.util.List<ItemStack> tools, boolean creative) {
 		BlockState st = level.getBlockState(pos);
 		float h = st.getDestroySpeed(level, pos);

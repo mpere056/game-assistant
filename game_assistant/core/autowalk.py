@@ -65,7 +65,8 @@ STEP_FACING = 25.0    # walk on only when facing the next cell within this (else
 STEP_TURN_RATE = 540.0
 STEP_WAIT = 12.0      # seconds at the end of a part-planned route with no more of it coming: give up
 STEP_TURN_GAIN = 14.0
-WORK_TIMEOUT = 15.0   # seconds: give up on breaking or placing one block
+WORK_TIMEOUT = 15.0   # seconds: give up on breaking one block...
+PLACE_TIMEOUT = 5.0   # ...or placing one (it failed for 15 s, four times over, jumping on the spot, 2026-10-13)
 # Walking to a character (and attacking it): steered at its live position every frame once within
 # CHASE_DIRECT metres; further away along the route, which the caller re-plans as it moves.
 CHASE_DIRECT = 20.0
@@ -147,6 +148,7 @@ class AutoWalk:
     # goes from cell to cell, never cutting a corner, jumping where the next cell is higher, and re-plans at
     # once when it can't go on or is off the route (Baritone's way). Else: smooth pursuit (open ground).
     precise: bool = False
+    failed_work: list = field(default_factory=list)   # (what, info) of work that failed: the app tells the adapter
     active: bool = False
     route: list = field(default_factory=list)
     goal: Vec3 | None = None
@@ -594,9 +596,14 @@ class AutoWalk:
         """Breaking or placing a block for the route (Minecraft): aim, choose the hotbar slot, mine or place.
         None: done (or given up: the walk goes on, and gets stuck and re-plans if it must)."""
         ex, cam, info = snap.extra or {}, snap.camera, act.info
-        if cam is None or self.t - act.t0 > WORK_TIMEOUT:
+        limit = PLACE_TIMEOUT if act.what == 'place' else WORK_TIMEOUT
+        if cam is None or self.t - act.t0 > limit:
             if cam is not None:
                 self.events.append(f'work_failed:{act.what}')
+                self.failed_work.append((act.what, dict(act.info)))
+                if self.precise:
+                    self.events.append('replan')           # a new way, not through what failed
+                    self.route, self._progress = [], 0
             return None
         if act.what == 'look':                            # turn to face it (what the player came for)
             turn, tilt, err = self._aim(cam, act.end)

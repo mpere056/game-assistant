@@ -1538,3 +1538,72 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   backing along the shore drifted in a little at a time) turns to the nearest safe way round, else stays; in
   water it swims up and makes for land. Walking routes weigh swimming more (4 times a block walked, was 2.5).
 - Tests: 2 (a 20 s fight never given up; backing along a shore never into the water). Not yet tried in game.
+
+## 2026-10-13: "kill a zombie" went for an Enderman; a hit taken; orders thought through further
+- Merged the fighting fixes (PR #18).
+- "Find and kill a zombie": none within 64 blocks; the doer gave "kill the zombie", the rules found none, and the
+  command model they fall back on picked "the nearest thing like it": the Enderman. Now the doer's orders go to
+  the rules only (what they can't find, the doer is told and thinks on), and the command model may never take
+  another kind of creature instead. The doer's prompt: do exactly what was asked (not something near or alike);
+  with no direct way, reason where it would be (where_is now finds creatures anywhere the server has loaded:
+  the bridge's find_entities; the wiki for where things live or spawn), go there, explore ("explore 80 blocks
+  north", a new order: any game whose adapter gives explore_point), or wait for the right time; it gets the
+  recent conversation, so "no, a zombie specifically" narrows the last order.
+- "It took a hit it shouldn't have": the fighter stood still while the swing charged, and the zombie walked into
+  reach. Now where to stand is chosen each frame: each of the 8 ways and staying put is tried 0.45 s ahead (the
+  player at a walk, every hostile one near coming at them); the way that keeps out of every reach (Minecraft's
+  melee reach: 0.83 past both widths, plus margins) wins, and with the swing charged, one that brings the
+  target to the edge of our reach (2.6 past its width). Never into water, lava, a drop or a wall (the adapter's
+  terrain now marks walls), checked on the way the keys really go (8 ways round the camera, up to 22 degrees
+  off), the ground looked at again on every new block. The nearest one after the player is fought first, then
+  back to the one asked for (only aggressive ones: an Enderman minding its own business is left alone).
+- The simulated arena's mobs now hit back (within 1.43 of their centre, once a second) and can all be hit and
+  killed. Hits taken: one zombie 0, two 0, three around 0, two behind 0; surrounded by four or five: 1.
+- Bridge version 9. Tests: the arena's (no hits taken; three around, two behind). Not yet tried in the game.
+
+## 2026-10-13: a fight with three drowned (user): slow, one hit taken, gave up in the water
+- It fought the drowned and the two that came over (the nearest-attacker rule worked), but: "way too
+  defensive", it took a hit, and then "I can't reach that one!" and stopped, with the player in the water.
+- The fight log: the whole fight was in water. The fighter kept out of water cells, and in water every way is
+  water: it never moved (30 s "waiting" at the surface, the target on the lake floor), took the hit when one
+  swam up to 0.7 blocks, and gave up as unreachable, leaving the player among them.
+- Fixes: in water, water isn't kept out of (lava, drops and walls still are), and every way onto land counts
+  more: out of the water first, then fight from the shore; never given up as unreachable while in water. Faster
+  kills: out of reach by just a little (0.5 past the margins, was 1.5: it walked back in each time); stepping in
+  from 75% charged (arriving as it's ready); critical hits (a jump at 85% charged, the hit on the way down:
+  half as much again) when nobody else hostile is within 4 blocks and not at shooters or creepers.
+- The arena: jumps and critical hits. One zombie: 2.4 s (was 4.2), 3 hits (2 critical), none taken; three
+  around: 7.6 s (was 11.6), none taken; surrounded by four or five: 1 taken. Tests: in water it makes for land
+  and never gives up there. Not yet tried in the game.
+
+## 2026-10-13: "kill a zombie" from the surface (user): it worked, but slowly and with idle spells
+- The doer found zombies 46 blocks down (where_is: anywhere loaded), walked there and killed one. The walk took
+  455 s: 330 s mining stone by hand (the player held only dirt: 7.5 s a block, about 1 s with a wooden
+  pickaxe), 84 s "building", of which 60 s were four placements failing for 15 s each (the user: "just jumping
+  every now and then and not doing anything").
+- The failed placements were pillars: a jump needs two blocks of room above the head and the planner cleared
+  one, so the head hit the ceiling and the block never fitted under the feet. Now two are cleared; a placement
+  gives up after 5 s (was 15), and the walk plans again at once, never placing in that cell for 2 minutes.
+- Efficiency: the bridge's dig_estimate (the straight way there: blocks in it, seconds with what's held and
+  with each pickaxe, a shovel, an axe), given with where_is; the doer is told to weigh getting a tool first
+  ("a pickaxe before digging down through stone") and do what's quickest in all.
+- Telling the player: each step the doer takes has a short line said as it starts (what and why); thinking for
+  more than 5 s: "Working out how to do that..." / "Still thinking this through..."; every 25 s of a long step,
+  how it's going ("Still digging to the Zombie: 20 blocks across, 30 down"; the task's step; the fight).
+- Bridge version 10. Tests: the doer's line before its step. Not yet tried in the game.
+
+## 2026-10-13: "kill five zombies or skeletons" stopped at once; digging without a pickaxe again
+- The order went to the doer, which said "I've got nothing to fight with, so I'm making a wooden sword first!"
+  and the task began; then "Sorry, I got stuck working that out (AttributeError)": the new progress line read a
+  craft step's recipe as a name. Fixed.
+- "Kill three zombies": where_is answered "There's a Zombie 16 blocks away" (the nearest across: it was 42 down
+  in a cave) and it dug down after it. Choosing the nearest character, height now counts three times over; the
+  line says how far up or down; where_is gives the doer the height and the dig (dig_estimate) for one in sight too.
+- The user: it shouldn't break cobblestone without a pickaxe unless a pickaxe isn't easy to make; the quickest
+  way in all. When a route has 3 or more blocks slower than 3 s to break, the adapter weighs a tool once per
+  goal (tool_advice): the straight dig there with what's held against each tool (dig_estimate) plus the time to
+  make it (core/crafting.py's plan for it: ~5 s an item gathered, a walk per kind, ~4 s a craft); worth 20 s or
+  more in all: the walk stops, a task makes the tool ("That's a lot of stone to dig through! Making a wooden
+  pickaxe first: about 250 seconds quicker."), then the walk goes on.
+- Tests: tool advice (a pickaxe for a long dig through stone; not for a short one, one held, or few hard blocks).
+  Not yet tried in the game.

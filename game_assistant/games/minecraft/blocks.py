@@ -108,7 +108,7 @@ def stand_height(g: Grid, x: int, y: int, z: int) -> float | None:
 
 def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budget_s: float = 1.0,
          max_nodes: int = 200_000, can_break: bool = False, blocks: int = 0, kind: str = 'near',
-         box=None) -> Path | None:
+         box=None, no_place=frozenset()) -> Path | None:
     """A route from the stand nearest start toward goal (cells). None: nowhere to stand near the start.
     can_break: mine through blocks; blocks: how many blocks there are to build with (bridging, pillaring).
     kind, what counts as there (Baritone's goals): 'near' within NEAR_GOAL across and 2 up or down; 'block'
@@ -124,7 +124,7 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
     def h(c):
         return H_WEIGHT * math.sqrt((c[0] - gx) ** 2 + (c[1] - gy) ** 2 * 0.5 + (c[2] - gz) ** 2)
 
-    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks)
+    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks, frozenset(no_place))
     open_ = [(h(s), 0.0, s)]
     came: dict = {s: None}
     cost = {s: 0.0}
@@ -194,6 +194,7 @@ class _Ctx:
     falls: dict
     can_break: bool
     blocks: int
+    no_place: frozenset = frozenset()   # cells where placing failed lately (not planned there again)
 
 
 def _breakable(g: Grid, x: int, y: int, z: int) -> float | None:
@@ -254,7 +255,8 @@ def _all_moves(ctx: _Ctx, c):
                 if room[1]:
                     yield (nx, y, nz, 0), 1.0 + room[0] + _edge_cost(g, nx, y, nz, ctx.falls), room[1]
                     continue
-            elif fk in (AIR, WATER) and ctx.blocks > 0 and floor_solid and here not in (WATER, CLIMB):
+            elif fk in (AIR, WATER) and ctx.blocks > 0 and floor_solid and here not in (WATER, CLIMB) \
+                    and (nx, y - 1, nz) not in ctx.no_place:
                 work = room[1] + (('place', (nx, y - 1, nz), (x, y - 1, z), 'bridge'),)
                 yield (nx, y, nz, 1), 1.0 + COST_PLACE + room[0] + _edge_cost(g, nx, y, nz, ctx.falls), work
                 continue
@@ -277,9 +279,11 @@ def _all_moves(ctx: _Ctx, c):
         b = _breakable(g, x, y - 1, z)
         if b is not None:
             yield (x, y - 1, z, 0), b + 0.5, (('break', (x, y - 1, z)),)
-    # pillar up: jump and place a block under the feet
-    if ctx.blocks > 0 and here not in (WATER, CLIMB) and (placed or g.at(x, y - 1, z) in FLOOR):
-        room = _open(ctx, ((x, y + 2, z),))
+    # pillar up: jump and place a block under the feet (a jump needs two blocks of room above the head: with
+    # one, the head hit the ceiling and the block never fitted under the feet, 2026-10-13)
+    if ctx.blocks > 0 and here not in (WATER, CLIMB) and (placed or g.at(x, y - 1, z) in FLOOR) \
+            and (x, y, z) not in ctx.no_place:
+        room = _open(ctx, ((x, y + 2, z), (x, y + 3, z)))
         if room is not None:
             yield (x, y + 1, z, 1), COST_PILLAR + room[0], \
                 room[1] + (('place', (x, y, z), (x, y - 1, z), 'pillar'),)

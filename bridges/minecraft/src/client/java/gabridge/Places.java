@@ -72,6 +72,55 @@ final class Places {
 		}).get(5, TimeUnit.SECONDS);
 	}
 
+	/**
+	 * The nearest creatures of some kinds anywhere in the loaded world (the server's, which reaches farther than
+	 * what the player is shown): {"op":"find_entities","types":["minecraft:zombie"],"max":5} ->
+	 * {"found":[[x,y,z,"minecraft:zombie",id],...]} nearest first; {"op":"entity_types"} -> every creature's id.
+	 */
+	static JsonObject findEntities(JsonArray types, int max) throws Exception {
+		MinecraftServer server = server();
+		java.util.Set<String> want = new java.util.HashSet<>();
+		types.forEach(t -> want.add(t.getAsString()));
+		return server.submit(() -> {
+			JsonObject o = new JsonObject();
+			JsonArray found = new JsonArray();
+			List<ServerPlayer> players = server.getPlayerList().getPlayers();
+			if (players.isEmpty()) {
+				o.add("found", found);
+				return o;
+			}
+			ServerPlayer p = players.get(0);
+			java.util.List<net.minecraft.world.entity.Entity> hits = new java.util.ArrayList<>();
+			for (net.minecraft.world.entity.Entity e : p.level().getAllEntities()) {
+				if (e.isAlive() && want.contains(String.valueOf(
+						net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(e.getType())))) {
+					hits.add(e);
+				}
+			}
+			hits.sort(java.util.Comparator.comparingDouble(e -> e.distanceToSqr(p)));
+			for (int i = 0; i < Math.min(max, hits.size()); i++) {
+				net.minecraft.world.entity.Entity e = hits.get(i);
+				JsonArray one = new JsonArray();
+				one.add(e.getX());
+				one.add(e.getY());
+				one.add(e.getZ());
+				one.add(String.valueOf(net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(e.getType())));
+				one.add(e.getId());
+				found.add(one);
+			}
+			o.add("found", found);
+			return o;
+		}).get(5, TimeUnit.SECONDS);
+	}
+
+	static JsonObject entityTypes() {
+		JsonObject o = new JsonObject();
+		JsonArray a = new JsonArray();
+		net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.keySet().forEach(k -> a.add(k.toString()));
+		o.add("ids", a);
+		return o;
+	}
+
 	static JsonObject box(int x, int y, int z) throws Exception {
 		MinecraftServer server = server();
 		return server.submit(() -> {

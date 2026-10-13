@@ -63,6 +63,7 @@ _IN_VIEW = re.compile(r"\b(in front|ahead|this|that|there|those|these)\b", re.I)
 VIEW_ANGLE = 30.0     # degrees from the camera's forward: "the one in front of me"
 VIEW_RANGE = 60.0
 ALL_RANGE = 60.0      # 'kill all of them': the next one within this many metres
+HEIGHT_WEIGHT = 3.0   # choosing the nearest character: a block up or down counts as this many across
 SAME_LEVEL = 8.0      # 'any enemy' and 'all of them' skip characters this far above or below the player
                       # (15:22: "all of them" went on to an Eagle 35 m up a cliff; the walk got stuck)
 CONTEXT_SECONDS = 60.0  # what was said this recently gives "them / it / that" its meaning
@@ -84,6 +85,11 @@ _AMOUNT = re.compile(r"^(?:(?P<n>\d+|one|two|three|four|five|six|seven|eight|nin
 ONE_OF = re.compile(r"(pickaxe|axe|shovel|sword|hoe|table|furnace|chest|bed|door|boat|bucket|shield|helmet|"
                     r"chestplate|leggings|boots|bow)s?$", re.I)
 SOME = 8              # 'get me some cobblestone': this many
+# Exploring: 'explore', 'explore 60 blocks north', 'go 100 blocks east', 'head west' (where the adapter can).
+_EXPLORE = re.compile(r"^(?:please\s+)?(?:explore|wander|scout|go|walk|head|move|travel|run)\b(?:\s+(?:around|out|about|"
+                      r"off))?(?:\s+(?:for\s+)?(?P<n>\d+)\s*(?:blocks?|metres?|meters?|m)?)?(?:\s+(?:to the\s+|towards?\s+"
+                      r"(?:the\s+)?)?(?P<dir>north[- ]?east|north[- ]?west|south[- ]?east|south[- ]?west|north|south|east|"
+                      r"west))?\W*$", re.I)
 # A correction of the last walk order: 'no, not the Iron Golem, but like iron blocks' (2026-10-13: it stopped)
 _CORRECTION = re.compile(r"^\W*not (?:the |that |this |those |an? )?(?P<no>[a-z' ]+?)\s*[,.]?\s*(?:but |rather |"
                          r"instead |i mean )+(?:like |the |some |a |an |more )*(?P<yes>[a-z' ]+?)\W*$", re.I)
@@ -203,6 +209,14 @@ class CommandResolver:
                 return got
         if _STOP.search(t) and len(t.split()) <= STOP_WORDS:
             return WalkAction('stop', 'Stopping.')
+        m = _EXPLORE.match(rest or t)
+        if m and hasattr(self.adapter, 'explore_point') and (m.group('dir') or m.group('n') or
+                                                             re.match(r"\W*(explore|wander|scout)", rest or t, re.I)):
+            point = self.adapter.explore_point(m.group('dir'), float(m.group('n')) if m.group('n') else None)
+            if point is not None:
+                where = (m.group('dir') or 'ahead').lower()
+                self.last_walk_t = time.monotonic()
+                return WalkAction('walk', f"Exploring {where}!", tuple(point), f'{where} ({m.group("n") or 64})')
         m = _GET.match(rest or t)
         if m and hasattr(self.adapter, 'book'):
             got = self._get_item(m.group('what'))
@@ -295,15 +309,17 @@ class CommandResolver:
             name_words = re.findall(r"[a-z0-9']+", (name or '').lower())
             if words and not all(any(_word_like(w, n) for n in name_words) for w in words):
                 continue
-            if best is None or d < best[0]:
-                best = (d, e, name)
+            # (height counts three times over: "16 blocks away" was a zombie 42 down in a cave, 2026-10-13)
+            far = d + HEIGHT_WEIGHT * abs(e.pos[1] - p[1])
+            if best is None or far < best[3]:
+                best = (d, e, name, far)
             if in_view and snap.camera is not None and d <= VIEW_RANGE and d > 0.1:
                 fx, fz = snap.camera.forward[0], snap.camera.forward[2]
                 n = (fx * fx + fz * fz) ** 0.5 or 1.0
                 cos = ((e.pos[0] - p[0]) * fx + (e.pos[2] - p[2]) * fz) / (n * d)
                 if cos >= math.cos(math.radians(VIEW_ANGLE)) and (viewed is None or d < viewed[0]):
                     viewed = (d, e, name)
-        best = viewed or best
+        best = viewed or (best[:3] if best else None)
         if best is None:
             return None
         d, e, name = best
@@ -311,7 +327,10 @@ class CommandResolver:
         self.last_walk_t = time.monotonic()
         unit = getattr(self.adapter, 'distance_unit', 'metres')
         an = 'an' if label[:1].lower() in 'aeiou' else 'a'
-        return WalkAction('walk', f"There's {an} {label} {round(d)} {unit} away. Let's go!", tuple(e.pos), label, e.id)
+        dy = round(e.pos[1] - p[1])
+        level = f' and {abs(dy)} {"down" if dy < 0 else "up"}' if abs(dy) > 3 else ''
+        return WalkAction('walk', f"There's {an} {label} {round(d)} {unit} away{level}. Let's go!", tuple(e.pos), label,
+                          e.id)
 
     def _attack(self, target: str, mode: str = 'fight', text: str = '', ask: bool = True) -> WalkAction:
         """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and fight it
