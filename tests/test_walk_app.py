@@ -335,3 +335,28 @@ class TwentySixthSessionAppTests(unittest.TestCase):
         app._order_work('kill the soldier', queued=True)
         self.assertEqual(planned, [])
         self.assertIn("I don't see any soldier to attack.", app.lines)
+
+
+class TwentySeventhSessionAppTests(unittest.TestCase):
+    def test_kill_two_stops_after_two_even_when_both_fall_in_one_fight(self):
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        app.resolver = type('R', (), {'character': lambda self, *a, **k: None, 'heard': lambda self, t: None})()
+        w = World()
+        a = Entity(9, 1, 'c4311', (0.0, 0.0, 3.0), (0.0, 1.0, 3.0), 0.5, 2.0, True, False, 100, 100)
+        b = Entity(10, 1, 'c4311', (1.5, 0.0, 2.5), (1.5, 1.0, 2.5), 0.5, 2.0, True, False, 100, 100,
+                   facing=(-0.5, 0.0, -0.85))
+        third = Entity(11, 1, 'c4311', (0.0, 0.0, 30.0), (0.0, 1.0, 30.0), 0.5, 2.0, True, False, 100, 100)
+        w.entities = (a, b, third)
+        step(app, w, 1.0)
+        app._fight_all, app._fight_left, app._kills_read = 'enemy', 2, 0
+        app._walk_request('start', a.pos, 'Godrick Soldier', 9, 'fight')
+        step(app, w, 0.2)
+        self.assertTrue(app.fighter.active)
+        dead = lambda e: Entity(e.id, 1, 'c4311', e.pos, e.center, 0.5, 2.0, True, True, 0, 100)
+        w.entities = (dead(a), b, third)                    # one down, the other on the player: same fight
+        step(app, w, 0.2)
+        w.entities = (dead(a), dead(b), third)
+        step(app, w, 0.3)
+        self.assertIn("Got it! That's all I was asked for!", app.lines)
+        self.assertFalse(app.walk.active and app.walk.target_id == 11)   # not on to a third

@@ -267,12 +267,17 @@ class App:
             # the enemy this order (part) is about: other kills on the way don't finish it (_back_to_order)
             self._order_target = action.entity_id if action.kind == 'walk' and action.attack else None
             self._fight_all = action.every if action.kind == 'walk' else None   # 'kill all of them'
+            self._fight_left = action.count if action.kind == 'walk' and action.every else None   # 'kill two'
+            self._kills_read = len(self.fighter.kills)
             self._then = list(action.then) if action.kind == 'walk' else []      # '... and then ...'
         if action.kind == 'walk':
             self._walk_request('start', action.point, action.name, action.entity_id, action.attack)
         elif action.kind == 'stop':
             self._walk_request('stop', 'stop')
         self._navi_line(action.say)
+        # the order and the answer are part of the conversation: 'two more', 'them too' a minute later mean
+        # these (2026-10-12: 'kill just two more' after soldiers became 'any enemy' twice)
+        self.resolver.heard(f'Player ordered: {text}\nNavi: {action.say}')
         with self.log.open('a', encoding='utf-8') as f:
             f.write(json.dumps({'t': datetime.now().isoformat(timespec='seconds'), 'order': text,
                                 'action': action.kind, 'place': action.name}) + '\n')
@@ -292,6 +297,7 @@ class App:
         except Exception as e:  # show it instead of dying
             got, record['error'] = None, f'{type(e).__name__}: {e}'
         steps = steps_from((got or {}).get('steps'))
+        self.resolver.heard(f'Player ordered: {text}\nNavi: {(got or {}).get("say") or ""}')
         if steps:
             self._fight_all, self._then = None, []
             self._plan_cmd = steps
@@ -681,6 +687,7 @@ class App:
                              **self.fighter.debug})
         if not self.fighter.active and self.fighter.chains_changed:   # a fight ended: keep what it learned
             self._save_chains()
+        self._count_kills()
         while self.fighter.events:
             ev = self.fighter.events.pop(0)
             if ev == 'not_focused':
@@ -701,9 +708,16 @@ class App:
                 line = "Got it! Now back to the " + (self._order_name or 'one you asked for') + '!'
             elif ev == 'won' and getattr(self, '_fight_all', None):   # 'kill all of them': the next one
                 coming = self._coming_at_me(snap)
-                got = None if coming is not None else                     self.resolver.character(self._fight_all, max_range=ALL_RANGE, same_level=True,
+                left = getattr(self, '_fight_left', None)
+                got = None if coming is not None or (left is not None and left <= 0) else \
+                    self.resolver.character(self._fight_all, max_range=ALL_RANGE, same_level=True,
                                             exclude=self.fighter.unreachable)
-                if coming is not None:      # first whatever is coming at us, whatever it is (a wolf, a bat)
+                if left is not None and left <= 0 and coming is None:    # 'kill two soldiers': that's two
+                    self._fight_all, self._fight_left = None, None
+                    line = "Got it! That's all I was asked for!"
+                    if self._next_order():
+                        line = "Got it! That's all I was asked for! Now the next part!"
+                elif coming is not None:    # first whatever is coming at us, whatever it is (a wolf, a bat)
                     name = self._enemy_name(coming)
                     self._order_target = None
                     self._walk_request('start', tuple(coming.pos), name, coming.id, 'fight')
@@ -841,6 +855,24 @@ class App:
             self.fighter.chains_changed = False
         except OSError:
             pass
+
+    def _count_kills(self) -> None:
+        """'Kill two soldiers': each soldier killed counts, also ones killed in the same fight (two at once)."""
+        kills = self.fighter.kills
+        start = getattr(self, '_kills_read', len(kills))
+        self._kills_read = len(kills)
+        kind, left = getattr(self, '_fight_all', None), getattr(self, '_fight_left', None)
+        if not kind or left is None:
+            return
+        for _id, type_id in kills[start:]:
+            name = None
+            try:
+                name = (self.adapter.knowledge(type_id) or {}).get('name') if hasattr(self.adapter, 'knowledge') \
+                    and type_id is not None else None
+            except Exception:
+                pass
+            if kind == 'enemy' or name is None or name == kind:
+                self._fight_left = left = left - 1
 
     def _back_to_order(self, snap) -> bool:
         """A fight won against another enemy than the one the order named (it came at the player on the way):

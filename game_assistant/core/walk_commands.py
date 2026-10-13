@@ -73,6 +73,13 @@ _THEN = re.compile(r"\s*,?\s*\b(?:and then|and after that|after that|afterwards|
                    r"(?=(?:[a-z']+\s+){0,3}?" + _VERBS + r"\b)", re.I)
 _AFTER_CLAUSE = re.compile(r"^(?:after|once|when)\b[^,]*?(?:,\s*|\s+(?=(?:please\s+)?" + _VERBS + r"\b))", re.I)
 _NOT_THIS = re.compile(r"\bnot (?:the |that |those |these |an? )?([a-z']+)", re.I)  # 'not the Eagle'
+# How many: 'kill two soldiers', 'just two more', 'a couple of bats', '3 more' (2026-10-12: 'kill just two more'
+# went to the planner as 'any enemy' twice; 'kill these soldiers' killed one and stopped).
+_NUMBERS = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+            'ten': 10, 'couple': 2, 'pair': 2, 'few': 3, 'several': 3, 'both': 2}
+_COUNT = re.compile(r"\b(?:just |only )?(?:a |the )?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|couple|pair|"
+                    r"few|several|both)(?: of)?(?: (?:the|them|those|these))?\b(?P<more> more)?", re.I)
+_SAY_NUMBER = {2: 'Two', 3: 'Three', 4: 'Four', 5: 'Five', 6: 'Six', 7: 'Seven', 8: 'Eight', 9: 'Nine', 10: 'Ten'}
 _GENERIC_ENEMY = {'enemy', 'enemies', 'monster', 'monsters', 'foe', 'foes', 'hostile', 'baddie', 'mob'}
 _PLACE_WORDS = re.compile(r'grace|landmark|ruin|cave|church|castle|tower|place|shack|camp|fort|catacomb|tunnel'
                           r'|bridge|lake|village|manor|evergaol|gate', re.I)
@@ -89,6 +96,7 @@ class WalkAction:
     entity_id: int | None = None  # walking to a character: follow it if it moves
     attack: str | bool = False    # ...and attack it: 'hit' (one hit, then hand back) or 'fight' (until it's down)
     every: str | None = None      # 'kill all of them': after each kill, the next of this kind nearby
+    count: int | None = None      # 'kill two soldiers': that many of them (with every), None: all
     then: list = field(default_factory=list)  # 'kill the boar and then the soldiers': the orders after this
     options: list = field(default_factory=list)  # for 'ask': [(name, point)]
 
@@ -273,6 +281,18 @@ class CommandResolver:
         to the next of that kind after each kill."""
         every = bool(_ALL.search(target)) or bool(re.search(r"\b(any|remaining)\b", target, re.I)
                                                   and re.search(r"[a-z]{3,}s\b", target.lower()))   # 'any soldiers'
+        count = None
+        m = _COUNT.search(target)
+        if m and not re.match(r"\s*(one|in front|that|this)\b", target[m.end():], re.I) \
+                and (m.group(1).lower() != 'one' or m.group('more')):
+            n = int(m.group(1)) if m.group(1).isdigit() else _NUMBERS[m.group(1).lower()]
+            target = (target[:m.start()] + ' ' + target[m.end():]).strip()
+            if n > 1:
+                count, every = n, True
+            elif not target.strip(' .,!'):
+                target = 'next one'                   # 'one more'
+        if re.search(r"\b(them|those|these)\b", target, re.I):
+            every = True                              # 'kill those', 'these bats': all of them
         in_view = bool(_IN_VIEW.search(target)) and not re.search(r"\b(nearest|closest|next)\b", target, re.I)
         words = _clean(re.sub(r"\b(nearest|closest|next)\b", ' ', target))
         words = re.sub(r"^(on|at|against|into|onto)\b\s*", '', words)   # 'land one hit on the soldier'
@@ -297,6 +317,12 @@ class CommandResolver:
                 got = WalkAction('walk', '', tuple(e.pos), e.name or 'that enemy', e.id)
             words = 'enemy'
         got = got or self.character(words or 'enemy', in_view=in_view, same_level=every)
+        if got is not None and got.name and not every:
+            # 'kill the soldiers', 'these bats': a plural of the name found means all of them
+            names = re.findall(r"[a-z0-9']+", got.name.lower())
+            if any(len(w) > 3 and w.endswith('s') and w not in names and any(_word_like(w, n) for n in names)
+                   for w in words.split()):
+                every = True
         if got is None and ask and self.ask_model is not None and words and words != 'enemy':
             # The words match no name around: the model picks from the characters around (it knows them by
             # name): 'kill the soldier' for a Kaiden Sellsword (2026-10-12 21:35: a search for soldiers began
@@ -316,7 +342,9 @@ class CommandResolver:
         got.say = f"Let's take {what} down!" if mode == 'fight' else f"Attacking {what}!"
         if every and mode == 'fight':
             got.every = got.name if got.name and got.name != 'that enemy' else 'enemy'
-            got.say = f"Let's take them all down! The nearest {got.name or 'one'} first!"
+            got.count = count
+            got.say = f"Let's take them all down! The nearest {got.name or 'one'} first!" if count is None else \
+                f"{_SAY_NUMBER.get(count, str(count))} of them! The nearest {got.name or 'one'} first!"
         return got
 
     def recent(self) -> str:

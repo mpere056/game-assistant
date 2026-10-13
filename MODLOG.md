@@ -1267,3 +1267,27 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   around ('the soldier' -> Kaiden Sellsword) before giving up. A stop word in front of an order ('wait, ...',
   'no wait, ...', 'hold on, ...', 'cancel that and ...') is that order; 'actually', 'instead', 'first' and
   'now' aren't part of a name. The fairy says nothing on its own while the character fights.
+
+## 2026-10-12: plurals and counts in orders; learned data checked against harm
+- Twenty-seventh session (user): orders still misunderstood at times. From the logs: 'Please kill these
+  soldiers.' killed one and stopped ('kill this soldier too' had to follow; 'kill those bats', 'kill these
+  bats', '... and the soldiers' the same: only 'all/every/any/remaining' meant all); 'Actually, please kill just
+  two more.' went to the planner as two fights with any enemy (the conversation it saw had no orders in it);
+  and with 'kill two soldiers' my last change (unmatched words to the model) would have made it one fight.
+- Now: a plural of the name found ('soldiers', 'bats'), 'them/those/these' mean all of them; a number ('two',
+  '3', 'a couple of', 'both', 'two more': the kind just fought) means that many, counted as each one of that kind
+  dies (two falling in one fight count two), then "That's all I was asked for!". Orders and Navi's answers go
+  into the conversation the model and the planner see. All the orders in the chat logs replayed through the
+  rules (scratch: replay_orders.py): plurals, counts, corrections and stop-then-order now read right; misheard
+  names ('that boy', 'this poor', 'that guard') go to the model with the characters around.
+- Combat: with a c4351 and a soldier both on the player the target changed 21 times in two minutes (the game's
+  lock-on going back and forth, followed): another enemy the lock moves to is now taken only when it attacks,
+  is clearly nearer (2 m), or the target isn't on the player.
+- Learned data checked against harm (the user: learning about one enemy mustn't make it worse): the bat
+  simulation recalibrated to what the last session measured (the dive ends 0.6 m short of the player's place,
+  the close-in 1.85 m past it) showed the fighter worse with what it had learned about bats (1.5 of 3 killed)
+  than with nothing (2.4). Dropping each learned table in turn: the "counters": a bat's fly-off out of a flinch
+  (1006001, its hitbox far away) was taken for a counter, so it swung once instead of a combo. A counter now
+  only counts if it reaches the player when it hits; the unchecked table is ignored. Bats now 2.5 of 3 killed,
+  7.8 hits landed, 6 taken; the c4351 duel and the pack unchanged (no learned c4350 table hurts there).
+  244 tests pass.

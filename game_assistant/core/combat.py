@@ -127,6 +127,7 @@ CHAIN_SEEN = 0.35       # a new attack this far in, right after another: a chain
 # Eighth session (two soldiers, a wall): the game's lock-on was on one soldier and the target the other, so
 # 15 openings went by with the camera off the target (no swing); a soldier behind a wall was "closed in on"
 # for 10 s at a constant 2.05 m; a swing at an idle soldier hit its shield.
+LOCK_NEARER = 2.0       # metres: the game's lock on another this much nearer than the target is followed
 LOCK_FOLLOW_NEAR = 6.0  # locked on to another enemy this near: it is the target, at once
 CLOSE_CHECK = 0.8       # closing in this long and the gap shrank less than CLOSE_MIN (or a wall is between):
 CLOSE_MIN = 0.25        # blocked: step sideways DETOUR_FOR s (sides in turn); after MAX_DETOURS: unreachable
@@ -215,6 +216,8 @@ SOLO_WAIT = 0.6         # no attack this long after one ended: it ended on its o
 # the counter landed; after one swing a roll is possible in time.
 COUNTER_WITHIN = 0.5
 COUNTER_SEEN = 1
+COUNTER_NEAR = 3.5      # metres from its body edge at the counter's hit: it came at the player (not flying off)
+# (counters were first kept as '_counter', unchecked; that table is ignored: '_counters' holds checked ones)
 COVERED_SLACK = 0.5     # a dodged hit is "covered" only for the hit it was: the same attack again later
                         # lands at another time and gets its own roll (it was never dodged again: two hits)
 # Twenty-second session (2026-10-12, Gatefront): 39 of 62 hits in a day's fights came right after a roll. The roll
@@ -350,6 +353,7 @@ class Fighter:
         self._last_keys: frozenset = frozenset()
         self._swing_pending: float | None = None
         self.chains_changed = False
+        self.kills: list = []                       # (entity id, type id) of each target killed, in turn
         for base, anims in ARMORED_SEED.items():
             self._armored.update((base, a) for a in anims)
         for base, anims in (self.chains or {}).get('_armored', {}).items():
@@ -428,6 +432,8 @@ class Fighter:
             return Intent()
         e = next((x for x in snap.entities if x.id == self.target_id), None)
         if e is None or e.dead or (e.health is not None and e.health <= 0):
+            if e is not None and all(k[0] != e.id for k in self.kills):
+                self.kills.append((e.id, e.type_id))   # (for 'kill two soldiers': each one counts)
             nxt = self._threat(snap, pl.pos, self.target_id, cam=snap.camera)
             goal = next((x for x in snap.entities if x.id == self.goal_id and not x.dead
                          and (x.health is None or x.health > 0)), None) if self.goal_id != self.target_id else None
@@ -502,7 +508,7 @@ class Fighter:
         # The game locks onto whoever is in front, not always the target: follow its choice, or unlock.
         aimed = self._aimed(snap, p) if self._locked and abs(err) > LOCK_OFF else None
         if aimed is not None and aimed.id != e.id and _flat(p, aimed.pos) - aimed.radius < LOCK_FOLLOW_NEAR \
-                and self._may_switch(gap) and self._may_leave(e, aimed):
+                and self._may_switch(gap) and self._may_leave(e, aimed) and self._lock_worth(e, aimed, p):
             self._switch(aimed, 'retarget')   # the camera is on it: swing at it (not at one off to the side)
             e = aimed
             gap = _flat(p, e.pos) - e.radius
@@ -514,7 +520,8 @@ class Fighter:
             elif self.t - self._off_since >= LOCK_OFF_FOR:
                 self._off_since = None
                 aimed = self._aimed(snap, p)
-                if aimed is not None and aimed.id != e.id and self._may_switch(gap) and self._may_leave(e, aimed):
+                if aimed is not None and aimed.id != e.id and self._may_switch(gap) and self._may_leave(e, aimed) \
+                        and self._lock_worth(e, aimed, p):
                     self._switch(aimed, 'retarget')
                     e = aimed
                     gap = _flat(p, e.pos) - e.radius
@@ -1029,6 +1036,14 @@ class Fighter:
                 out = 'flinch'
         return out
 
+    def _lock_worth(self, e, aimed, p) -> bool:
+        """Follow the game's lock-on to another enemy only when that one attacks or is clearly nearer, or the
+        target isn't on the player (two enemies close by: the game's lock went back and forth between them and
+        so did the target, 21 times in two minutes, twenty-seventh session; the camera is turned to the target
+        anyway)."""
+        return self._attack_anim(aimed) is not None or _flat(p, aimed.pos) < _flat(p, e.pos) - LOCK_NEARER \
+            or not self._engaged(e, p)
+
     def _may_leave(self, e, other) -> bool:
         """The one the player asked for is left only for an enemy actually attacking (twenty-third session: told
         to kill a boar 8 m off, it followed the game's lock-on to a soldier coming over, and the boar lived)."""
@@ -1402,7 +1417,7 @@ class Fighter:
         """Whether this kind of enemy is known to counter out of a flinch."""
         base = _base(e.model)
         return base in COUNTER_SEED or \
-            any(n >= COUNTER_SEEN for n in self.chains.get('_counter', {}).get(base, {}).values())
+            any(n >= COUNTER_SEEN for n in self.chains.get('_counters', {}).get(base, {}).values())
 
     def _follow_up(self, hit) -> float | None:
         """Seconds from this hit's start to the same enemy's next hit: a later window of the same attack,
@@ -1443,13 +1458,22 @@ class Fighter:
             ended.pop(e.id, None)
             anim, t = min(playing, key=lambda x: x[1])      # the newest attack
             prev = self._attacking.get(e.id)
+            pending = self.__dict__.setdefault('_counter_pending', {})
             if t <= CHAIN_SEEN and self.t - flinched.get(e.id, -1e9) <= COUNTER_WITHIN \
                     and (prev is None or prev[0] != anim):
-                # out of a flinch straight into an attack: its counter (kept; COUNTER_SEEN times: no combos)
-                table = self.chains.setdefault('_counter', {}).setdefault(_base(e.model), {})
-                table[str(anim)] = table.get(str(anim), 0) + 1
-                self.chains_changed = True
+                pending[e.id] = anim                       # out of a flinch straight into an attack...
                 flinched.pop(e.id, None)
+            if pending.get(e.id) == anim:
+                w = self.windows(e.model, anim)
+                if w and t >= w[0][0]:
+                    # ...that reaches the player when it hits: its counter (kept; COUNTER_SEEN times: no combos).
+                    # (A bat flinching flies off, 1006001 with a hitbox far away: taken for a counter, it held the
+                    # combos back on bats; twenty-seventh session, in the simulation 2.5 -> 1.3 bats killed.)
+                    del pending[e.id]
+                    if self._threatens(e, p, anim, 0.0) is not False and _flat(p, e.pos) - e.radius < COUNTER_NEAR:
+                        table = self.chains.setdefault('_counters', {}).setdefault(_base(e.model), {})
+                        table[str(anim)] = table.get(str(anim), 0) + 1
+                        self.chains_changed = True
             self._attacking[e.id] = (anim, t, self.t)
             if prev is None or prev[0] == anim or t > CHAIN_SEEN or self.t - prev[2] > 0.4:
                 continue
