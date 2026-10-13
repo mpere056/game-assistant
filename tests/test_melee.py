@@ -126,3 +126,22 @@ class MeleeTests(unittest.TestCase):
         a.health = 4.0
         f, _ = fight(a, seconds=1)
         self.assertIn('low_health', f.events)
+
+    def test_a_long_hit_and_back_off_fight_is_never_given_up_as_unreachable(self):
+        a = Arena(hp=1000)                               # (a tough one: 20 s of hitting and backing off)
+        f, _ = fight(a, seconds=20)
+        self.assertNotIn('unreachable', f.events)
+        self.assertGreater(a.hits, 15)
+
+    def test_never_backs_into_the_water_behind(self):
+        a = Arena(hp=1000, at=(0.0, 0.0, 3.0))
+        water = {(0, -1): 'water', (1, -1): 'water', (-1, -1): 'water'}
+        f = MeleeFighter(lambda e: {'reach': 2.0}, lambda h: None,
+                         lambda: {'avoid': water if a.p[2] < 0.5 else {}, 'in_water': False})
+        f.start(7)
+        lowest = 0.0
+        for _ in range(int(8 / DT)):
+            a.step(f.update(a.snap(), DT))
+            lowest = min(lowest, a.p[2])
+        self.assertGreater(lowest, -0.3)                # the shore is at z = 0: it went along it, not in
+        self.assertGreater(a.hits, 5)
