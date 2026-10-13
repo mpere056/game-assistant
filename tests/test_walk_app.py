@@ -1,6 +1,7 @@
 """The app's walk step (App._walk_step) with the real companion and auto-walk, stand-in keys and no
 game: an order starts guiding and walking, keys are held, the player's own key press hands control
 back and releases every key."""
+import os
 import time
 import unittest
 
@@ -9,6 +10,7 @@ from game_assistant.core.autowalk import AutoWalk
 from game_assistant.core.combat import Fighter
 from game_assistant.core.companion import Companion
 from game_assistant.core.nav import Route
+from game_assistant.core.walk_commands import WalkAction
 from tests.test_autowalk import World
 
 
@@ -160,7 +162,7 @@ class OrderSequenceAppTests(unittest.TestCase):
         from game_assistant.core.interface import Entity
         app = make_app()
         ran = []
-        app._order_work = ran.append
+        app._order_work = lambda text, **kw: ran.append(text)
         w = World()
         enemy = Entity(9, 1, 'c4300', (0.0, 0.0, 4.0), (0.0, 1.0, 4.0), 0.5, 2.0, True, False, 400, 400)
         w.entities = (enemy,)
@@ -294,3 +296,42 @@ class TwentyThirdSessionAppTests(unittest.TestCase):
         c.walking = False                              # the player walking: arrived, show it
         c.update(w.snap(), 1 / 30)
         self.assertEqual(c.mode, 'show')
+
+
+class TwentySixthSessionAppTests(unittest.TestCase):
+    def test_a_kill_on_the_way_doesnt_finish_the_order(self):
+        # 'kill the bat and the soldier': the soldier came at the player first; its death counted as the bat's
+        import time as _time
+        from game_assistant.core.interface import Entity
+        app = make_app()
+        ran = []
+        app._order_work = lambda text, **kw: ran.append(text)
+        app._enemy_name = lambda e: {9: 'Man-Bat', 10: 'Kaiden Sellsword'}.get(e.id)
+        w = World()
+        bat = Entity(9, 1, 'c4200', (0.0, 0.0, 9.0), (0.0, 1.0, 9.0), 0.5, 1.0, True, False, 100, 100)
+        rider = Entity(10, 2, 'c4050', (0.0, 0.0, 3.0), (0.0, 1.0, 3.0), 0.5, 2.0, True, False, 400, 400)
+        w.entities = (bat, rider)
+        step(app, w, 1.0)
+        app._then = ['kill the soldier']
+        app._order_target = 9                          # the order: the bat
+        app.fighter.start(10)                          # (the rider came at the player: fought first)
+        step(app, w, 0.1)
+        w.entities = (bat, Entity(10, 2, 'c4050', (0.0, 0.0, 3.0), (0.0, 1.0, 3.0), 0.5, 2.0, True, True, 0, 400))
+        step(app, w, 0.2)
+        _time.sleep(0.1)
+        self.assertEqual(ran, [])                      # not on to the next part...
+        self.assertIn('Got it! Now back to the Man-Bat!', app.lines)
+        self.assertTrue(app.walk.active or app.fighter.active)
+        self.assertIn(app.walk.target_id if app.walk.active else app.fighter.target_id, (9,))
+
+    def test_a_next_part_whose_enemy_is_gone_is_skipped_not_searched_for(self):
+        app = make_app()
+        planned = []
+        app._can_plan = lambda: True
+        app._plan_order = planned.append
+        app.resolver = type('R', (), {'handle': lambda self, t: WalkAction('none', "I don't see any soldier to attack.")})()
+        app.log = type('L', (), {'open': lambda self, *a, **k: open(os.devnull, 'w')})()
+        app._then = []
+        app._order_work('kill the soldier', queued=True)
+        self.assertEqual(planned, [])
+        self.assertIn("I don't see any soldier to attack.", app.lines)
