@@ -318,7 +318,7 @@ class App:
         self._doer_busy = True
         record = {'t': datetime.now().isoformat(timespec='seconds'), 'order': text, 'action': 'doer'}
         try:
-            record['said'] = self.doer.run(text)
+            record['said'] = self.doer.run(text, self.resolver.recent())
         except SpendCapReached as e:
             self._navi_line(str(e))
             record['error'] = str(e)
@@ -329,7 +329,7 @@ class App:
             self._doer_busy = False
         record['steps'] = self.doer.log[-40:]
         self.doer.log = []
-        self.resolver.heard(f'Player ordered: {text}')
+        self.resolver.heard(f'Player ordered: {text}\nNavi: {record.get("said") or ""}')
         with self.log.open('a', encoding='utf-8') as f:
             f.write(json.dumps(record, default=str) + '\n')
 
@@ -359,7 +359,9 @@ class App:
 
     def doer_act(self, order: str):
         try:
-            action = self.resolver.handle(order)
+            # (the rules only: what they don't find, the doer is told and thinks on; a second model picking
+            # "the nearest thing like it" went for an Enderman for "kill the zombie", 2026-10-13)
+            action = self.resolver.handle(order, use_model=False)
         except Exception as e:
             return f'{type(e).__name__}: {e}'
         if action.kind in ('none', 'ask'):
@@ -377,15 +379,62 @@ class App:
 
     def doer_where(self, name: str) -> str:
         got = self.resolver.character(name)
-        if got is not None:
-            return got.say
+        if got is not None and got.point is not None:      # one in sight: how far, how far up or down, the dig
+            try:
+                me = self.adapter.snapshot().player.pos
+            except Exception:
+                return got.say
+            row = {'name': got.name, 'kind': 'creature in sight',
+                   'distance_m': round(math.hypot(got.point[0] - me[0], got.point[2] - me[2])),
+                   'height_diff_m': round(got.point[1] - me[1])}
+            if abs(row['height_diff_m']) > 3 and hasattr(self.adapter, 'dig_estimate'):
+                try:
+                    est = self.adapter.dig_estimate(got.point)
+                except Exception:
+                    est = None
+                if est:
+                    row['digging_straight_there'] = est
+            return json.dumps([row])
         try:
             res = self.adapter.locate(name)
         except Exception as e:
             return f'{type(e).__name__}'
         rows = [{k: r.get(k) for k in ('name', 'kind', 'distance_m', 'compass', 'height_diff_m', 'coordinates')}
                 for r in res.get('results', [])[:3]]
+        if rows and hasattr(self.adapter, 'dig_estimate'):     # digging straight there: how long, with which tool
+            try:
+                est = self.adapter.dig_estimate(res['results'][0]['position'])
+            except Exception:
+                est = None
+            if est:
+                rows[0]['digging_straight_there'] = est
         return json.dumps(rows or {'error': res.get('error', 'not found')})
+
+    def doer_progress(self) -> str | None:
+        """A line on how a long order is going (spoken every so often while it runs)."""
+        try:
+            snap = self.adapter.snapshot()
+        except Exception:
+            return None
+        if self.fighter.active:
+            return f"Still fighting the {self.fighter.name or 'enemy'}!"
+        if getattr(self, 'task', None) is not None and self.task.active:
+            step = self.task.steps[self.task.i] if self.task.i < len(self.task.steps) else None
+            if step is not None:
+                # (a craft step holds a Recipe, not a name: reading it as one stopped an order, 2026-10-13)
+                item = step[1].result if step[0] == 'craft' else str(step[1])
+                name = item.split(':')[-1].replace('_', ' ')
+                what = {'gather': f'getting {name}', 'station': f'setting up the {name}', 'craft': f'crafting {name}'}
+                return f"Still {what.get(step[0], 'working')}: step {self.task.i + 1} of {len(self.task.steps)}."
+        if self.walk.active and snap.player and self.walk.goal:
+            p, g = snap.player.pos, self.walk.goal
+            left = round(math.hypot(g[0] - p[0], g[2] - p[2]))
+            down = round(p[1] - g[1])
+            doing = {'breaking': 'digging', 'building': 'building my way', 'waiting': 'working out the way'}.get(
+                self.walk.state, 'on the way')
+            depth = f', {down} down' if down > 3 else f', {-down} up' if down < -3 else ''
+            return f"Still {doing} to the {self.walk.name or 'spot'}: {left} blocks across{depth}."
+        return None
 
     def doer_say(self, line: str) -> None:
         self._navi_line(line)
@@ -519,6 +568,30 @@ class App:
         book = self.adapter.book()
         held = [i for i in have if have[i] > 0 and book.tool_ok(need, {i: 1})]
         return min(held, key=len) if held else None
+
+    def _tool_first(self, snap) -> bool:
+        """A route with a lot of slow digging that a tool would make much quicker, all told: make the tool first
+        (a task), then the walk again (adapter.tool_advice). True when it switched."""
+        if not hasattr(getattr(self, 'adapter', None), 'tool_advice') or getattr(self, 'task', None) is None \
+                or self.task.active \
+                or self.walk.goal is None:
+            return False
+        try:
+            advice = self.adapter.tool_advice(self.walk.goal)
+        except Exception:
+            advice = None
+        if not advice:
+            return False
+        tool, gain, steps, mostly = advice
+        self._resume_walk = (self.walk.goal, self.walk.name, getattr(self, '_walk_entity', None),
+                             'fight' if self._fight_after is not None else False)
+        self.walk.stop()
+        self.keys.release_all()
+        self.task.start(steps, tool, 1)
+        what = mostly[0].replace('_', ' ') if mostly else 'rock'
+        self._navi_line(f"That's a lot of {what} to dig through! Making a {tool.split(':')[-1].replace('_', ' ')} "
+                        f"first: about {gain} seconds quicker.")
+        return True
 
     def _threat(self, snap):
         """A hostile character on the player (near, after them, at the same height): fight it before going on."""
@@ -685,6 +758,11 @@ class App:
                 self.fighter.start(threat.id, threat.name)
                 self._navi_line(f"A {threat.name or 'monster'}! Let me deal with it first!")
                 return
+        if not self.task.active and getattr(self, '_resume_walk', None):   # the tool's made: on with the walk
+            goal, name, entity, mode = self._resume_walk
+            self._resume_walk = None
+            self._walk_request('start', goal, name, entity, mode)
+            return
         if self.task.active:
             intent = self.task.update(snap, dt, self.walk.active)
             if intent is not None and not self.walk.active:   # its own presses (mining, placing, screens)
@@ -749,6 +827,8 @@ class App:
         if route is not None and route is not self._walk_route:  # planned, re-planned or extended
             self.walk.set_route(route, self.companion.route_actions, self.companion.route_complete)
             self._walk_route = route
+            if self._tool_first(snap):
+                return
         if snap.player:
             self._last_player_pos = snap.player.pos
         self.walk.clear_line = self._los[1] if self._los[0] == self.walk.target_id else None
@@ -1260,6 +1340,11 @@ class App:
             ev = self.walk.events.pop(0)
             if ev == 'break':
                 self._navi_line("Something's in the way. Let me smash it!")
+            elif ev.startswith('work_failed:'):    # a block it couldn't place: planned elsewhere from now on
+                while self.walk.failed_work:
+                    what, info = self.walk.failed_work.pop(0)
+                    if hasattr(self.adapter, 'note_failed_work'):
+                        self.adapter.note_failed_work(what, info)
             elif ev == 'replan':  # the step-by-step walk can't go on as planned (or is off the route): plan again
                 self.companion.replan()
                 self._walk_route = None

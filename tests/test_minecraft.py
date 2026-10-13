@@ -138,3 +138,32 @@ class MinecraftAdapterTests(unittest.TestCase):
         a = MinecraftAdapter(port=1)
         with self.assertRaises(GameNotRunning):
             a.snapshot()
+
+
+class ToolFirstTests(unittest.TestCase):
+    def advice(self, now, wooden, have, slow=5):
+        import sys
+        sys.path.insert(0, 'tests')
+        from test_crafting import Book
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter, _goal_key
+        a = MinecraftAdapter()
+        goal = (1.0, 2.0, 3.0)
+        a._slow_breaks[_goal_key(goal)] = slow
+        a.dig_estimate = lambda g: {'seconds_with_what_is_held': now, 'mostly': ['stone'],
+                                    'seconds_with': {'wooden_pickaxe': wooden}}
+        a.raw = lambda: {'player': {'inventory': have}}
+        book = Book(near=('mc:oak_log',))
+        book.book['minecraft:wooden_pickaxe'] = book.book['mc:wooden_pickaxe']
+        a.book = lambda: book
+        return a.tool_advice(goal)
+
+    def test_a_pickaxe_first_for_a_long_dig_through_stone(self):
+        got = self.advice(330, 45, {})
+        self.assertEqual(got[0], 'minecraft:wooden_pickaxe')
+        self.assertGreater(got[1], 100)
+        self.assertEqual(got[2][-1][1].result, 'mc:wooden_pickaxe')
+
+    def test_not_for_a_short_dig_or_with_one_held_or_few_hard_blocks(self):
+        self.assertIsNone(self.advice(40, 8, {}))                      # the pickaxe wouldn't pay for itself
+        self.assertIsNone(self.advice(330, 45, {'minecraft:wooden_pickaxe': 1}))
+        self.assertIsNone(self.advice(330, 45, {}, slow=1))            # the route hardly digs

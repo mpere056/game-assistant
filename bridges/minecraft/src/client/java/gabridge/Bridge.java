@@ -35,7 +35,7 @@ import java.util.function.Function;
 public class Bridge implements ClientModInitializer {
 	public static final int PORT = 47821;
 	/** Bumped with each change the assistant relies on (it says when the game runs an older bridge). */
-	public static final int VERSION = 8;
+	public static final int VERSION = 10;
 	static final Gson GSON = new Gson();
 
 	/** The latest snapshot as a JSON line, replaced every frame while the assistant asks for it. */
@@ -151,6 +151,17 @@ public class Bridge implements ClientModInitializer {
 				return GSON.toJson(Crafting.recipes());
 			case "sources":
 				return GSON.toJson(Crafting.sources());
+			case "find_entities": {
+				int max = req.has("max") ? req.get("max").getAsInt() : 5;
+				return GSON.toJson(Places.findEntities(req.getAsJsonArray("types"), max));
+			}
+			case "entity_types":
+				return GSON.toJson(Places.entityTypes());
+			case "dig_estimate": {
+				JsonArray from = req.getAsJsonArray("from");
+				JsonArray to = req.getAsJsonArray("to");
+				return GSON.toJson(onGameThread(mc -> Grid.digEstimate(mc, from, to)));
+			}
 			case "block_ids":
 				return GSON.toJson(Finder.ids());
 			case "find_blocks": {

@@ -34,6 +34,30 @@ CREEPER_RUN = 7.0       # blocks: run from a swelling creeper till this far
 LOW_HEALTH = 0.3        # of max health: over to the player
 FIGHT_TIMEOUT = 60.0
 STUCK_S = 4.0           # seconds out of reach without getting any nearer: jump; twice that: unreachable
+SWITCH_NEAR = 8.0       # another hostile one after the player this near...
+SWITCH_GAP = 0.5        # ...and this much nearer than the target: fought first (the nearest attacker always)
+PLAYER_RADIUS = 0.3     # the player's half width
+MOB_REACH = 0.83        # how far past their own and the player's width most fighters hit (Minecraft's mobs)
+KEEP_MARGIN = 0.6       # kept out of a fighter's reach by this much more...
+CHARGING_MARGIN = 0.5   # ...and this much while the swing charges (it keeps walking at us)
+OTHERS_MARGIN = 0.8
+HIT_AT = 2.7            # step in, charged, to this far from the target's edge (our reach is 3 from the eye)
+CREEPER_KEEP = 3.5      # never nearer a creeper than this, but to hit it
+FOE_RANGE = 8.0         # hostile ones this near count in where to stand
+WALK_SPEED = 4.3        # blocks a second, the player walking (any way)
+MOB_SPEED = 2.3         # ...and a fighter coming at them
+LOOK_AHEAD = 0.45       # seconds ahead each way is tried
+CLEAR_ENOUGH = 0.5      # blocks out of every reach (on top of the margins): as good as more (farther wasted
+                        # time walking back in: "it's taking way too long to kill anything", 2026-10-13)...
+CLEAR_CHARGED = 0.4     # ...with the swing charged (stepping in to hit)
+CLEAR_OTHERS = 1.5      # out of the other ones' reach: as good as more...
+CLEAR_CHARGED_OTHERS = 0.6   # ...with the swing charged (else two side by side: never stepping in to hit one)
+STEP_IN_FROM = 0.75     # attack strength from which to step in (arriving as it's charged)
+CRIT_FROM = 0.85        # ...and to jump for a critical hit (falling at the top of the charge)
+CRIT_WAIT = 0.6         # seconds after a jump to wait for the fall before hitting anyway
+CRIT_EVERY = 0.9        # seconds between jumps
+CRIT_CLEAR = 4.0        # no other hostile one this near for a jump
+LAND_PULL = 1.5         # in water: how much more a way onto land counts
 TERRAIN_EVERY = 0.25    # seconds between looks at the ground round the player (water, lava, drops)
 SHIELDS = ('minecraft:shield',)
 
@@ -91,6 +115,7 @@ class MeleeFighter:
         self.weapon_slot = weapon_slot  # adapter.weapon_slot(hotbar) -> the slot to fight with
         self.terrain = terrain          # adapter.terrain() -> {'in_water', 'avoid': {(dx, dz): what}}
         self._ground = ({}, -1e9)
+        self._steered = False
         self.active = False
         self.state = 'idle'
         self.events: list = []
@@ -121,15 +146,130 @@ class MeleeFighter:
             return False
         return bool((e.extra or {}).get('aggressive', True))
 
-    def _footing(self, keys: set, cam, p, e) -> set:
-        """Never step into water, lava or a deep drop when there's another way (the nearest direction to the one
-        wanted that's safe, else stay); in water: swim up and make for land (a fight went to the bottom of a
-        lake, 2026-10-13)."""
-        if self.t - self._ground[1] > TERRAIN_EVERY:
+    def _spacing(self, snap, e, prof: dict, charged: bool, across: float) -> set:
+        """The way to move (or stand): each way (the 8 and staying) is tried a moment ahead (LOOK_AHEAD s), the
+        player at walking pace and every hostile one near coming at them; the way kept farthest out of all their
+        reaches wins, and, with the swing charged (or a shooter), one that brings the target to the edge of our
+        reach. Never into water, lava, a drop or a wall. (Adding up "away from each" cancelled out between a
+        zombie ahead and two behind, and walked into the one ahead, 2026-10-13.)"""
+        p = snap.player.pos
+        ours = e.radius + HIT_AT                                  # where we can hit it from (centre to centre)
+        self._ground_now(p)
+        ground = self._ground[0] or {}
+        avoid = ground.get('avoid') or {}
+        in_water = bool(ground.get('in_water'))
+        wet = {c for c, k in avoid.items() if k == 'water'}
+        if in_water:                          # (all round is water: keeping out of it, it never moved, 2026-10-13)
+            avoid = {c: k for c, k in avoid.items() if k != 'water'}
+        foes = []
+        for o in snap.entities:
+            if o.dead or not o.hostile:
+                continue
+            if o.id != e.id and not (o.extra or {}).get('aggressive', False):
+                continue                                          # (an Enderman minding its own business)
+            if _flat(p, o.pos) > FOE_RANGE or abs(o.pos[1] - p[1]) > 3.0:
+                continue
+            po = self.profile(o) or {}
+            if po.get('ranged'):
+                reach = 0.0                                       # (a shooter doesn't hit up close)
+            elif po.get('explodes'):
+                reach = CREEPER_KEEP
+            else:
+                reach = o.radius + PLAYER_RADIUS + (po.get('reach') or MOB_REACH) + KEEP_MARGIN
+                if not (charged and o.id == e.id):
+                    reach += CHARGING_MARGIN                      # (while ours charges it keeps coming)
+            foes.append((o, reach))
+        just_hit = self.t - self.hit_at < AFTER_HIT * (2.0 if prof.get('explodes') else 1.0)
+        scored = []
+        for c in [(0, 0)] + DIRS8:
+            m = math.hypot(*c)
+            if m and _toward(c, avoid):
+                continue
+            u = (c[0] / m, c[1] / m) if m else (0.0, 0.0)
+            q = (p[0] + u[0] * WALK_SPEED * LOOK_AHEAD, p[2] + u[1] * WALK_SPEED * LOOK_AHEAD)
+            clear_t, clear_o = math.inf, math.inf                 # out of the target's reach; out of the others'
+            for o, reach in foes:
+                v = (p[0] - o.pos[0], p[2] - o.pos[2])
+                dv = math.hypot(*v) or 1e-6
+                ahead = MOB_SPEED * LOOK_AHEAD if dv > 1.0 else 0.0
+                mo = (o.pos[0] + v[0] / dv * ahead, o.pos[2] + v[1] / dv * ahead)
+                c_ = math.hypot(q[0] - mo[0], q[1] - mo[1]) - reach
+                if o.id == e.id:
+                    clear_t = min(clear_t, c_)
+                else:
+                    clear_o = min(clear_o, c_)
+            # (charged: a little room from the target is enough, more would keep it from stepping in to hit;
+            # from the others, always as much as can be had: letting them close in while stepping in to hit took
+            # a hit with three around)
+            enough = CLEAR_CHARGED if (charged and not just_hit) else CLEAR_ENOUGH
+            score = 0.0
+            if clear_t < math.inf:
+                score += min(clear_t, enough) * 3.0
+            if clear_o < math.inf:                                # (their reach has the margins in already)
+                score += min(clear_o, CLEAR_CHARGED_OTHERS if (charged and not just_hit) else CLEAR_OTHERS) * 3.0
+            clear = min(clear_t, clear_o)
+            if clear < 0:
+                score -= 10.0 - clear                             # into a reach: only the least bad of those
+            dt_ = math.hypot(q[0] - e.pos[0], q[1] - e.pos[2])
+            if (charged and not just_hit) or prof.get('ranged'):
+                score -= abs(dt_ - ours) * 1.5                    # in to the edge of our reach
+            else:
+                score -= max(0.0, dt_ - (ours + 1.0)) * 1.0       # not drifting far off while it charges
+            if m == 0:
+                score += 0.05                                     # (standing still, all else equal)
+            if in_water:
+                score += 0.0 if (m == 0 or c in wet) else LAND_PULL   # out onto land
+            scored.append((score, c))
+        # the best way the keys really go (8 ways round the camera, not the world: up to 22 degrees off)
+        best = None
+        for _score, c in sorted(scored, key=lambda x: -x[0]):
+            if c == (0, 0) or not _toward(_dir_of(_keys_toward(c, snap.camera), snap.camera), avoid):
+                best = c
+                break
+        keys = {'jump'} if in_water else set()   # (afloat)
+        d = _flat(p, e.pos)
+        self.state = ('backing' if just_hit else 'closing' if charged else 'spacing') +             (' (others near)' if len(foes) > 1 else '')
+        if best is None or best == (0, 0):
+            self.state = 'waiting' + (' (others near)' if len(foes) > 1 else '')
+            return keys
+        keys |= _keys_toward(best, snap.camera)
+        if keys & {'forward'} and not keys & {'left', 'right', 'back'} and d > 6.0 and not prof.get('explodes'):
+            keys.add('sprint')
+        if prof.get('ranged') and d > 3.0 and 'forward' in keys:     # zig-zag in on a shooter
+            if self.t - self.zig_at > ZIGZAG:
+                self.zig, self.zig_at = -self.zig, self.t
+            keys.discard('left')
+            keys.discard('right')
+            keys.add('left' if self.zig > 0 else 'right')
+        if e.pos[1] - snap.player.pos[1] > 0.6 and d < 3.0 and 'forward' in keys:   # it's up a step
+            keys.add('jump')
+        return keys
+
+    def _crit_ok(self, snap, e, prof, in_water: bool) -> bool:
+        """Whether to jump for critical hits: on land, not at a shooter or a creeper, nobody else hostile within
+        CRIT_CLEAR (a jump can't be steered away from them)."""
+        if in_water or prof.get('ranged') or prof.get('explodes'):
+            return False
+        p = snap.player.pos
+        return not any(o.id != e.id and o.hostile and not o.dead and (o.extra or {}).get('aggressive', False)
+                       and _flat(p, o.pos) < CRIT_CLEAR for o in snap.entities)
+
+    def _ground_now(self, p=None) -> None:
+        """The ground round the player, fresh: again each TERRAIN_EVERY s, and as soon as the player is on another
+        block (a quarter second at a walk is a block: it went past the shore before it looked again)."""
+        cell = (math.floor(p[0]), math.floor(p[2])) if p is not None else None
+        if self.t - self._ground[1] > TERRAIN_EVERY or (cell is not None and cell != getattr(self, '_ground_cell', cell)):
+            self._ground_cell = cell
             try:
                 self._ground = (self.terrain() or {}, self.t)
             except Exception:
                 self._ground = ({}, self.t)
+
+    def _footing(self, keys: set, cam, p, e) -> set:
+        """Never step into water, lava or a deep drop when there's another way (the nearest direction to the one
+        wanted that's safe, else stay); in water: swim up and make for land (a fight went to the bottom of a
+        lake, 2026-10-13)."""
+        self._ground_now()
         ground = self._ground[0]
         avoid = ground.get('avoid') or {}
         moves = {'forward', 'back', 'left', 'right'}
@@ -170,6 +310,8 @@ class MeleeFighter:
         self.seen_hurt = False
         self.armed = False
         self.fleeing = False
+        self.jumped_at = -1e9
+        self.primary = None          # the one asked for, while one that came at us is fought first
 
     def stop(self, why: str = '') -> None:
         self.active, self.state = False, 'idle'
@@ -187,11 +329,30 @@ class MeleeFighter:
         if e is None or e.dead:
             if e is not None or self.seen_hurt:
                 self.kills.append((self.target_id, e.type_id if e else None))
+            back = self.primary is not None and any(x.id == self.primary and not x.dead for x in snap.entities)
+            if back:                                     # one that came at us is down: back to the one asked for
+                self.target_id, self.primary, self.seen_hurt = self.primary, None, False
+                self.in_reach_at, self.nearest = self.t, math.inf
+                return Intent()
+            if e is not None or self.seen_hurt:
                 self.events.append('won')
             else:
                 self.events.append('target_gone')
             self.stop()
             return Intent()
+        # another one closing in on the player, nearer than the target: it first (self-defence; then back)
+        p0 = pl.pos
+        d_t = _flat(p0, e.pos)
+        threat = min((x for x in snap.entities if x.id != e.id and x.hostile and not x.dead
+                      and (x.extra or {}).get('aggressive', False) and x.id not in self.unreachable
+                      and abs(x.pos[1] - p0[1]) < 2.5 and _flat(p0, x.pos) < SWITCH_NEAR
+                      and _flat(p0, x.pos) < d_t - SWITCH_GAP),
+                     key=lambda x: _flat(p0, x.pos), default=None)
+        if threat is not None:
+            if self.primary is None:
+                self.primary = self.target_id
+            self.target_id, e, self.seen_hurt = threat.id, threat, False
+            self.in_reach_at, self.nearest = self.t, math.inf
         if e.health is not None and e.max_health and e.health < e.max_health:
             self.seen_hurt = True
         if pl.health is not None and pl.max_health and pl.health <= pl.max_health * LOW_HEALTH:
@@ -230,31 +391,28 @@ class MeleeFighter:
             else:
                 self.state = 'fleeing'
                 return Intent(frozenset({'back', 'sprint'}), turn, (), tilt)
-        # hit
+        # hit: charged, on it, in reach; a critical hit (falling: half as much again) when the jump's under way
+        self._ground_now(p)
+        in_water = bool((self._ground[0] or {}).get('in_water'))
+        on_ground = ex.get('on_ground', True)
+        falling = not on_ground and (ex.get('vy') or 0.0) < -0.05
+        crit_ok = self._crit_ok(snap, e, prof, in_water)
         if strength >= CHARGED and on_target and reach_d <= REACH and err < 12.0:
-            taps.append('attack')
-            self.hit_at = self.t
-            self.state = 'hitting'
-        # move: back off right after a hit (always from a creeper), else close in to the edge of reach
-        if self.t - self.hit_at < AFTER_HIT * (2.0 if prof.get('explodes') else 1.0):
-            keys.add('back')
-            self.state = 'backing'
-        elif across > HOLD_AT or reach_d > REACH:
-            keys.add('forward')
-            if across > 6.0 and not prof.get('explodes'):
-                keys.add('sprint')
-            if prof.get('ranged') and across > 3.0:      # zig-zag in on a shooter
-                if self.t - self.zig_at > ZIGZAG:
-                    self.zig, self.zig_at = -self.zig, self.t
-                keys.add('left' if self.zig > 0 else 'right')
-            if e.pos[1] - p[1] > 0.6 and across < 2.5:    # it's up a step
-                keys.add('jump')
-            self.state = 'closing'
-        elif across < TOO_CLOSE:
-            keys.add('back')
-            self.state = 'spacing'
-        else:
-            self.state = 'waiting'                       # in reach: the swing charging
+            if falling or not crit_ok or self.t - self.jumped_at > CRIT_WAIT:
+                taps.append('attack')
+                self.hit_at = self.t
+                self.state = 'hitting' + (' (critical)' if falling else '')
+        # a jump for a critical hit: charged (or nearly), in reach, on the ground, nobody else close
+        if crit_ok and on_ground and strength >= CRIT_FROM and reach_d <= REACH - 0.2 and 'attack' not in taps \
+                and self.t - self.jumped_at > CRIT_EVERY:
+            keys.add('jump')
+            self.jumped_at = self.t
+        # move: keep out of its reach while the swing charges; step in to the edge of ours when charged (from a
+        # little before: it arrives as the swing is ready)
+        keys |= self._spacing(snap, e, prof, strength >= STEP_IN_FROM or 'attack' in taps, across)
+        # in water: to land first (fought from the shore: slow and sinking in it, where drowned are at home)
+        if in_water:
+            self.state += ' (in water)'
         # unreachable: out of reach for a while, and never nearer than before (backing off after hits doesn't
         # count: that gave up on a zombie mid-fight, 2026-10-13)
         if reach_d <= REACH or reach_d < self.nearest - 0.3:
@@ -262,12 +420,12 @@ class MeleeFighter:
             self.nearest = min(self.nearest, reach_d)
         elif self.t - self.in_reach_at > STUCK_S:
             keys.add('jump')
-            if self.t - self.in_reach_at > STUCK_S * 2:
+            if self.t - self.in_reach_at > STUCK_S * 2 and not in_water:
                 self.unreachable.add(e.id)
                 self.events.append('unreachable')
                 self.stop()
                 return Intent()
-        keys = self._footing(keys, cam, p, e)
+        keys = self._footing(keys, cam, p, e) if not self._steered else keys
         # a shield up against arrows and a hit coming in, while the swing isn't ready
         if ex.get('offhand') in SHIELDS and 'attack' not in taps:
             shooting = prof.get('ranged') and st.get('using_item') and across > 2.5

@@ -71,3 +71,11 @@ class DoerTests(unittest.TestCase):
         self.assertIn('not done', client.sent[2]['content'][0]['content'])      # the failure came back to it
         self.assertIn('Done: get me a wooden pickaxe', client.sent[3]['content'][0]['content'])
         self.assertIn('holding: 1 things', client.sent[3]['content'][0]['content'])   # and the state after
+
+    def test_says_what_it_is_doing_as_each_step_starts(self):
+        script = [('act', {'order': 'get me a wooden pickaxe', 'say': 'No pickaxe: making one first!'}),
+                  ('finish', {'line': 'Done!'})]
+        client, world = Client(script), World()
+        Doer(world, 'Minecraft', '', guard=Guard(), client=client).run('dig down to the cave')
+        lines = [line for _t, line in world.said]
+        self.assertLess(lines.index('No pickaxe: making one first!'), lines.index('Done: get me a wooden pickaxe'))
