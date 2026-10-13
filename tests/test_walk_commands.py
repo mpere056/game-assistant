@@ -324,3 +324,40 @@ class TwentySixthSessionTests(unittest.TestCase):
         r2 = CommandResolver(self._adapter(), ask_model=model)
         self.assertEqual(r2.handle('kill the bat').name, 'Man-Bat')      # (a name that matches: no model)
         self.assertEqual(len(asked), 1)
+
+
+class TwentySeventhSessionTests(unittest.TestCase):
+    """2026-10-12 orders: 'Please kill these soldiers.' killed one and stopped ('kill this soldier too' had to
+    follow); 'kill those bats', 'the soldiers' the same; 'Actually, please kill just two more.' went to the
+    planner as two fights with any enemy."""
+
+    def _resolver(self):
+        from game_assistant.core.interface import Entity
+        ents = [Entity(1, 1, 'c4311', (3.0, 0.0, 4.0), (3.0, 1.0, 4.0), 0.5, 2.0, True, False, 100, 100),
+                Entity(2, 1, 'c4311', (8.0, 0.0, 4.0), (8.0, 1.0, 4.0), 0.5, 2.0, True, False, 100, 100),
+                Entity(5, 3, 'c4200', (4.0, 0.0, 9.0), (4.0, 1.0, 9.0), 0.5, 1.0, True, False, 100, 100)]
+        a = FakeAdapter([], [], ents)
+        a.knowledge = lambda t: {'name': {1: 'Godrick Soldier', 3: 'Man-Bat'}.get(t)}
+        return CommandResolver(a)
+
+    def test_a_plural_means_all_of_them(self):
+        r = self._resolver()
+        for order in ('Please kill these soldiers.', 'kill the soldiers', 'Kill those soldiers', 'kill them'):
+            a = r.handle(order)
+            self.assertEqual((a.every, a.count), ('Godrick Soldier', None), order)
+        self.assertEqual(r.handle('Kill those bats.').every, 'Man-Bat')
+        self.assertIsNone(r.handle('kill the bat').every)
+        self.assertIsNone(r.handle('kill this soldier').every)
+
+    def test_how_many(self):
+        r = self._resolver()
+        for order, n in (('kill two soldiers', 2), ('Please kill three soldiers.', 3), ('kill 2 soldiers', 2),
+                         ('kill a couple of soldiers', 2), ('kill both soldiers', 2)):
+            a = r.handle(order)
+            self.assertEqual((a.kind, a.every, a.count), ('walk', 'Godrick Soldier', n), order)
+        r.handle('kill the soldier')
+        a = r.handle('Actually, please kill just two more.')     # the kind just fought
+        self.assertEqual((a.every, a.count), ('Godrick Soldier', 2))
+        a = r.handle('kill one more')
+        self.assertEqual((a.name, a.every), ('Godrick Soldier', None))
+        self.assertIsNone(r.handle('kill this one').count)

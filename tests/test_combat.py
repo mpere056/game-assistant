@@ -1449,9 +1449,18 @@ class TwentyFourthSessionTests(unittest.TestCase):
         WINDOWS[('c4300', 3801)] = [(0.77, 0.87)]
         f = Fighter(windows, lambda tid: 65.0)
         f.start(1)
-        f.update(_snap([_enemy(1, (0.0, 0.0, 6.0), anim=8200, t=0.1, length=0.6)]), 1 / 60)
-        f.update(_snap([_enemy(1, (0.0, 0.0, 6.0), anim=3801, t=0.05)]), 1 / 60)
-        self.assertEqual(f.chains['_counter']['c4300']['3801'], 1)
+        f.update(_snap([_enemy(1, (0.0, 0.0, 2.0), anim=8200, t=0.1, length=0.6)]), 1 / 60)
+        for i in range(50):                                 # out of the flinch into 3801, still right there
+            f._update(_snap([_enemy(1, (0.0, 0.0, 2.0), anim=3801, t=0.05 + i / 60)]), 1 / 60)
+        self.assertEqual(f.chains['_counters']['c4300']['3801'], 1)
+        # one flying off out of a flinch (a bat's 1006001: a hitbox far away) is no counter
+        f3 = Fighter(windows, lambda tid: 30.0)
+        f3.start(1)
+        f3.update(_snap([_enemy(1, (0.0, 0.0, 2.0), anim=8200, t=0.1, length=0.6)]), 1 / 60)
+        for i in range(50):
+            f3._update(_snap([_enemy(1, (0.0, 0.0, 2.0 + 8.0 * i / 60), facing=(0.0, 0.0, 1.0), anim=3801,
+                                     t=0.05 + i / 60)]), 1 / 60)
+        self.assertFalse(f3.chains.get('_counters', {}).get('c4300'))
         # our swing landed, it flinches: no second press
         f._last_swing, f._combo = f.t - 0.4, 1
         it = f.update(self._me(23030000, 0.4, [_enemy(1, (0.0, 0.0, 1.8), anim=8200, t=0.05, length=0.6)]), 1 / 60)
@@ -1533,3 +1542,17 @@ class TwentyFifthSessionTests(unittest.TestCase):
             bat = _enemy(1, (0.0, 0.0, 4.7 + 6.0 * i / 60), facing=(0.0, 0.0, 1.0), anim=3811, t=0.05 + i / 60)
             taps += f.update(_snap([bat]), 1 / 60).taps
         self.assertNotIn('roll', taps)
+
+
+class TwentySeventhSessionTests(unittest.TestCase):
+    def test_the_games_lock_moving_between_two_on_the_player_doesnt_move_the_target(self):
+        # 2026-10-12 22:09: a c4351 and a soldier both on the player: 21 target changes in two minutes
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        f._locked = True
+        f._target_since = f.t - 3.0
+        target = _enemy(1, (2.5, 0.0, 0.5), facing=(-0.98, 0.0, -0.2))     # on the player, to the right
+        other = _enemy(2, (0.0, 0.0, 2.6))                                  # the camera (game's lock) on it
+        for _ in range(45):
+            f.update(_snap([target, other]), 1 / 60)
+        self.assertEqual(f.target_id, 1)
