@@ -44,6 +44,9 @@ NEAR_GOAL = 1.6                     # blocks across: a stand this near the goal 
 # 20 / 4.317 = 4.63 ticks).
 TICKS_PER_BLOCK = 20.0 / 4.317
 COST_BREAK = 2.0 / TICKS_PER_BLOCK  # per block broken, on top of its time to break (the bridge's, in 4 ticks)
+PARKOUR_MAX = 3                     # blocks of gap a sprinting jump (with a run-up) clears
+COST_SPRINT_JUMP = 0.5              # a sprinting jump: a little dearer than a walking one
+PARKOUR_RISK = 2.0                  # per block of gap, when missing it would hurt (a deep drop, lava)
 COST_PLACE = 20.0 / TICKS_PER_BLOCK  # a block placed (bridging): turning round and placing, about a second
 COST_PILLAR = COST_PLACE + COST_JUMP  # a jump and a block placed under the feet
 H_WEIGHT = 1.5                      # weighted A*: a good route fast rather than the best one slowly
@@ -113,7 +116,7 @@ def stand_height(g: Grid, x: int, y: int, z: int) -> float | None:
 
 def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budget_s: float = 1.0,
          max_nodes: int = 200_000, can_break: bool = False, blocks: int = 0, kind: str = 'near',
-         box=None, no_place=frozenset(), sky=None) -> Path | None:
+         box=None, no_place=frozenset(), sky=None, parkour: bool = True) -> Path | None:
     """A route from the stand nearest start toward goal (cells). None: nowhere to stand near the start.
     can_break: mine through blocks; blocks: how many blocks there are to build with (bridging, pillaring).
     kind, what counts as there (Baritone's goals): 'near' within NEAR_GOAL across and 2 up or down; 'block'
@@ -129,7 +132,7 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
     def h(c):
         return H_WEIGHT * math.sqrt((c[0] - gx) ** 2 + (c[1] - gy) ** 2 * 0.5 + (c[2] - gz) ** 2)
 
-    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks, frozenset(no_place))
+    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks, frozenset(no_place), parkour)
     open_ = [(h(s), 0.0, s)]
     came: dict = {s: None}
     cost = {s: 0.0}
@@ -182,8 +185,9 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
         for w in work:
             actions.append((w[0], pts[i], *w[1:]))
         pillar = any(w[0] == 'place' and w[3] == 'pillar' for w in work)
+        leap = any(w[0] == 'parkour' for w in work)
         if cells[i + 1][1] > cells[i][1] and g.at(*cells[i][:3]) != CLIMB and pts[i + 1][1] - pts[i][1] > 0.6 \
-                and not pillar:
+                and not pillar and not leap:
             jumps.append((pts[i], pts[i + 1]))
             actions.append(('step', pts[i], pts[i + 1]))
     keep = {a[1] for a in actions} | {pts[i + 1] for i in range(len(cells) - 1) if works[i + 1]}
@@ -201,6 +205,7 @@ class _Ctx:
     can_break: bool
     blocks: int
     no_place: frozenset = frozenset()   # cells where placing failed lately (not planned there again)
+    parkour: bool = True                 # jumps over gaps
 
 
 def _breakable(g: Grid, x: int, y: int, z: int) -> float | None:
@@ -237,6 +242,49 @@ def _open(ctx: _Ctx, cells) -> tuple[float, tuple] | None:
     return total, tuple(work)
 
 
+def _parkour(ctx: _Ctx, x: int, y: int, z: int, plain: set):
+    """Jumps over a gap (straight on, the 4 ways): a walking jump over 1 block, a sprinting one over 2 (or over 1
+    and up 1), a sprinting one with a run-up block behind over 3; landing level or 1 lower, with room for the arc
+    (two blocks over the head all the way). ('parkour', landing, gap, sprint, run-up cell or None)."""
+    g = ctx.g
+    here = g.at(x, y, z)
+    if here in (WATER, CLIMB, POWDER) or g.at(x, y - 1, z) not in FLOOR or g.at(x, y + 2, z) not in PASS:
+        return
+    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        first = (x + dx, y, z + dz)
+        if stand_height(g, *first) is not None or first in plain:
+            continue                                  # (no gap: walked)
+        landed = False
+        for gap in range(1, PARKOUR_MAX + 1):
+            gx_, gz_ = x + dx * gap, z + dz * gap
+            if not _clear(g, gx_, y, y + 2, gz_):      # the arc: feet to two over the head
+                break
+            if gap > 1 and stand_height(g, gx_, y, gz_) is not None:
+                break                                 # (that's ground, not gap: it'd be landed on)
+            lx, lz = x + dx * (gap + 1), z + dz * (gap + 1)
+            for rise in ((0, -1, 1) if gap == 1 else (0, -1)):
+                ly = y + rise
+                if stand_height(g, lx, ly, lz) is None or not _clear(g, lx, ly, ly + 1, lz) \
+                        or g.at(lx, max(y, ly) + 2, lz) not in PASS:
+                    continue
+                sprint = gap >= 2 or rise > 0
+                runup = None
+                if gap == 3:                          # a run at it: a block behind to start from
+                    runup = (x - dx, y, z - dz)
+                    if stand_height(g, *runup) is None or g.at(x - dx, y + 2, z - dz) not in PASS:
+                        continue
+                # if it's missed: how bad the fall into the gap is
+                fall = min(_fall(g, x + dx * i, y, z + dz * i, ctx.falls) for i in range(1, gap + 1))
+                risk = 0.0 if fall <= MAX_DROP else PARKOUR_RISK * gap
+                cost = (gap + 1) + COST_JUMP + (COST_SPRINT_JUMP if sprint else 0.0) + risk \
+                    + (1.0 if runup else 0.0) + _edge_cost(g, lx, ly, lz, ctx.falls)
+                yield (lx, ly, lz, 0), cost, (('parkour', (lx, ly, lz), gap, sprint, runup),)
+                landed = True
+                break                                 # (the level landing first; else 1 lower)
+            if landed:
+                break                                 # (the nearest landing over the gap: none past it)
+
+
 def _all_moves(ctx: _Ctx, c):
     """Every move from node c: (next node, cost, work)."""
     g = ctx.g
@@ -245,6 +293,8 @@ def _all_moves(ctx: _Ctx, c):
     for n, step in _moves(g, (x, y, z), ctx.falls):
         plain.add(n)
         yield (*n, 0), step, ()
+    if ctx.parkour and not placed:
+        yield from _parkour(ctx, x, y, z, plain)
     if not ctx.can_break and ctx.blocks <= 0:
         return
     here = g.at(x, y, z)

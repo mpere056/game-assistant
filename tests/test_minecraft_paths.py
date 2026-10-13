@@ -117,7 +117,7 @@ class PathTests(unittest.TestCase):
         for z in range(20):
             put(d, s, 10, 1, z, B.POWDER)              # a strip of powder snow in the ground...
             put(d, s, 10, 0, z, B.SOLID)               # ...one block deep
-        p = B.find(grid(d, s), (3, 2, 5), (15, 2, 5))
+        p = B.find(grid(d, s), (3, 2, 5), (15, 2, 5), parkour=False)   # (a jump over it is the other way)
         self.assertTrue(p.reaches_goal)
         self.assertTrue(any(10 <= pt[0] < 11 and pt[1] == 1.0 for pt in p.points), p.points)
 
@@ -188,8 +188,8 @@ class BreakBuildTests(unittest.TestCase):
             for x in (9, 10, 11):
                 put(d, s, x, 0, z, B.AIR)              # a gap three wide, falling out of the box
         g = grid(d, s)
-        self.assertFalse(B.find(g, (3, 1, 5), (15, 1, 5)).reaches_goal)
-        p = B.find(g, (3, 1, 5), (15, 1, 5), blocks=16)
+        self.assertFalse(B.find(g, (3, 1, 5), (15, 1, 5), parkour=False).reaches_goal)
+        p = B.find(g, (3, 1, 5), (15, 1, 5), blocks=16, parkour=False)
         self.assertTrue(p.reaches_goal)
         placed = [a for a in p.actions if a[0] == 'place']
         self.assertEqual([a[2][0] for a in placed], [9, 10, 11])
@@ -264,3 +264,39 @@ class BreakBuildTests(unittest.TestCase):
         p = B.find(grid(d, s), (3, 1, 5), (3, 7, 5), sky=sky)
         self.assertTrue(p.reaches_goal)
         self.assertEqual(int(p.cells[-1][0]), 15)
+
+
+class ParkourTests(unittest.TestCase):
+    def gap_world(self, width, landing_rise=0):
+        """Ground at y 0 (stand at 1) with a deep gap `width` blocks wide at x 8.., the far side raised by
+        landing_rise; the gap falls 6 into lava (a miss would be deadly)."""
+        d, s = world(sy=14, floor_y=7)
+        for z in range(20):
+            for x in range(20):
+                for y in range(0, 6):
+                    put(d, s, x, y, z, B.SOLID)            # solid below the walking level (stand at 7)
+            for x in range(8, 8 + width):
+                for y in range(0, 7):
+                    put(d, s, x, y, z, B.AIR)
+                put(d, s, x, 0, z, B.DANGER)
+            if landing_rise:
+                for x in range(8 + width, 20):
+                    put(d, s, x, 7, z, B.SOLID)
+        return grid(d, s)
+
+    def test_jumps_by_width(self):
+        for width, sprint in ((1, False), (2, True), (3, True)):
+            p = B.find(self.gap_world(width), (3, 7, 5), (15, 7, 5))
+            self.assertTrue(p.reaches_goal, width)
+            leaps = [a for a in p.actions if a[0] == 'parkour']
+            self.assertEqual(len(leaps), 1, width)
+            self.assertEqual((leaps[0][3], leaps[0][4]), (width, sprint))
+            self.assertEqual(leaps[0][5] is not None, width == 3)   # a run-up for three
+        self.assertFalse(B.find(self.gap_world(4), (3, 7, 5), (15, 7, 5)).reaches_goal)
+
+    def test_a_sprint_jump_up_one_over_a_one_block_gap(self):
+        p = B.find(self.gap_world(1, landing_rise=1), (3, 7, 5), (15, 8, 5))
+        self.assertTrue(p.reaches_goal)
+        leap = next(a for a in p.actions if a[0] == 'parkour')
+        self.assertEqual(leap[2][1], 8)
+        self.assertTrue(leap[4])

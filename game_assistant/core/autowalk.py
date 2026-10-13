@@ -66,6 +66,10 @@ STEP_TURN_RATE = 540.0
 STEP_WAIT = 12.0      # seconds at the end of a part-planned route with no more of it coming: give up
 STEP_TURN_GAIN = 14.0
 WORK_TIMEOUT = 15.0   # seconds: give up on breaking one block...
+LEAP_TIMEOUT = 4.0    # seconds for a jump over a gap, run-up and all
+LEAP_AT = 0.32        # blocks past the middle of the block jumped from (its edge is at 0.5): jump
+LEAP_FACING = 6.0     # degrees: facing the landing this squarely before running at it
+LANDED = 0.6          # blocks from the landing block's middle: landed
 PLACE_TIMEOUT = 5.0   # ...or placing one (it failed for 15 s, four times over, jumping on the spot, 2026-10-13)
 # Walking to a character (and attacking it): steered at its live position every frame once within
 # CHASE_DIRECT metres; further away along the route, which the caller re-plans as it moves.
@@ -552,6 +556,14 @@ class AutoWalk:
 
     def _special_action(self, snap: Snapshot, p: Vec3) -> Intent | None:
         """Ladders, lifts, jumps, breaking and placing blocks: None when walking normally."""
+        if self._special is not None and self._special[0].what == 'parkour':
+            act = self._special[0]
+            got = self._leap(act, snap, p)
+            if got is not None:
+                return got
+            act.done, self._special = True, None
+            self._stuck_since = None
+            return None
         if self._special is not None and self._special[0].what in ('break', 'place', 'look'):
             act = self._special[0]
             got = self._work(act, snap, p)
@@ -591,6 +603,14 @@ class AutoWalk:
             if act.what in ('jump', 'step'):
                 act.done = True
                 return Intent(frozenset({'forward'}), taps=('jump',))
+            if act.what == 'parkour':
+                if _flat(p, act.start) > WORK_AT or abs(p[1] - act.start[1]) > 0.8:
+                    return None                           # walk on up to where it's jumped from first
+                act.t0 = self.t
+                act.phase = 'runup' if act.info.get('runup') else 'go'
+                self._special = (act, self.t)
+                self.events.append('work:parkour')
+                return self._special_action(snap, p)
             if act.what in ('break', 'place', 'look'):
                 if _flat(p, act.start) > WORK_AT or abs(p[1] - act.start[1]) > 1.2:
                     return None                           # walk on up to it first (nothing after it before it)
@@ -609,6 +629,49 @@ class AutoWalk:
                 self.events.append(f'work:{act.what}')
                 return self._special_action(snap, p)
         return None
+
+    def _leap(self, act: _Action, snap: Snapshot, p: Vec3) -> Intent | None:
+        """A jump over a gap (Minecraft parkour): (back to the run-up block first, for a long one) face the
+        landing, walk or sprint at the edge, jump just before it, keep going till landed. None: landed, or
+        missed (then fallen: the walk plans again from where it is)."""
+        cam = snap.camera
+        land, start = act.end, act.start
+        self.state = 'parkour'
+        if self.t - act.t0 > LEAP_TIMEOUT or p[1] < min(start[1], land[1]) - 1.5:
+            self.events.append('work_failed:parkour')
+            if self.precise:
+                self.events.append('replan')
+                self.route, self._progress = [], 0
+            return None
+        if _flat(p, land) < LANDED and abs(p[1] - land[1]) < 0.6 and self.t - act.last > 0.2:
+            if self.route:                                # on it: on along the route from the landing
+                self._progress = min(range(len(self.route)), key=lambda j: _flat(land, self.route[j])
+                                     + abs(land[1] - self.route[j][1]))
+            return None
+        d = (land[0] - start[0], land[2] - start[2])
+        n = math.hypot(*d) or 1.0
+        u = (d[0] / n, d[1] / n)
+        want = _yaw((u[0], 0.0, u[1]))
+        err = _wrap(want - _yaw(cam.forward))
+        turn = max(-STEP_TURN_RATE / 30.0, min(STEP_TURN_RATE / 30.0, err * 0.5))
+        if act.phase == 'runup':                          # back to the block behind the edge, facing on
+            back = act.info['runup']
+            if _flat(p, back) > 0.35:
+                keys = {'back'} if abs(err) < 30.0 else set()
+                return Intent(frozenset(keys), turn)
+            act.phase = 'go'
+        if abs(err) > LEAP_FACING and act.phase == 'go':
+            return Intent(frozenset(), turn)              # face it squarely first
+        act.phase = 'running' if act.phase == 'go' else act.phase
+        keys = {'forward'}
+        if act.info.get('sprint'):
+            keys.add('sprint')
+        out = (p[0] - start[0]) * u[0] + (p[2] - start[2]) * u[1]   # how far past the start block's middle
+        taps = ()
+        if act.phase == 'running' and out > LEAP_AT:
+            taps = ('jump',)                              # at the edge
+            act.phase, act.last = 'flying', self.t
+        return Intent(frozenset(keys), turn, taps)
 
     def _aim(self, cam, point: Vec3, dt_k: float = 0.35) -> tuple[float, float, float]:
         return aim_at(cam, point, dt_k)
