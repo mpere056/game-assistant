@@ -500,6 +500,44 @@ class MinecraftAdapter:
                 return (_mirror((cx + 0.5, float(y), cz + 0.5)), (cx, y - 1, cz), 'up', (cx, y, cz))
         return None
 
+    def terrain(self) -> dict:
+        """What's around the player's feet for moving in a fight (core/melee.py): {'in_water': bool, 'avoid':
+        {(dx, dz): 'water' | 'lava' | 'drop'}} for the 8 cells round the player (snapshot coordinates' x)."""
+        d = self.raw()
+        p = (d.get('player') or {}).get('pos')
+        if not p:
+            return {}
+        x, y, z = math.floor(p[0]), math.floor(p[1] + 0.01), math.floor(p[2])
+        got = self._ask({'op': 'grid', 'min': [x - 1, y - 5, z - 1], 'size': [3, 8, 3]}, timeout=1.0)
+        if 'error' in got:
+            return {}
+        g = blocks.Grid.from_bridge(got)
+        avoid = {}
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                if dx == 0 and dz == 0:
+                    continue
+                cx, cz = x + dx, z + dz
+                if g.at(cx, y, cz) not in blocks.PASS or g.at(cx, y + 1, cz) not in blocks.PASS:
+                    continue                                      # a wall: the game stops the player anyway
+                kind = None
+                for k in range(0, 5):
+                    c = g.at(cx, y - k, cz)
+                    if c == blocks.WATER:
+                        kind = 'water'
+                        break
+                    if c == blocks.DANGER:
+                        kind = 'lava'
+                        break
+                    if c not in blocks.PASS:
+                        kind = 'drop' if k - 1 > blocks.MAX_DROP else None
+                        break
+                else:
+                    kind = 'drop'
+                if kind:
+                    avoid[(-dx, dz)] = kind                       # (x mirrored for the snapshot)
+        return {'in_water': g.at(x, y, z) == blocks.WATER or g.at(x, y + 1, z) == blocks.WATER, 'avoid': avoid}
+
     def combat_profile(self, e) -> dict:
         """What a kind of character does in a fight (core/melee.py): explodes, shoots, how far it hits."""
         kind = (e.model or '').split(':')[-1]

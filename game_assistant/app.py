@@ -142,7 +142,8 @@ class App:
         if getattr(self.adapter, 'fighter_style', None) == 'melee':   # a charged swing aimed with the camera
             from .core.melee import MeleeFighter
             self.fighter = MeleeFighter(getattr(self.adapter, 'combat_profile', lambda e: {}),
-                                        getattr(self.adapter, 'weapon_slot', lambda h: None))
+                                        getattr(self.adapter, 'weapon_slot', lambda h: None),
+                                        getattr(self.adapter, 'terrain', lambda: {}))
         self._fight_after = None          # the walk is going to a character to fight it
         self.resolver = CommandResolver(self.adapter, ask_model=self._model_order)
         self.doer = None              # orders thought through step by step (core/doer.py), where the game has it

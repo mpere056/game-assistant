@@ -1525,3 +1525,16 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   task goes on from its step's start.
 - Tests: 4 in a simulated arena (a zombie killed with full swings only; running from a creeper; zig-zag and a
   shield against a skeleton; low health). Not yet tried in the game.
+
+## 2026-10-13: first Minecraft fight (user): stopped mid-fight, sank to the bottom of the water
+- Merged the Minecraft work (PR #17).
+- "Kill a zombie for me": it closed in, hit with full swings and backed off, well; then "I can't reach that one!"
+  and stopped, and the player sank. The fight log: "unreachable" counted from the nearest it had ever been
+  (1.5 blocks, early on); backing off after each hit never got that near again, so after 6 s it gave up mid-
+  fight. And its moves went wherever the keys pointed, into the water by the shore.
+- Fixes: unreachable only after 8 s out of reach (and no nearer than ever): a hit-and-back-off fight goes on.
+  The ground round the player is looked at four times a second (the adapter's terrain(): water, lava or a
+  drop of more than 3 in each of the 8 cells around): a move that heads into one (within about 40 degrees:
+  backing along the shore drifted in a little at a time) turns to the nearest safe way round, else stays; in
+  water it swims up and makes for land. Walking routes weigh swimming more (4 times a block walked, was 2.5).
+- Tests: 2 (a 20 s fight never given up; backing along a shore never into the water). Not yet tried in game.
