@@ -393,3 +393,19 @@ class PlaceOrCharacterTests(unittest.TestCase):
         r.handle('take me to the iron golem')
         a = r.handle('Wait, stop, no, not the Iron Golem, but like Iron Blocks')
         self.assertEqual((a.kind, a.name), ('walk', 'Iron Ore'))
+
+
+class FleeTests(unittest.TestCase):
+    def test_runs_away_from_the_hostile_ones(self):
+        from game_assistant.core.interface import Entity
+
+        class A(FakeAdapter):
+            def explore_point(self, direction, distance, vector=None):
+                self.vector = vector
+                return (vector[0] * 10, 0.0, vector[1] * 10)
+        zombies = [Entity(i, 3, None, (x, 0.0, 5.0), (x, 1.0, 5.0), 0.3, 1.9, True, False, name='Zombie')
+                   for i, x in ((1, -1.0), (2, 1.0))]
+        a = A([], [], zombies)
+        got = CommandResolver(a).handle('run away!')
+        self.assertEqual(got.kind, 'walk')
+        self.assertLess(a.vector[1], 0)                 # away from them (they're north, +z)

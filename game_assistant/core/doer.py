@@ -6,7 +6,8 @@ model gets the order and the game's state (what's held, where the player is, wha
 the character's skills by giving it one simple order at a time (act: what the instant rules and the skills
 under them already do: walk somewhere, get or craft an item, fight). Each runs in the game until it's done;
 the model gets what came of it (what Navi said: "Here we are", "I can't find any stone near here") and the new
-state, and decides the next. It can look things up (the game's wiki), check where something is, wait, tell
+state, and decides the next. It can look things up (the game's wiki), check where something is, survey the
+ground round the player (drops, what's at their bottom, pools below), wait, tell
 the player something, and finishes with what to tell the player.
 
 The world (the app, DoerWorld) runs each order and reports. Through the spending guard; at most MAX_ACTIONS
@@ -39,17 +40,22 @@ How you act: call `act` with one simple order in plain words, the kind the chara
 Each runs in the game until it's done; then you get what came of it and the game's state again. Think about
 what the order needs first (what has to be got or made before what; what's already held), then act step by
 step. Do exactly what the player asked for: never take something else instead because it's near or alike
-(not another kind of creature, not another item); if the player said which one, it's that one. When there is
-no direct way (none near), reason about where it would be and how to get to it: where_is finds places, kinds
+(not another kind of creature, not another item); if the player said which one, it's that one. Find out before saying something can't be done: survey the
+ground, check where things are, try. When there is no direct way (none near), reason about where it
+would be and how to get to it: where_is finds places, kinds
 of block and creatures anywhere the game has loaded; the wiki tells you about the game (where things live or
 spawn, what they need, when); then go there, explore (an order like 'explore 80 blocks north'), or wait for
-the right time, and check again. Be efficient: before a long job, think whether getting
-something first makes it much quicker overall (a pickaxe before digging down through stone: where_is gives how
+the right time, and check again. Be efficient: where_is gives a few of each with about how long getting
+to each takes; take the quickest, and weigh other ways too (a creature that spawns in the dark may be quicker
+found by waiting or looking around on the player's own level, at night, than by digging down to one), think
+whether getting something first makes it much quicker overall (a pickaxe before digging down through stone: where_is gives how
 long digging there would take with what's held and with each pickaxe; better tools for a lot of mining), and
 do whatever is quickest in all. If an action fails, think about why (the outcome says) and try another way;
 don't repeat the same failing action more than twice. Keep the player told: each act's `say` says what you're
 doing and why, in a few words. When the order is done, or can't be done, call finish
-with one or two short sentences for the player. Never act beyond what the order asks. The recent
+with one or two short sentences for the player. Never act beyond what the order asks. Keep the player alive
+before all else: never start or go on with a fight on low health or when outnumbered; get away first ('run
+away'), eat ('eat something') when food is held, keep clear of creepers, and only then carry on. The recent
 conversation (if given) says what earlier orders were: a follow-up ("no, a zombie specifically") changes or
 narrows the last one.
 {notes}"""
@@ -65,6 +71,10 @@ TOOLS = [
      'this name is (nothing is done).',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'],
                       'additionalProperties': False}},
+    {'name': 'survey', 'description': 'The ground round the player from the game itself (in the dark too): where '
+     'it drops away in each direction, how far down and what is at the bottom (water and how deep, ground, lava), '
+     'walls, and pools of water below, with coordinates to go to.',
+     'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'name': 'say', 'description': 'Tell the player something now (one short sentence), and go on.',
      'input_schema': {'type': 'object', 'properties': {'line': {'type': 'string'}}, 'required': ['line'],
                       'additionalProperties': False}},
@@ -155,6 +165,8 @@ class Doer:
                     out = self._act(str(inp.get('order') or ''))
                 elif b.name == 'where_is':
                     out = self.world.doer_where(str(inp.get('name') or ''))
+                elif b.name == 'survey':
+                    out = getattr(self.world, 'doer_survey', lambda: 'no survey in this game')()
                 elif b.name == 'say':
                     self.world.doer_say(str(inp.get('line') or ''))
                     out = 'said'
@@ -165,7 +177,7 @@ class Doer:
                     out = f'waited. <state>{self.world.doer_state()}</state>'
                 else:
                     out = f'unknown tool {b.name}'
-                self.log[-1]['result'] = out
+                self.log[-1]['result'] = out if not isinstance(out, list) else '(picture)'
                 results.append({'type': 'tool_result', 'tool_use_id': b.id, 'content': out})
             msgs.append({'role': 'user', 'content': results})
         return ''

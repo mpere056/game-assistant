@@ -75,6 +75,7 @@ def needs_plan(text: str) -> bool:
     return bool(_PLAN_WORDS.search(text)) or len(text.split()) > 16
 CHAINS_FILE = '.local/{game}/chains.json'   # learned enemy combos (and the rest the fighter learns), per game
 ALL_RANGE = 60.0                    # 'kill all of them': the next one within this many metres                      # a target that ran off this often: hand back
+WALK_SPEED_MPS = 4.3   # a walk's pace, for the doer's estimates (Minecraft: blocks a second)
 THREAT_NEAR = 3.5   # blocks: a hostile one after the player this near during a task is fought off first
 THREAT_HURT = 6.0   # ...or this near when the player was just hurt
 FIGHT_FROM = 12.0  # metres: a "fight" order this close starts fighting at once (else walk up first)
@@ -122,6 +123,7 @@ class App:
         self.walk = AutoWalk(sprint=bool(self.cfg['auto_walk_sprint']) and getattr(self.adapter, 'walk_sprint', True),
                              breaks=getattr(self.adapter, 'walk_breaks', True),
                              precise=getattr(self.adapter, 'walk_precise', False))
+        self.walk.probe = getattr(self.adapter, 'block_solid', None)
         if self.companion is not None:
             self.companion.walk_decides = self.walk.precise
             self.companion.shape_fn = getattr(self.adapter, 'goal_shape', None)
@@ -143,7 +145,8 @@ class App:
             from .core.melee import MeleeFighter
             self.fighter = MeleeFighter(getattr(self.adapter, 'combat_profile', lambda e: {}),
                                         getattr(self.adapter, 'weapon_slot', lambda h: None),
-                                        getattr(self.adapter, 'terrain', lambda: {}))
+                                        getattr(self.adapter, 'terrain', lambda: {}),
+                                        getattr(self.adapter, 'route', None))
         self._fight_after = None          # the walk is going to a character to fight it
         self.resolver = CommandResolver(self.adapter, ask_model=self._model_order)
         self.doer = None              # orders thought through step by step (core/doer.py), where the game has it
@@ -378,37 +381,51 @@ class App:
         return [line for at, line in getattr(self, '_said', []) if at >= t]
 
     def doer_where(self, name: str) -> str:
+        """Where the nearest few of something are, for the doer to weigh: places, kinds of block and creatures
+        (in sight, and anywhere loaded), each with how far across and up or down, and about how long getting
+        there takes (walking, plus digging straight there with what's held: a zombie "16 blocks away" was 42
+        down, and digging after it took minutes, 2026-10-13)."""
+        try:
+            me = self.adapter.snapshot().player.pos
+        except Exception:
+            me = None
+        rows = []
+        try:
+            res = self.adapter.locate(name)
+        except Exception as e:
+            res = {'error': type(e).__name__}
+        for r in res.get('results', [])[:4]:
+            rows.append({k: r.get(k) for k in ('name', 'kind', 'distance_m', 'compass', 'height_diff_m',
+                                               'coordinates')} | {'_pos': r.get('position')})
         got = self.resolver.character(name)
-        if got is not None and got.point is not None:      # one in sight: how far, how far up or down, the dig
-            try:
-                me = self.adapter.snapshot().player.pos
-            except Exception:
-                return got.say
-            row = {'name': got.name, 'kind': 'creature in sight',
-                   'distance_m': round(math.hypot(got.point[0] - me[0], got.point[2] - me[2])),
-                   'height_diff_m': round(got.point[1] - me[1])}
-            if abs(row['height_diff_m']) > 3 and hasattr(self.adapter, 'dig_estimate'):
+        if got is not None and got.point is not None and me is not None:
+            rows.insert(0, {'name': got.name, 'kind': 'creature in sight',
+                            'distance_m': round(math.hypot(got.point[0] - me[0], got.point[2] - me[2])),
+                            'height_diff_m': round(got.point[1] - me[1]), '_pos': tuple(got.point)})
+        for row in rows[:4]:
+            pos = row.pop('_pos', None)
+            walk_s = (row.get('distance_m') or 0) / WALK_SPEED_MPS
+            dig_s = 0.0
+            if pos is not None and abs(row.get('height_diff_m') or 0) > 3 and hasattr(self.adapter, 'dig_estimate'):
                 try:
-                    est = self.adapter.dig_estimate(got.point)
+                    est = self.adapter.dig_estimate(pos)
                 except Exception:
                     est = None
                 if est:
                     row['digging_straight_there'] = est
-            return json.dumps([row])
+                    dig_s = est.get('seconds_with_what_is_held') or 0.0
+            row['about_seconds_to_get_there'] = round(walk_s + dig_s)
+        for row in rows[4:]:
+            row.pop('_pos', None)
+        return json.dumps(rows[:6] or {'error': res.get('error', 'not found')})
+
+    def doer_survey(self):
+        if not hasattr(self.adapter, 'survey'):
+            return 'no survey in this game'
         try:
-            res = self.adapter.locate(name)
+            return json.dumps(self.adapter.survey())
         except Exception as e:
-            return f'{type(e).__name__}'
-        rows = [{k: r.get(k) for k in ('name', 'kind', 'distance_m', 'compass', 'height_diff_m', 'coordinates')}
-                for r in res.get('results', [])[:3]]
-        if rows and hasattr(self.adapter, 'dig_estimate'):     # digging straight there: how long, with which tool
-            try:
-                est = self.adapter.dig_estimate(res['results'][0]['position'])
-            except Exception:
-                est = None
-            if est:
-                rows[0]['digging_straight_there'] = est
-        return json.dumps(rows or {'error': res.get('error', 'not found')})
+            return f'{type(e).__name__}: {e}'
 
     def doer_progress(self) -> str | None:
         """A line on how a long order is going (spoken every so often while it runs)."""
@@ -563,6 +580,9 @@ class App:
 
     def task_place_spot(self):
         return self.adapter.place_spot()
+
+    def task_food(self, hotbar: list):
+        return getattr(self.adapter, 'food_slot', lambda h: None)(hotbar)
 
     def task_tool(self, need: str, have: dict):
         book = self.adapter.book()
@@ -738,7 +758,8 @@ class App:
             self.task.stop()
         elif cmd_task:
             self.task.start(*cmd_task)
-            self._navi_line(f'First: {self.task.describe()}.')
+            if cmd_task[0] and cmd_task[0][0][0] != 'eat':
+                self._navi_line(f'First: {self.task.describe()}.')
         if self.task.active and time.monotonic() - self._took_over < 0.5:   # the player took over
             self.task.stop()
             self.keys.release_all()

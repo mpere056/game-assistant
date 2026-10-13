@@ -92,7 +92,8 @@ def _merge(book, steps: list, have: dict) -> list:
         for i, a in enumerate(out):
             for j in range(i + 1, len(out)):
                 b = out[j]
-                if a[0] != b[0] or a[0] not in ('gather', 'craft') or a[1] != b[1]                         or (a[0] == 'gather' and a[3] != b[3]):
+                if a[0] != b[0] or a[0] not in ('gather', 'craft') or a[1] != b[1] \
+                        or (a[0] == 'gather' and a[3] != b[3]):
                     continue
                 merged = (a[0], a[1], a[2] + b[2]) + a[3:]
                 trial = out[:i] + [merged] + out[i + 1:j] + out[j + 1:]

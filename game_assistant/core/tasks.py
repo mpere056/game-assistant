@@ -52,6 +52,7 @@ class TaskWorld(Protocol):
     def task_press(self, button: str) -> None: ...                 # click where the pointer is
     def task_place_spot(self) -> tuple | None: ...   # (aim point, against key, face, new block's key)
     def task_tool(self, need: str, have: dict) -> str | None: ...   # the held tool that will do for `need`
+    def task_food(self, hotbar: list) -> int | None: ...          # the hotbar slot with the best food
 
 
 def _cell(p) -> tuple:
@@ -104,6 +105,8 @@ class TaskRunner:
                 bits.append(f'craft {s[1].count * s[2]} {_name(s[1].result)}')
             elif s[0] == 'station':
                 bits.append(f'place a {_name(s[1])}')
+            elif s[0] == 'eat':
+                bits.append('eat')
         return ', '.join(bits)
 
     def _begin(self) -> None:
@@ -123,7 +126,7 @@ class TaskRunner:
         step = self.steps[self.i] if self.active and self.i < len(self.steps) else None
         what = None
         if step is not None:
-            what = f'{step[0]} {_name(step[1].result) if step[0] == "craft" else _name(step[1])}'
+            what = f'{step[0]} {_name(step[1].result) if step[0] == "craft" else _name(str(step[1]))}'
         self.trace.append({'t': round(self.t, 2), 'step': self.i, 'what': what, 'phase': phase, 'note': note})
 
     def _next(self) -> None:
@@ -184,6 +187,8 @@ class TaskRunner:
             return self._gather(snap, ex, inv, step, walking)
         if step[0] == 'station':
             return self._station(snap, ex, step)
+        if step[0] == 'eat':
+            return self._eat(snap, ex)
         return self._craft(snap, ex, inv, step, walking)
 
     # ---- moving an item into the hotbar ----
@@ -373,6 +378,32 @@ class TaskRunner:
             self._set('find', 'could not mine it')
             return Intent()
         return Intent(frozenset(keys), turn, tuple(taps), tilt)
+
+    # ---- eating ----
+
+    def _eat(self, snap, ex) -> Intent | None:
+        """The best food into the hand and the use button held till one is eaten (about 1.6 s)."""
+        slot = self.world.task_food(ex.get('hotbar') or [])
+        if slot is None:
+            self._fail("I've nothing to eat in the hotbar.")
+            return None
+        if self.phase == 'start':
+            self.food_before = sum(n for _i, n in [(s[0], s[1]) for s in (ex.get('hotbar') or []) if s and s[0]])
+            self._set('eating')
+        taps = []
+        if ex.get('slot') != slot:
+            if self.t - self.last_click > 0.3:
+                taps.append(f'slot{slot + 1}')
+                self.last_click = self.t
+            return Intent(frozenset(), 0.0, tuple(taps))
+        held = sum(n for _i, n in [(s[0], s[1]) for s in (ex.get('hotbar') or []) if s and s[0]])
+        if held < self.food_before or self.t - self.since > 4.0:
+            self.world.task_say('Mm, that helps!' if held < self.food_before else "I couldn't eat just now.")
+            self.active = False
+            self.events.append('done')
+            self.result = 'done' if held < self.food_before else 'failed: could not eat'
+            return Intent()
+        return Intent(frozenset({'item'}))
 
     # ---- placing the station ----
 

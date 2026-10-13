@@ -90,6 +90,14 @@ _EXPLORE = re.compile(r"^(?:please\s+)?(?:explore|wander|scout|go|walk|head|move
                       r"off))?(?:\s+(?:for\s+)?(?P<n>\d+)\s*(?:blocks?|metres?|meters?|m)?)?(?:\s+(?:to the\s+|towards?\s+"
                       r"(?:the\s+)?)?(?P<dir>north[- ]?east|north[- ]?west|south[- ]?east|south[- ]?west|north|south|east|"
                       r"west))?\W*$", re.I)
+# Coordinates: 'go to 12 64 -30', 'take me to x 12 y 64 z -30' (the game's own, as it shows them).
+_COORDS = re.compile(r"\b(?:go|walk|take me|head|move|travel|run|get)\b.*?\bto\s+(?:x\s*)?(?P<x>-?\d+(?:\.\d+)?)[\s,]+"
+                     r"(?:y\s*)?(?P<y>-?\d+(?:\.\d+)?)[\s,]+(?:z\s*)?(?P<z>-?\d+(?:\.\d+)?)\W*$", re.I)
+# Getting away: 'run away', 'get away from them', 'retreat' (from the hostile ones near, the way away from them).
+_FLEE = re.compile(r"\b(run away|run off|flee|retreat|get away|escape|back off|get out of here)\b", re.I)
+_EAT = re.compile(r"^(?:please\s+)?(?:eat|have something to eat|heal up|eat something|have a snack)\b", re.I)
+FLEE_FROM = 24.0      # hostile ones this near count, running away
+FLEE_TO = 28.0        # ...and the run goes this far
 # A correction of the last walk order: 'no, not the Iron Golem, but like iron blocks' (2026-10-13: it stopped)
 _CORRECTION = re.compile(r"^\W*not (?:the |that |this |those |an? )?(?P<no>[a-z' ]+?)\s*[,.]?\s*(?:but |rather |"
                          r"instead |i mean )+(?:like |the |some |a |an |more )*(?P<yes>[a-z' ]+?)\W*$", re.I)
@@ -209,6 +217,18 @@ class CommandResolver:
                 return got
         if _STOP.search(t) and len(t.split()) <= STOP_WORDS:
             return WalkAction('stop', 'Stopping.')
+        if _FLEE.search(rest or t) and hasattr(self.adapter, 'explore_point'):
+            got = self._flee()
+            if got is not None:
+                return got
+        if _EAT.match(rest or t) and hasattr(self.adapter, 'food_slot'):
+            return WalkAction('task', 'Eating!', name='food', count=1, steps=[('eat', None)])
+        m = _COORDS.search(rest or t)
+        if m and hasattr(self.adapter, 'coords_point'):
+            x, y, z = (float(m.group(k)) for k in ('x', 'y', 'z'))
+            point = self.adapter.coords_point(x, y, z)
+            self.last_walk_t = time.monotonic()
+            return WalkAction('walk', 'On my way!', tuple(point), f'{x:g} {y:g} {z:g}')
         m = _EXPLORE.match(rest or t)
         if m and hasattr(self.adapter, 'explore_point') and (m.group('dir') or m.group('n') or
                                                              re.match(r"\W*(explore|wander|scout)", rest or t, re.I)):
@@ -491,6 +511,28 @@ class CommandResolver:
             return self._walk(None, r.surface.pos)
         return WalkAction('none', "I can't tell where you mean.")
 
+    def _flee(self) -> WalkAction | None:
+        """The way away from the hostile ones near (from where they are, weighted to the nearer), FLEE_TO on."""
+        snap = self.adapter.snapshot()
+        if not snap.player:
+            return None
+        p = snap.player.pos
+        vx = vz = 0.0
+        for e in snap.entities:
+            if not e.hostile or e.dead:
+                continue
+            dx, dz = p[0] - e.pos[0], p[2] - e.pos[2]
+            d = math.hypot(dx, dz)
+            if 0.1 < d < FLEE_FROM:
+                vx, vz = vx + dx / d / d, vz + dz / d / d
+        if math.hypot(vx, vz) < 1e-6:
+            return WalkAction('none', "There's nothing to run from near here.")
+        point = self.adapter.explore_point(None, FLEE_TO, vector=(vx, vz))
+        if point is None:
+            return None
+        self.last_walk_t = time.monotonic()
+        return WalkAction('walk', 'Running for it!', tuple(point), 'away')
+
     def _get_item(self, what: str) -> WalkAction | None:
         """'a stone pickaxe', '10 cobblestone', 'some sticks': a task (gather and craft), or None (not an item)."""
         from .crafting import CantMake, plan
@@ -519,10 +561,12 @@ class CommandResolver:
             name = item.split(':')[-1].replace('_', ' ')
             if not steps:
                 return WalkAction('none', f'You already have {name}!')
-            said = name if n == 1 or name.endswith(('s', 'ore', 'iron', 'gold', 'copper', 'dirt', 'stone'))                 else name + 's'
+            said = name if n == 1 or name.endswith(('s', 'ore', 'iron', 'gold', 'copper', 'dirt', 'stone')) \
+                    else name + 's'
             say = f"On it! I'll get {'a' if n == 1 else n} {said}."
             last = steps[-1]
-            if last[0] == 'craft' and last[1].result == item and last[1].count > 1                     and (n - have.get(item, 0)) % last[1].count:
+            if last[0] == 'craft' and last[1].result == item and last[1].count > 1 \
+                    and (n - have.get(item, 0)) % last[1].count:
                 made = last[1].count * last[2]        # ('craft 2 sticks': they come 4 at a time)
                 say = f"{name.capitalize()}s come {last[1].count} at a time, so I'll make {made}."
             return WalkAction('task', say, name=item, count=n, steps=steps)

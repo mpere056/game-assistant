@@ -1607,3 +1607,52 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   pickaxe first: about 250 seconds quicker."), then the walk goes on.
 - Tests: tool advice (a pickaxe for a long dig through stone; not for a short one, one held, or few hard blocks).
   Not yet tried in the game.
+
+## 2026-10-13: merged PR #19; water, stop-start digging, and digging chosen too readily (user)
+- Committing PR #19 swept in docs/LAUNCH.md (a private plan, not mine: `git add -A`); it was taken out of the
+  commit and the branch force-pushed before merging. Only files changed are staged by name from now on.
+- Stop-start digging: each block took ~1.5 s to mine (a wooden pickaxe: right), then ~2.5 s aiming at a block
+  already gone (the route planned again while digging still listed the blocks just dug: "never in sight" after
+  1.5 s). The walk now asks whether a block is still there as work on it starts (the adapter's block_solid) and
+  goes straight on past one that's gone.
+- Water: routes could swim through deep water (any water block was a place to be); swimming is at the surface
+  now (the head out of the water), and the walk holds jump when the player sinks below the route.
+- Digging chosen too readily ("at night it could find more zombies more efficiently than digging so far down"):
+  where_is gives the doer up to 4 of each (in sight and anywhere loaded) with about how long getting to each
+  takes (walking, plus digging straight there with what's held), and the doer is told to take the quickest and
+  weigh other ways (waiting or looking round on its own level at night for what spawns in the dark).
+- Six lines joined by a lost backslash-newline (shell escaping) put right; a test now catches them.
+- Tests: a block already dug is skipped at once. Not yet tried in the game.
+
+## 2026-10-13: "ride this water down into the cave and drop safely into a pool" (user)
+- Water navigation worked. The order above: the doer answered it couldn't see the cave's depth or whether there
+  was a pool at the bottom. The user: it should at least try (go to the edge and look; game data); not hard-coded.
+- The doer can survey now (the adapter's survey(), from the game's blocks, in the dark too): in each of the 8
+  directions where the ground drops away, how far out and down, and what's at the bottom (water and how deep,
+  ground, lava), walls, and the pools of water below with coordinates; and give coordinate orders ("go to 12 40
+  -30": the game's own, as where_is and survey give them). It's told to find out before saying something can't
+  be done. (A screenshot tool was tried and taken out again: the user prefers surveying, for now.)
+- The walk takes a fall of any height into water (Minecraft's: no harm), when the water reaches a block past the
+  landing too (walking off an edge carries the player on); onto ground still 3 at most.
+- Tests: a 19-block drop into a pool taken (onto ground not); the survey finds a drop and the pool at its bottom.
+  Not yet tried in the game.
+
+## 2026-10-13: the cave drop worked; then the player died fighting a zombie (user)
+- "Ride the water down into the cave and drop safely": surveyed, found the pool 21 down, went to it, no harm.
+- "Kill five zombies or skeletons": the fighter stood 16 s "waiting" 5.2 blocks from a zombie that stood still
+  (no straight way to it: the fighter has no routes) and gave it up twice; the doer then said "take me to the
+  nearest zombie", and the walk went right up to it (into its reach: health 10 to 4); the fighter handed over at
+  low health ("heal up!"), the doer ordered the fight again at 4 health, it handed over again at once, and with
+  no one acting the zombie killed the player.
+- Fixes: on low health the fighter gets away first (the way farthest from every hostile one near, sprinting,
+  never into water, lava, a drop or a wall) till none is within 12 or 8 s, then hands over. With no straight way
+  in, it plans a route (adapter.route, on a thread; again as the target moves) and follows it with the camera on
+  the target (none that needs digging or building). Stepping in charged is judged a short step on (a whole step
+  overshot the edge of reach and it waited half a block out of it). Walking up to a hostile one stops out of its
+  reach (4.5). The doer: the player alive before all else (no fights on low health or outnumbered; run away, eat,
+  keep clear of creepers first). New orders: "run away" (the way from the hostile ones near), "eat something"
+  (the best food in the hotbar), "take me to the surface" (the open sky: the bridge's heights; the planner takes
+  any way up, out of a cave or dug straight up, whichever is quicker).
+- The arena: none taken with one to four zombies (four round the player: 0, was 1). Bridge version 11. Tests:
+  retreating then handing over; a route round a wall; to the surface by the way out; running away. Not yet tried
+  in the game.

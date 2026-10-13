@@ -651,7 +651,8 @@ class Fighter:
         # on the decision to go in left it standing just out of reach, waiting; eighteenth session)
         reach = self.my_reach - SAFE_REACH_IN if safe_now and not (opening or reel or interrupt or passive) \
             else self.my_reach
-        go_in = (opening or reel or interrupt or safe_now or (passive and clear))             and self.t - self._last_roll >= ROLL_RECOVER
+        go_in = (opening or reel or interrupt or safe_now or (passive and clear)) \
+                and self.t - self._last_roll >= ROLL_RECOVER
         self.debug['interrupt'] = interrupt
         self.debug['safe_now'] = safe_now
         self.debug.update(opening=opening, passive=passive, reel=reel, poise=self._poise, combo=self._combo)

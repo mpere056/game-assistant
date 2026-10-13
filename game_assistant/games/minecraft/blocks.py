@@ -30,7 +30,8 @@ AIR, WATER, DANGER, SOLID, LOW, TALL, CLIMB, DOOR, PARTIAL, UNKNOWN, POWDER = ra
 PASS = {AIR, WATER, CLIMB, POWDER}  # the body can be in these
 SOFT = {WATER, POWDER}              # falling into these does no harm
 FLOOR = {SOLID, PARTIAL, TALL, LOW}  # these hold you up from below
-MAX_DROP = 3                        # blocks: a fall this far costs no health
+MAX_DROP = 3                        # blocks: a fall this far costs no health (onto ground)...
+MAX_WATER_DROP = 60                 # ...and into water, any fall (as far as this)
 COST_DIAG = math.sqrt(2.0)
 COST_JUMP = 0.6
 COST_DROP = 0.4                     # per block fallen
@@ -101,14 +102,18 @@ def stand_height(g: Grid, x: int, y: int, z: int) -> float | None:
         return None
     if here not in PASS or g.at(x, y + 1, z) not in PASS:
         return None
-    if here in (WATER, CLIMB) or g.at(x, y - 1, z) in FLOOR:  # (powder: only with ground under it)
+    if here == WATER:
+        # swimming: at the surface, the head out of the water (a route through deep water drowned the player and
+        # lost them a lot of health, 2026-10-13)
+        return float(y) if g.at(x, y + 1, z) not in (WATER,) else None
+    if here == CLIMB or g.at(x, y - 1, z) in FLOOR:  # (powder: only with ground under it)
         return float(y)
     return None
 
 
 def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budget_s: float = 1.0,
          max_nodes: int = 200_000, can_break: bool = False, blocks: int = 0, kind: str = 'near',
-         box=None, no_place=frozenset()) -> Path | None:
+         box=None, no_place=frozenset(), sky=None) -> Path | None:
     """A route from the stand nearest start toward goal (cells). None: nowhere to stand near the start.
     can_break: mine through blocks; blocks: how many blocks there are to build with (bridging, pillaring).
     kind, what counts as there (Baritone's goals): 'near' within NEAR_GOAL across and 2 up or down; 'block'
@@ -141,7 +146,8 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
         hc = h(c)
         if hc < best[0]:
             best = (hc, c)
-        if _there(g, c, goal, kind) or (box is not None and _inside(c, box)):
+        if _there(g, c, goal, kind) or (box is not None and _inside(c, box)) \
+                or (sky is not None and _open_sky(c, sky)):
             end = c
             break
         if expanded >= max_nodes or (expanded % 512 == 0 and time.perf_counter() - t0 > budget_s):
@@ -289,6 +295,13 @@ def _all_moves(ctx: _Ctx, c):
                 room[1] + (('place', (x, y, z), (x, y - 1, z), 'pillar'),)
 
 
+def _open_sky(c, sky) -> bool:
+    """Standing at or above the top of the column (nothing over the head: the surface). sky: (x, z) -> the
+    height where the open sky starts, or None (not known)."""
+    top = sky(c[0], c[2])
+    return top is not None and c[1] >= top
+
+
 def _inside(c, box) -> bool:
     (x0, _y0, z0), (x1, _y1, z1) = box
     return x0 <= c[0] < x1 and z0 <= c[2] < z1
@@ -404,11 +417,19 @@ def _moves(g: Grid, c, falls: dict | None = None):
                 continue
             # down: walk off the edge and fall
             if not diag and _clear(g, nx, y, y + 1, nz):
-                for d in range(1, MAX_DROP + 1):
-                    if g.at(nx, y - d, nz) not in PASS:
+                for d in range(1, MAX_WATER_DROP + 1):
+                    k = g.at(nx, y - d, nz)
+                    if k not in PASS:
                         break
                     if stand_height(g, nx, y - d, nz) is not None:
-                        if _overshoot_ok(g, x, y, z, dx, dz, d, falls):
+                        # (into water, a fall of any height does no harm: the way down into a cave's pool; the
+                        # walk off the edge carries on a block, so the water must reach a block further too)
+                        if d <= MAX_DROP:
+                            ok = _overshoot_ok(g, x, y, z, dx, dz, d, falls)
+                        else:
+                            ok = k == WATER and (g.at(nx + dx, y - d, nz + dz) == WATER
+                                                 or not _clear(g, nx + dx, y - d, y - d + 1, nz + dz))
+                        if ok:
                             yield (nx, y - d, nz), base + COST_DROP * d + _edge_cost(g, nx, y - d, nz, falls)
                         break
 

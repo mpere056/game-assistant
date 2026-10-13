@@ -83,6 +83,7 @@ LOCK_RANGE = 12.0     # attack: lock on (the camera then follows the target by i
 ATTACK_REACH = 1.8    # attack: swing when this close to the target's body (metres from its edge)
 ATTACK_FACING = 30.0  # ...and the camera points within this many degrees of it
 AFTER_HIT_S = 0.6     # attack: wait this long after the swing, then hand back to the player
+HOSTILE_STOP = 4.5    # ...a hostile one: out of its reach
 REACH_CHARACTER = 2.5 # just walking to a character: stop this close to it
 LIFT_WAIT = 25.0
 LADDER_TIMEOUT = 30.0
@@ -111,6 +112,7 @@ class _Action:
     t0: float | None = None                    # working on it since
     held: float | None = None                  # mining since (the crosshair on the block)
     seen: bool = False
+    probed: bool = False                       # asked whether the block is still there
     phase: str = ''
     last: float = -1e9                         # the last press (slot, place, jump)
 
@@ -149,6 +151,10 @@ class AutoWalk:
     # once when it can't go on or is off the route (Baritone's way). Else: smooth pursuit (open ground).
     precise: bool = False
     failed_work: list = field(default_factory=list)   # (what, info) of work that failed: the app tells the adapter
+    # Whether a block is still there (the adapter's block_solid(key)), asked as work on it starts: a route planned
+    # again while digging still had the blocks just dug, and each was aimed at for 1.5 s before being given up
+    # (digging stopped after every block or two, 2026-10-13). None: not known (aim and see).
+    probe: object = None
     active: bool = False
     route: list = field(default_factory=list)
     goal: Vec3 | None = None
@@ -323,6 +329,8 @@ class AutoWalk:
                 keys.add('forward')
         if rise > 0.4 and flat < 1.4:
             keys.add('jump')                  # a step up (held: the game jumps as soon as it can), a ladder, water
+        elif p[1] < here[1] - 0.15:
+            keys.add('jump')                  # sinking below the route (in water): swim up, keep the head out
         if i >= len(pts) - 1 or (i == len(pts) - 2 and flat < STEP_AT and abs(rise) < 0.8):
             # at the end of the route: arrived (its last actions done: looking at the block), or wait for
             # the rest of it to be planned
@@ -368,7 +376,10 @@ class AutoWalk:
         if self.attack and gap <= ATTACK_REACH and abs(err) <= ATTACK_FACING:
             self._swung_at = self.t
             return Intent(taps=tuple(taps) + ('attack',))
-        if not self.attack and gap <= REACH_CHARACTER and self.clear_line is not False:
+        # (walking up to a hostile one, stop out of its reach: "take me to the zombie" went right up to it and
+        # it hit the player down to 4 health, 2026-10-13)
+        stop_at = HOSTILE_STOP if e.hostile else REACH_CHARACTER
+        if not self.attack and gap <= stop_at and self.clear_line is not False:
             self.events.append('arrived')
             self.stop()
             return Intent()
@@ -583,6 +594,16 @@ class AutoWalk:
             if act.what in ('break', 'place', 'look'):
                 if _flat(p, act.start) > WORK_AT or abs(p[1] - act.start[1]) > 1.2:
                     return None                           # walk on up to it first (nothing after it before it)
+                if act.what == 'break' and self.probe is not None and act.info.get('key') is not None \
+                        and not act.probed:
+                    act.probed = True                     # (once, as work on it starts)
+                    try:
+                        there = self.probe(tuple(act.info['key']))
+                    except Exception:
+                        there = None
+                    if there is False:                    # dug already: on to the next at once
+                        act.done = True
+                        continue
                 act.t0 = self.t
                 self._special = (act, self.t)
                 self.events.append(f'work:{act.what}')
