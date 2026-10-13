@@ -163,6 +163,32 @@ final class Grid {
 		return o;
 	}
 
+	/**
+	 * The height of the top of each column in a rectangle ({"op":"heights","min":[x,z],"size":[sx,sz]} ->
+	 * {"heights":[...]} x fastest): the first air above the highest block that stops movement, i.e. where the
+	 * open sky starts (the surface).
+	 */
+	static JsonObject heights(Minecraft mc, JsonArray min, JsonArray size) {
+		JsonObject o = new JsonObject();
+		ClientLevel level = mc.level;
+		if (level == null || !Bridge.singleplayer(mc)) {
+			o.addProperty("error", "not in a single-player world");
+			return o;
+		}
+		int x0 = min.get(0).getAsInt(), z0 = min.get(1).getAsInt();
+		int sx = Math.min(size.get(0).getAsInt(), 256), sz = Math.min(size.get(1).getAsInt(), 256);
+		JsonArray h = new JsonArray();
+		for (int z = 0; z < sz; z++) {
+			for (int x = 0; x < sx; x++) {
+				h.add(level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, x0 + x, z0 + z));
+			}
+		}
+		o.add("min", min);
+		o.add("size", size);
+		o.add("heights", h);
+		return o;
+	}
+
 	static double ticks(BlockState st, float h, java.util.List<ItemStack> tools) {
 		if (h == 0) {
 			return 1;

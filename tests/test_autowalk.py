@@ -198,7 +198,9 @@ class ChaseTests(unittest.TestCase):
             if not aw.active:
                 break
         self.assertIn('arrived', aw.events)
-        self.assertLess(math.hypot(w.pos[0] - enemy[0], w.pos[2] - enemy[2]), 3.5)  # where it is now
+        # where it is now, and out of its reach (a hostile one: stopped at HOSTILE_STOP)
+        self.assertLess(math.hypot(w.pos[0] - enemy[0], w.pos[2] - enemy[2]), 5.5)
+        self.assertGreater(math.hypot(w.pos[0] - enemy[0], w.pos[2] - enemy[2]), 3.5)
 
     def test_follows_the_route_to_a_character_far_above(self):
         # 15:22: an Eagle 35 m up a cliff, 18 m away on the map: straight at it walked into the cliff.
@@ -495,3 +497,14 @@ class PreciseWalkTests(unittest.TestCase):
         walk(aw, w, 3)
         self.assertIn('arrived', aw.events)
         self.assertGreater(w.pitch, 30.0)               # looking down at the block at its feet
+
+    def test_a_block_already_dug_is_skipped_at_once(self):
+        w = BlockWorld(None, yaw=0.0)                    # (nothing there: dug already)
+        aw = AutoWalk(sprint=False)
+        aw.probe = lambda key: False
+        route = [(0.0, 0.0, 0.0), (0.0, 0.0, 4.5), (0.0, 0.0, 12.0)]
+        aw.start(route, route[-1], 'There', actions=[('break', (0.0, 0.0, 4.5), (0.0, 0.5, 5.5), {'key': (1, 2, 3)})])
+        walk(aw, w, 6)
+        self.assertFalse(w.held_attack)
+        self.assertNotIn('breaking', [aw.state])
+        self.assertIn('arrived', aw.events)

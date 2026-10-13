@@ -230,3 +230,37 @@ class BreakBuildTests(unittest.TestCase):
         p = B.find(grid(d, s), (2, 1, 2), (17, 1, 2), kind='column', box=((10, 0, 0), (20, 8, 20)))
         self.assertTrue(p.reaches_goal)
         self.assertEqual(int(p.cells[-1][0]), 10)       # the first block inside the village, not its middle
+
+    def test_a_long_drop_into_a_pool_is_taken_onto_ground_it_is_not(self):
+        # a cliff 20 high (stand at y = 21 for x < 8); below it, a pool 2 deep at x 8-10 (else ground)
+        d, s = world(sy=26, floor_y=1)
+        for z in range(20):
+            for x in range(0, 8):
+                for y in range(1, 21):
+                    put(d, s, x, y, z, B.SOLID)
+            for x in (8, 9, 10):
+                put(d, s, x, 0, z, B.SOLID)
+                put(d, s, x, 1, z, B.WATER)
+                put(d, s, x, 2, z, B.WATER)
+        p = B.find(grid(d, s), (3, 21, 5), (9, 2, 5))
+        self.assertTrue(p.reaches_goal)
+        self.assertEqual(p.cells[-1][1], 2.0)           # in the pool's top
+        d2, s2 = world(sy=26, floor_y=1)
+        for z in range(20):
+            for x in range(0, 8):
+                for y in range(1, 21):
+                    put(d2, s2, x, y, z, B.SOLID)
+        self.assertFalse(B.find(grid(d2, s2), (3, 21, 5), (9, 1, 5)).reaches_goal)   # (onto ground: no)
+
+    def test_to_the_surface_by_the_way_out(self):
+        # a low cave (a roof at y 3-6) with an opening above x = 15
+        d, s = world(sy=12)
+        for z in range(20):
+            for x in range(20):
+                if x != 15:
+                    for y in range(3, 7):
+                        put(d, s, x, y, z, B.SOLID)
+        sky = lambda x, z: 1 if x == 15 else 7          # (where the open sky starts in each column)
+        p = B.find(grid(d, s), (3, 1, 5), (3, 7, 5), sky=sky)
+        self.assertTrue(p.reaches_goal)
+        self.assertEqual(int(p.cells[-1][0]), 15)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import socket
 import threading
 import time
@@ -31,13 +32,19 @@ REPLY_TIMEOUT = 2.0
 ROUTE_REACH = 48          # blocks: one plan covers at most this far (sideways); a farther goal is planned in legs
 ROUTE_MARGIN = 10         # blocks round the start and the goal in the box read for planning
 ROUTE_DEPTH = 12          # blocks above and below
+FOODS = {'golden_carrot': 14, 'cooked_beef': 13, 'cooked_porkchop': 13, 'cooked_mutton': 12, 'cooked_salmon': 12,
+         'cooked_chicken': 11, 'cooked_rabbit': 10, 'cooked_cod': 10, 'bread': 9, 'baked_potato': 9, 'pumpkin_pie': 9,
+         'mushroom_stew': 8, 'beetroot_soup': 8, 'rabbit_stew': 10, 'apple': 6, 'carrot': 5, 'melon_slice': 4,
+         'sweet_berries': 3, 'glow_berries': 3, 'cookie': 3, 'dried_kelp': 2, 'beef': 4, 'porkchop': 4, 'mutton': 3,
+         'potato': 2, 'beetroot': 2, 'salmon': 2, 'cod': 2, 'rabbit': 2, 'chicken': 1, 'rotten_flesh': 0}
 RANGED = {'skeleton', 'stray', 'bogged', 'pillager', 'blaze', 'ghast', 'witch', 'drowned', 'shulker', 'breeze',
           'piglin', 'llama', 'snow_golem'}
-BRIDGE_VERSION = 10        # the bridge (bridges/minecraft Bridge.VERSION) this adapter needs
+BRIDGE_VERSION = 11        # the bridge (bridges/minecraft Bridge.VERSION) this adapter needs
 SLOW_BREAK = 15           # a block slower than this to break (the bridge's hardness byte: 4 ticks a unit, 3 s)...
 SLOW_BREAKS_FOR_TOOL = 3  # ...this many on a route: weigh making a tool first
 TOOL_WORTH_S = 20.0       # seconds a tool must save, all told, to be made first
 NO_PLACE_S = 120.0        # seconds a cell where placing failed isn't planned for again
+SKY_RADIUS = 16           # blocks round the player searched for a way up to the open sky
 BOX_ASK = 192             # blocks: ask the game for a located structure's area once this near (loaded by then)
 # What players call places, and the game's own ids for them (the rest are matched by their words).
 PLACE_ALIASES = {'temple': 'minecraft:desert_pyramid', 'pyramid': 'minecraft:desert_pyramid',
@@ -119,8 +126,10 @@ class MinecraftAdapter:
                      "'get me 3 sticks', 'get me a stone pickaxe' (gathers and crafts all it takes, tools too), "
                      "'mine 10 cobblestone', 'chop 5 logs', 'craft a crafting table', 'kill the zombie', "
                      "'kill all the zombies', 'take me to the nearest zombie' (a creature anywhere loaded), "
-                     "'explore 80 blocks north', 'explore' (on the way the camera faces), 'go to that' (what the "
-                     "player looks at), 'stop'.")
+                     "'explore 80 blocks north', 'explore' (on the way the camera faces), 'go to 12 40 -30' "
+                     "(the game's coordinates, x y z, as where_is and survey give them: a fall into water there is "
+                     "fine), 'take me to the surface' (out of a cave: walked out or dug up), 'run away' (from the "
+                     "hostile ones near), 'eat something', 'go to that' (what the player looks at), 'stop'.")
     walk_precise = True   # every block of the route, walked block by block (core/autowalk.py precise)
 
     can_break = True      # the walk mines through blocks and builds (bridges, pillars) like Baritone
@@ -374,6 +383,8 @@ class MinecraftAdapter:
         """The nearest place of that name (a village, a stronghold, a cherry grove...), as /locate finds it:
         name, kind, distance (blocks), compass, position. Structures are found at their middle, on their map
         position (height not known: the player's height is given)."""
+        if _SURFACE.search(query or ''):
+            return self._locate_surface()
         m = self._match_place(query)
         if m is None:
             return {'error': f'no structure, biome or block called "{query}" in this game', 'results': []}
@@ -408,7 +419,8 @@ class MinecraftAdapter:
     def _entity_types(self) -> list[str]:
         if getattr(self, '_etypes', None) is None:
             got = self._ask({'op': 'entity_types'}, timeout=6.0)
-            self._etypes = [i for i in got.get('ids', []) if i not in ('minecraft:item', 'minecraft:player')]                 if 'error' not in got else []
+            self._etypes = [i for i in got.get('ids', []) if i not in ('minecraft:item', 'minecraft:player')] \
+                    if 'error' not in got else []
         return self._etypes
 
     def _locate_creature(self, query: str, types) -> dict:
@@ -425,6 +437,138 @@ class MinecraftAdapter:
                         'compass': _compass(dx, dz), 'coordinates': {'x': int(x), 'y': int(y), 'z': int(z)},
                         'height_diff_m': round(y - me[1]), 'position': _mirror((x, y, z))})
         return {'query': query, 'results': out}
+
+    def survey(self, radius: int = 12, depth: int = 40) -> dict:
+        """What the ground does round the player, from the game's blocks (in the dark too): where it drops away in
+        each of the 8 directions (how far out, how far down, what's at the bottom: water and how deep, ground,
+        lava), and the pools of water below within radius. Coordinates as the game shows them (F3)."""
+        d = self.raw()
+        p = (d.get('player') or {}).get('pos')
+        if not p:
+            return {'error': 'no player'}
+        x, y, z = math.floor(p[0]), math.floor(p[1] + 0.01), math.floor(p[2])
+        got = self._ask({'op': 'grid', 'min': [x - radius, y - depth, z - radius],
+                         'size': [2 * radius + 1, depth + 4, 2 * radius + 1]}, timeout=4.0)
+        if 'error' in got:
+            return {'error': got['error']}
+        g = blocks.Grid.from_bridge(got)
+
+        def bottom(cx, cz):
+            """(blocks down from the player's feet, what's there, water depth) falling down column (cx, cz)."""
+            for k in range(0, depth):
+                c = g.at(cx, y - k, cz)
+                if c == blocks.WATER:
+                    w = 0
+                    while g.at(cx, y - k - w, cz) == blocks.WATER and w < depth:
+                        w += 1
+                    return k, 'water', w
+                if c == blocks.DANGER:
+                    return k, 'lava or fire', 0
+                if c == blocks.UNKNOWN:
+                    return k, 'not loaded', 0
+                if c not in blocks.PASS:
+                    return k - 1, 'ground', 0
+            return depth, 'deeper than the scan', 0
+
+        names = {(0, -1): 'north', (1, -1): 'north-east', (1, 0): 'east', (1, 1): 'south-east', (0, 1): 'south',
+                 (-1, 1): 'south-west', (-1, 0): 'west', (-1, -1): 'north-west'}
+        edges = []
+        for (dx, dz), name in names.items():
+            for k in range(1, radius + 1):
+                cx, cz = x + dx * k, z + dz * k
+                if g.at(cx, y, cz) not in blocks.PASS or g.at(cx, y + 1, cz) not in blocks.PASS:
+                    edges.append({'direction': name, 'blocked_after': k - 1})
+                    break
+                down, what, wd = bottom(cx, cz)
+                if down > blocks.MAX_DROP:
+                    edge = {'direction': name, 'drop_after_blocks': k, 'drop_blocks': down, 'bottom': what,
+                            'edge_coordinates': {'x': cx, 'y': y, 'z': cz}}
+                    if what == 'water':
+                        edge['water_depth'] = wd
+                        edge['safe_to_drop_in'] = wd >= 1
+                    edges.append(edge)
+                    break
+        # pools below: water columns lower than the player, grouped
+        seen, pools = set(), []
+        for cx in range(x - radius, x + radius + 1):
+            for cz in range(z - radius, z + radius + 1):
+                if (cx, cz) in seen:
+                    continue
+                down, what, wd = bottom(cx, cz)
+                if what != 'water' or down <= blocks.MAX_DROP:
+                    continue
+                stack, cols = [(cx, cz)], []
+                seen.add((cx, cz))
+                while stack:
+                    a, b = stack.pop()
+                    cols.append((a, b, wd))
+                    for na, nb in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1)):
+                        if (na, nb) in seen or abs(na - x) > radius or abs(nb - z) > radius:
+                            continue
+                        dd, ww, wdd = bottom(na, nb)
+                        if ww == 'water' and abs(dd - down) <= 1:
+                            seen.add((na, nb))
+                            stack.append((na, nb))
+                            wd = max(wd, wdd)
+                mx = sum(c[0] for c in cols) / len(cols)
+                mz = sum(c[1] for c in cols) / len(cols)
+                cxs, czs = round(mx - 0.5), round(mz - 0.5)
+                pools.append({'centre': {'x': cxs, 'y': y - down, 'z': czs}, 'blocks_across': len(cols),
+                              'deepest': max(c[2] for c in cols), 'down_from_you': down,
+                              'distance': round(math.hypot(mx - x, mz - z)), 'compass': _compass(mx - x, mz - z)})
+        pools.sort(key=lambda q: q['distance'])
+        return {'you_are_at': {'x': x, 'y': y, 'z': z}, 'edges_and_walls': edges, 'water_below': pools[:4],
+                'note': 'a fall into water does no harm; onto ground more than 3 blocks hurts'}
+
+    def _heights(self, x0: int, z0: int, sx: int, sz: int):
+        """(x, z) -> the height where the open sky starts, for a rectangle of columns (the bridge's heights)."""
+        got = self._ask({'op': 'heights', 'min': [x0, z0], 'size': [sx, sz]}, timeout=3.0)
+        hs = got.get('heights') or []
+        if 'error' in got or len(hs) < sx * sz:
+            return None
+
+        def top(x, z):
+            if not (x0 <= x < x0 + sx and z0 <= z < z0 + sz):
+                return None
+            return hs[(z - z0) * sx + (x - x0)]
+        return top
+
+    def _locate_surface(self) -> dict:
+        """The surface: the top of the player's own column (the walk takes any way out to the open sky there
+        is: up a cave, or dug straight up, whichever is quicker)."""
+        me = (self.raw().get('player') or {}).get('pos')
+        if not me:
+            return {'error': 'no player', 'results': []}
+        x, z = math.floor(me[0]), math.floor(me[2])
+        top = self._heights(x, z, 1, 1)
+        h = top(x, z) if top else None
+        if h is None:
+            return {'error': 'the surface height is not known here', 'results': []}
+        if me[1] >= h - 0.01:
+            return {'query': 'surface', 'results': [{'name': 'the surface', 'kind': 'surface', 'distance_m': 0,
+                                                      'compass': 'here', 'height_diff_m': 0,
+                                                      'coordinates': {'x': x, 'y': h, 'z': z},
+                                                      'position': _mirror((x + 0.5, float(h), z + 0.5))}],
+                    'note': 'already on the surface'}
+        point = _mirror((x + 0.5, float(h), z + 0.5))
+        self._goals[_goal_key(point)] = ('sky', None)
+        return {'query': 'surface', 'results': [{'name': 'the surface', 'kind': 'surface', 'distance_m': 0,
+                                                  'compass': 'up', 'height_diff_m': round(h - me[1]),
+                                                  'coordinates': {'x': x, 'y': h, 'z': z}, 'position': point}]}
+
+    def coords_point(self, x: float, y: float, z: float):
+        """A point to walk to from the game's own coordinates (F3, as where_is and survey give them)."""
+        point = _mirror((x + 0.5, float(y), z + 0.5))
+        self._goals.setdefault(_goal_key(point), ('near', None))
+        return point
+
+    def block_solid(self, key) -> bool | None:
+        """Whether the block at key (the game's block coordinates) is still something to break; None: unknown."""
+        got = self._ask({'op': 'grid', 'min': list(key), 'size': [1, 1, 1]}, timeout=0.5)
+        if 'error' in got:
+            return None
+        g = blocks.Grid.from_bridge(got)
+        return g.at(*key) not in blocks.PASS
 
     def dig_estimate(self, goal: Vec3) -> dict | None:
         """How long digging straight to goal (snapshot coordinates) would take: blocks in the way, seconds with
@@ -476,14 +620,18 @@ class MinecraftAdapter:
             self._no_place = getattr(self, '_no_place', {})
             self._no_place[tuple(info['into'])] = time.monotonic()
 
-    def explore_point(self, direction: str | None, distance: float | None) -> tuple | None:
+    def explore_point(self, direction: str | None, distance: float | None, vector=None) -> tuple | None:
         """A point to walk to, exploring: that far (blocks; default 64) toward a compass direction (else the way
         the camera faces), at any height (a column goal)."""
         d = self.raw()
         me = (d.get('player') or {}).get('pos')
         if not me:
             return None
-        vec = {'north': (0, -1), 'south': (0, 1), 'east': (1, 0), 'west': (-1, 0), 'northeast': (1, -1),
+        if vector is not None:                       # (snapshot coordinates' x: mirrored to the game's)
+            direction, vec0 = None, (-vector[0], vector[1])
+        else:
+            vec0 = None
+        vec = vec0 or {'north': (0, -1), 'south': (0, 1), 'east': (1, 0), 'west': (-1, 0), 'northeast': (1, -1),
                'northwest': (-1, -1), 'southeast': (1, 1), 'southwest': (-1, 1)}.get((direction or '').replace(' ', '')
                                                                                    .replace('-', ''))
         if vec is None:
@@ -653,6 +801,17 @@ class MinecraftAdapter:
                 'reach': {'ravager': 1.6, 'warden': 1.6, 'iron_golem': 1.6, 'hoglin': 1.2, 'zoglin': 1.2}.get(kind,
                                                                                                            0.83)}
 
+    def food_slot(self, hotbar: list) -> int | None:
+        """The hotbar slot with the best food to eat now (cooked meat and bread before raw; rotten flesh, spider
+        eyes and the like last), or None."""
+        best = None
+        for i, s in enumerate(hotbar or []):
+            item = ((s[0] if s else '') or '').split(':')[-1]
+            score = FOODS.get(item)
+            if score is not None and (best is None or score > best[0]):
+                best = (score, i)
+        return best[1] if best else None
+
     def weapon_slot(self, hotbar: list) -> int | None:
         """The hotbar slot with the best weapon (a sword, else an axe, else any tool, else an empty hand), or
         None to keep what's held."""
@@ -693,6 +852,9 @@ class MinecraftAdapter:
         s, g = _mirror(start), _mirror(goal)
         kind, block = self._goals.get(_goal_key(goal), ('near', None))
         box = None
+        sky_goal = kind == 'sky'
+        if sky_goal:
+            kind, block = 'near', None
         if kind == 'column':
             info, block = block, None
             if info and math.hypot(info['pos'][0] - s[0], info['pos'][2] - s[2]) < BOX_ASK:
@@ -705,6 +867,14 @@ class MinecraftAdapter:
             aim = (s[0] + (g[0] - s[0]) * k, s[1] + (g[1] - s[1]) * k, s[2] + (g[2] - s[2]) * k)
         lo = [math.floor(min(s[i], aim[i])) - (ROUTE_MARGIN if i != 1 else ROUTE_DEPTH) for i in range(3)]
         hi = [math.floor(max(s[i], aim[i])) + (ROUTE_MARGIN if i != 1 else ROUTE_DEPTH) for i in range(3)]
+        sky = None
+        if sky_goal:                                     # (round the player, up to the highest top near)
+            for i in (0, 2):
+                lo[i], hi[i] = math.floor(s[i]) - SKY_RADIUS, math.floor(s[i]) + SKY_RADIUS
+            sky = self._heights(lo[0], lo[2], hi[0] - lo[0] + 1, hi[2] - lo[2] + 1)
+            if sky is not None:
+                tops = [sky(xx, zz) for xx in range(lo[0], hi[0] + 1) for zz in range(lo[2], hi[2] + 1)]
+                hi[1] = max(hi[1], max(t for t in tops if t is not None) + 2)
         size = [hi[i] - lo[i] + 1 for i in range(3)]
         while size[0] * size[1] * size[2] > 160 * 1024 and size[1] > 16:
             size[1] -= 2
@@ -720,10 +890,11 @@ class MinecraftAdapter:
         self._no_place = {c: t for c, t in getattr(self, '_no_place', {}).items() if now - t < NO_PLACE_S}
         path = blocks.find(grid, cell(s), block if block else cell(aim), budget_s=budget_s,
                            can_break=self.can_break, blocks=have, kind=kind, box=box,
-                           no_place=frozenset(self._no_place))
+                           no_place=frozenset(self._no_place), sky=sky)
         if path is None:
             return None
-        inside = box is not None and blocks._inside(cell(path.cells[-1]), box)
+        inside = (box is not None and blocks._inside(cell(path.cells[-1]), box)) or \
+            (sky is not None and blocks._open_sky(cell(path.cells[-1]), sky))
         complete = inside or (path.reaches_goal and far <= ROUTE_REACH)
         if len(path.cells) < 2:
             if not complete:
@@ -845,6 +1016,10 @@ def _box_distance(box, p) -> float:
     """Across from p to the nearest edge of a box (0 inside)."""
     (x0, _y0, z0), (x1, _y1, z1) = box
     return math.hypot(max(x0 - p[0], 0.0, p[0] - x1), max(z0 - p[2], 0.0, p[2] - z1))
+
+
+_SURFACE = re.compile(r"\b(surface|outside|open air|the sky|daylight|out of (?:this|the) (?:cave|hole|mine|tunnel))\b",
+                      re.I)
 
 
 def _goal_key(p) -> tuple:

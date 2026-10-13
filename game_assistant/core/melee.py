@@ -21,6 +21,7 @@ other fighter (core/combat.py): start(target), update(snap, dt) -> Intent, event
 from __future__ import annotations
 
 import math
+import threading
 
 from .autowalk import Intent, _flat, _wrap, _yaw, aim_at
 
@@ -46,7 +47,8 @@ CREEPER_KEEP = 3.5      # never nearer a creeper than this, but to hit it
 FOE_RANGE = 8.0         # hostile ones this near count in where to stand
 WALK_SPEED = 4.3        # blocks a second, the player walking (any way)
 MOB_SPEED = 2.3         # ...and a fighter coming at them
-LOOK_AHEAD = 0.45       # seconds ahead each way is tried
+LOOK_AHEAD = 0.45       # seconds ahead each way is tried (out of reach)...
+STEP_AHEAD = 0.15       # ...and for how near the target it brings us
 CLEAR_ENOUGH = 0.5      # blocks out of every reach (on top of the margins): as good as more (farther wasted
                         # time walking back in: "it's taking way too long to kill anything", 2026-10-13)...
 CLEAR_CHARGED = 0.4     # ...with the swing charged (stepping in to hit)
@@ -58,6 +60,10 @@ CRIT_WAIT = 0.6         # seconds after a jump to wait for the fall before hitti
 CRIT_EVERY = 0.9        # seconds between jumps
 CRIT_CLEAR = 4.0        # no other hostile one this near for a jump
 LAND_PULL = 1.5         # in water: how much more a way onto land counts
+RETREAT_CLEAR = 12.0    # low on health: away till no hostile one is this near...
+RETREAT_S = 8.0         # ...or this long
+BLOCKED_S = 0.6         # seconds with no straight way in before a route is planned
+ROUTE_AGE = 3.0         # seconds before a route to a moving target is planned again
 TERRAIN_EVERY = 0.25    # seconds between looks at the ground round the player (water, lava, drops)
 SHIELDS = ('minecraft:shield',)
 
@@ -110,10 +116,11 @@ def _keys_toward(d, cam) -> set:
 
 
 class MeleeFighter:
-    def __init__(self, profile=lambda e: {}, weapon_slot=lambda hotbar: None, terrain=lambda: {}):
+    def __init__(self, profile=lambda e: {}, weapon_slot=lambda hotbar: None, terrain=lambda: {}, route_fn=None):
         self.profile = profile          # adapter.combat_profile(entity) -> {'explodes', 'ranged', 'reach'}
         self.weapon_slot = weapon_slot  # adapter.weapon_slot(hotbar) -> the slot to fight with
         self.terrain = terrain          # adapter.terrain() -> {'in_water', 'avoid': {(dx, dz): what}}
+        self.route_fn = route_fn        # adapter.route(start, goal): a way to a target there's no straight way to
         self._ground = ({}, -1e9)
         self._steered = False
         self.active = False
@@ -187,8 +194,16 @@ class MeleeFighter:
                 continue
             u = (c[0] / m, c[1] / m) if m else (0.0, 0.0)
             q = (p[0] + u[0] * WALK_SPEED * LOOK_AHEAD, p[2] + u[1] * WALK_SPEED * LOOK_AHEAD)
+            qs = (p[0] + u[0] * WALK_SPEED * STEP_AHEAD, p[2] + u[1] * WALK_SPEED * STEP_AHEAD)
             clear_t, clear_o = math.inf, math.inf                 # out of the target's reach; out of the others'
+            stepping_in = charged and not just_hit
             for o, reach in foes:
+                if o.id == e.id and stepping_in:
+                    # (charged, stepping in: the hit comes first and knocks it back; judged a short step on, it
+                    # standing still, or it never stepped in: waiting half a block out of reach, 2026-10-13)
+                    c_ = math.hypot(qs[0] - o.pos[0], qs[1] - o.pos[2]) - reach
+                    clear_t = min(clear_t, c_)
+                    continue
                 v = (p[0] - o.pos[0], p[2] - o.pos[2])
                 dv = math.hypot(*v) or 1e-6
                 ahead = MOB_SPEED * LOOK_AHEAD if dv > 1.0 else 0.0
@@ -210,7 +225,9 @@ class MeleeFighter:
             clear = min(clear_t, clear_o)
             if clear < 0:
                 score -= 10.0 - clear                             # into a reach: only the least bad of those
-            dt_ = math.hypot(q[0] - e.pos[0], q[1] - e.pos[2])
+            # (the distance to the target a short step on: a whole LOOK_AHEAD's walk overshot the edge of our
+            # reach, and standing 0.5 out of it scored better: it waited there, 2026-10-13)
+            dt_ = math.hypot(qs[0] - e.pos[0], qs[1] - e.pos[2])
             if (charged and not just_hit) or prof.get('ranged'):
                 score -= abs(dt_ - ours) * 1.5                    # in to the edge of our reach
             else:
@@ -244,6 +261,81 @@ class MeleeFighter:
         if e.pos[1] - snap.player.pos[1] > 0.6 and d < 3.0 and 'forward' in keys:   # it's up a step
             keys.add('jump')
         return keys
+
+    def _follow_route(self, snap, e) -> set | None:
+        """Keys along a route to the target (planned on a thread, again when it has moved 2 blocks or after
+        ROUTE_AGE s), the camera still on it. None: no route (yet), or one that needs blocks broken or placed."""
+        p = snap.player.pos
+        stale = self.route_for is None or math.dist(self.route_for[0], e.pos) > 2.0 \
+            or self.t - self.route_for[1] > ROUTE_AGE
+        if stale and not self._planning and self.route_fn is not None:
+            self._planning = True
+            start, goal = tuple(p), tuple(e.pos)
+            self.route_for = (goal, self.t)
+
+            def plan():
+                try:
+                    r = self.route_fn(start, goal)
+                    ok = r is not None and len(r.waypoints) >= 2 and not any(
+                        a[0] in ('break', 'place') for a in getattr(r, 'actions', []))
+                    self.route = list(r.waypoints) if ok else []
+                except Exception:
+                    self.route = []
+                finally:
+                    self._planning = False
+            threading.Thread(target=plan, name='fight route', daemon=True).start()
+        if not self.route:
+            if self.route == [] and self.t - self._blocked_since > STUCK_S:
+                self.in_reach_at = min(self.in_reach_at, self.t - STUCK_S * 2)   # no way at all: unreachable
+            return None
+        while len(self.route) > 1 and _flat(p, self.route[0]) < 0.5 and abs(p[1] - self.route[0][1]) < 1.0:
+            self.route.pop(0)
+        nxt = self.route[0]
+        d = (nxt[0] - p[0], nxt[2] - p[2])
+        if math.hypot(*d) < 0.15:
+            return set()
+        keys = _keys_toward(d, snap.camera)
+        if nxt[1] - p[1] > 0.4:
+            keys.add('jump')
+        self.state = 'routing'
+        return keys
+
+    def _retreat(self, snap) -> Intent:
+        """Low on health: away from every hostile one near (the way kept farthest from all of them, never into
+        water, lava, a drop or a wall), sprinting, till none is within RETREAT_CLEAR or RETREAT_S is up; then
+        over to the player ('low_health')."""
+        p = snap.player.pos
+        foes = [o for o in snap.entities if o.hostile and not o.dead and _flat(p, o.pos) < RETREAT_CLEAR
+                and abs(o.pos[1] - p[1]) < 4.0]
+        if not foes or self.t - self.retreating > RETREAT_S:
+            self.events.append('low_health')
+            self.stop()
+            return Intent()
+        self.state = 'retreating'
+        self._ground_now(p)
+        ground = self._ground[0] or {}
+        avoid = ground.get('avoid') or {}
+        if ground.get('in_water'):
+            avoid = {c: k for c, k in avoid.items() if k != 'water'}
+        best, best_score = None, -math.inf
+        for c in DIRS8:
+            if _toward(c, avoid):
+                continue
+            m = math.hypot(*c)
+            q = (p[0] + c[0] / m * 2.0, p[2] + c[1] / m * 2.0)
+            score = min(math.hypot(q[0] - o.pos[0], q[1] - o.pos[2]) for o in foes)
+            if score > best_score:
+                best, best_score = c, score
+        near = min(foes, key=lambda o: _flat(p, o.pos))
+        turn, tilt, _err = aim_at(snap.camera, (near.pos[0], near.pos[1] + 1.0, near.pos[2]), 0.3)
+        if best is None:
+            return Intent(frozenset({'jump'} if ground.get('in_water') else ()), turn, (), tilt)
+        keys = _keys_toward(best, snap.camera)
+        if keys == {'forward'}:
+            keys.add('sprint')
+        if ground.get('in_water'):
+            keys.add('jump')
+        return Intent(frozenset(keys), turn, (), tilt)
 
     def _crit_ok(self, snap, e, prof, in_water: bool) -> bool:
         """Whether to jump for critical hits: on land, not at a shooter or a creeper, nobody else hostile within
@@ -310,6 +402,11 @@ class MeleeFighter:
         self.seen_hurt = False
         self.armed = False
         self.fleeing = False
+        self.retreating = None       # low on health: getting away (since)
+        self.route = None            # a way to the target when there's no straight one: [cells]
+        self.route_for = None        # (where the target was when it was planned, when)
+        self._planning = False
+        self._blocked_since = None
         self.jumped_at = -1e9
         self.primary = None          # the one asked for, while one that came at us is fought first
 
@@ -355,10 +452,11 @@ class MeleeFighter:
             self.in_reach_at, self.nearest = self.t, math.inf
         if e.health is not None and e.max_health and e.health < e.max_health:
             self.seen_hurt = True
-        if pl.health is not None and pl.max_health and pl.health <= pl.max_health * LOW_HEALTH:
-            self.events.append('low_health')
-            self.stop()
-            return Intent()
+        if pl.health is not None and pl.max_health and pl.health <= pl.max_health * LOW_HEALTH \
+                and not self.retreating:
+            self.retreating = self.t                     # (handed over standing still, it died: 2026-10-13)
+        if self.retreating:
+            return self._retreat(snap)
         if self.t - self.started > FIGHT_TIMEOUT:
             self.events.append('timeout')
             self.stop()
@@ -409,7 +507,19 @@ class MeleeFighter:
             self.jumped_at = self.t
         # move: keep out of its reach while the swing charges; step in to the edge of ours when charged (from a
         # little before: it arrives as the swing is ready)
-        keys |= self._spacing(snap, e, prof, strength >= STEP_IN_FROM or 'attack' in taps, across)
+        moves = self._spacing(snap, e, prof, strength >= STEP_IN_FROM or 'attack' in taps, across)
+        # no straight way in (a wall, a drop, a step it can't take) while out of reach: a route to it
+        out_of_reach = reach_d > REACH + 0.3 and not prof.get('explodes')
+        if out_of_reach and (self.state.startswith(('waiting', 'closing')) and not moves & {'forward', 'left', 'right'}
+                             or abs(e.pos[1] - p[1]) > 1.5):
+            self._blocked_since = self._blocked_since or self.t
+        elif not out_of_reach:
+            self._blocked_since, self.route = None, None
+        if self._blocked_since is not None and self.t - self._blocked_since > BLOCKED_S:
+            routed = self._follow_route(snap, e)
+            if routed is not None:
+                moves = routed
+        keys |= moves
         # in water: to land first (fought from the shore: slow and sinking in it, where drowned are at home)
         if in_water:
             self.state += ' (in water)'

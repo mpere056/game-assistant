@@ -167,3 +167,36 @@ class ToolFirstTests(unittest.TestCase):
         self.assertIsNone(self.advice(40, 8, {}))                      # the pickaxe wouldn't pay for itself
         self.assertIsNone(self.advice(330, 45, {'minecraft:wooden_pickaxe': 1}))
         self.assertIsNone(self.advice(330, 45, {}, slow=1))            # the route hardly digs
+
+
+class SurveyTests(unittest.TestCase):
+    def test_finds_the_drop_and_the_pool_at_its_bottom(self):
+        import base64
+        from game_assistant.games.minecraft import blocks as B
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter
+        a = MinecraftAdapter()
+        a.raw = lambda: {'player': {'pos': [0.5, 30.0, 0.5]}}
+
+        def ask(req, timeout=None):
+            (x0, y0, z0), (sx, sy, sz) = req['min'], req['size']
+            data = bytearray(sx * sy * sz)
+            for yy in range(sy):
+                for zz in range(sz):
+                    for xx in range(sx):
+                        X, Y, Z = x0 + xx, y0 + yy, z0 + zz
+                        k = B.AIR
+                        if X < 3 and Y < 30:
+                            k = B.SOLID                      # the ledge the player stands on (x < 3)
+                        elif X >= 3 and Y < 8:
+                            k = B.SOLID                      # the cave floor, 22 down...
+                        if 5 <= X <= 7 and -1 <= Z <= 1 and 8 <= Y <= 10:
+                            k = B.WATER                      # ...with a pool 3 deep
+                        data[(yy * sz + zz) * sx + xx] = k
+            return {'min': req['min'], 'size': req['size'], 'data': base64.b64encode(bytes(data)).decode()}
+        a._ask = ask
+        got = a.survey()
+        east = next(e for e in got['edges_and_walls'] if e['direction'] == 'east')
+        self.assertEqual(east['drop_after_blocks'], 3)
+        self.assertEqual(east['bottom'], 'ground')
+        pool = got['water_below'][0]
+        self.assertEqual((pool['centre']['x'], pool['deepest']), (6, 3))

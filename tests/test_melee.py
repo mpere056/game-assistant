@@ -177,11 +177,13 @@ class MeleeTests(unittest.TestCase):
         self.assertIn(-1, sides)
         self.assertGreater(a.blocked, 0)
 
-    def test_hands_over_on_low_health(self):
-        a = Arena()
+    def test_on_low_health_gets_away_then_hands_over(self):
+        a = Arena(at=(0.0, 0.0, 4.0))
         a.health = 4.0
-        f, _ = fight(a, seconds=1)
-        self.assertIn('low_health', f.events)
+        f, _ = fight(a, seconds=10)
+        self.assertIn('low_health', f.events)              # handed over...
+        self.assertGreater(math.hypot(a.p[0] - a.e[0], a.p[2] - a.e[2]), 5.0)   # ...well away from it
+        self.assertEqual(a.taken, 0)
 
     def test_a_long_hit_and_back_off_fight_is_never_given_up_as_unreachable(self):
         a = Arena(hp=1000)                               # (a tough one: 20 s of hitting and backing off)
@@ -260,3 +262,34 @@ class AroundTests(unittest.TestCase):
                 break
         self.assertGreater(a.p[0], 3.0)                 # out on the land
         self.assertFalse(gave_up_wet)
+
+
+class RouteInTests(unittest.TestCase):
+    def test_goes_round_a_wall_by_a_route_when_there_is_no_straight_way(self):
+        from types import SimpleNamespace as NS
+        import time as _time
+        a = Arena(hp=1000, at=(0.0, 0.0, 6.0))
+        a.step_mob = False
+        wall = {(0, 1): 'wall', (1, 1): 'wall', (-1, 1): 'wall'}      # (north of the player, while z < 3)
+
+        def terrain():
+            return {'in_water': False, 'avoid': wall if a.p[2] < 3.0 and -1.0 < a.p[0] < 2.0 else {}}
+
+        def route(start, goal):
+            return NS(waypoints=[tuple(start), (3.0, 0.0, 0.0), (3.0, 0.0, 4.0), (1.0, 0.0, 5.0)], actions=[])
+        f = MeleeFighter(lambda e: {'reach': 0.83}, lambda h: None, terrain, route)
+        f.start(7)
+        went_round, states = False, set()
+        for _ in range(int(12 / DT)):
+            intent = f.update(a.snap(), DT)
+            states.add(f.state.split(' ')[0])
+            fx, fz = a.e[0], a.e[2]
+            a.step(intent)
+            a.e[0], a.e[2] = fx, fz                      # (it stands still behind its wall)
+            went_round = went_round or a.p[0] > 2.0
+            _time.sleep(0)                               # (the route is planned on a thread)
+            if not f.active:
+                break
+        self.assertIn('routing', states)
+        self.assertTrue(went_round)
+        self.assertGreater(a.hits, 0)
