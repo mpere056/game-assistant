@@ -77,6 +77,13 @@ PUNISH_LOW = 0.45       # a low-poise target recovering this much longer: a swin
 # one swing, 521 -> 10 health). Up to MID_POISE it still flinches from most hits.
 MID_POISE = 120.0
 PUNISH_MID = 0.8        # a middle-tier target recovering this much longer: an opening
+ROLL_SWING_OUT = 0.77   # a swing pressed early in a roll comes out this far into it (the log: 0.74-0.8 s)
+LEAVING_FAST = 1.5      # m/s away from the player: leaving (no lunge assumed for an unknown attack)
+LEAVING_WEIGHT = 0.5     # its speed away counts this much (a glide slows down: the bats came to a hover)
+HIT_LANDS = 0.4         # seconds from a swing's press to its hit landing (and flinching)
+PUNISH_MID_HIT = 1.0    # a middle-tier target's next hit at least this far off: its next attack may already be
+                        # coming (our hit lands first and flinches it)
+NEXT_WINDUP = 0.5       # an attack's first hit at least this far in when not known
 PASSIVE_MID = 0.5       # ...and not attacking for this long, nothing coming: go in
 SAFE_REACH_IN = 0.3     # attack-when-safe swings only from this far inside the reach (a swing from 2.4 m
                         # went short and the soldier's attack landed)
@@ -106,7 +113,9 @@ RELOCK_WITHIN = 25.0    # lock on again only once the camera points at the targe
 LEDGE_NEAR = 30.0       # a probed direction within this many degrees of a move blocks that move
 CHASE_FROM = 14.0       # the target this far (running off) for CHASE_AFTER s: hand over to the navmesh walk
 CHASE_AFTER = 1.0       # (route-aware, sprints) and fight again on arrival: 'fled'
+IFRAME_START = 0.05     # seconds from a roll's start to its invincibility
 IFRAMES = 0.23         # a roll's invincibility (14 frames)
+LONG_SHIFT = 0.05       # a long hit's roll pressed at most this much later than DODGE_LEAD
 LONG_HIT = 0.2          # a hit this long (a swing and its bullet) outlasts the invincibility: roll away from
                         # it (back-left/right), not through it, timed to its middle
 # Follow-ups (seventh session: a soldier's 3003000 -> 3003001 combo hits 0.69 s after its first hit; a boar's
@@ -200,6 +209,12 @@ REACH_GUESS = 3.0       # metres an enemy's attack is taken to reach (from its c
 FLEEING_SPEED = 2.5     # metres a second away from the player: don't chase it in the open (a bat after a dive)
 SOLO_SEEN = 2           # an attack seen to end on its own this often: rolled through (else away)
 SOLO_WAIT = 0.6         # no attack this long after one ended: it ended on its own
+# Counters (twenty-fourth session, a c4351 soldier: each time our hit flinched it, 8200 for 0.22 s, it went
+# straight into 1003012, hit 0.77 s in, three times of three): an attack starting within COUNTER_WITHIN of a
+# flinch is its counter. Against one known (COUNTER_SEEN times) no combo: the second swing was still going when
+# the counter landed; after one swing a roll is possible in time.
+COUNTER_WITHIN = 0.5
+COUNTER_SEEN = 1
 COVERED_SLACK = 0.5     # a dodged hit is "covered" only for the hit it was: the same attack again later
                         # lands at another time and gets its own roll (it was never dodged again: two hits)
 # Twenty-second session (2026-10-12, Gatefront): 39 of 62 hits in a day's fights came right after a roll. The roll
@@ -208,6 +223,11 @@ COVERED_SLACK = 0.5     # a dodged hit is "covered" only for the hit it was: the
 # a roll could again (~0.95 s). Now a roll's direction is chosen in the world (_pick_roll): where it lands, away
 # from the attacker when its next hit follows too soon, past its side otherwise, away from every other enemy.
 ROLL_DIST = 2.6         # metres a roll carries the player (medium load)
+LUNGE_SIDEWAYS = 1.5     # an away roll from a lunge: this much for going sideways (out of its line)
+PUNISH_SPOT = 5.0       # a roll landing within reach of where the attack leaves the attacker (_rest_spot)
+PUNISH_ALONE = 6.0      # metres: no other enemy this near, for the roll to go for the punish spot
+REST_AFTER = 0.4        # seconds after an attack's last hit its attacker's place is taken as where it leaves it
+REST_SEED = {'c4200': {1003011: (2.0, 0.0)}}   # a Man-Bat's dive: ~2 m past the player (twenty-fifth session)
 ROLL_CROWD = 4.0        # metres: another enemy this near where a roll lands counts against it
 LURK_GAP = 2.0          # metres: another enemy this near (from its body edge) and facing the player can start an
 LURK_FACING = 0.5       # attack and hit during our swing (~0.6-0.8 s): no swing while one stands there
@@ -215,6 +235,7 @@ LURK_FACING = 0.5       # attack and hit during our swing (~0.6-0.8 s): no swing
 # into its wind-up landed, a reaction layer 4009000 played over it, and it hit anyway; three times that day).
 # Learned ones are kept with the combos (chains '_armored').
 ARMORED_SEED = {'c4310': (1003008, 3003008, 4003008, 5003008)}
+COUNTER_SEED = {'c4350': (1003012,)}    # counters seen (each time of three, twenty-fourth session)
 # Whatever is coming at the player is fought, whatever it is (the user: "anything targeting me would get in the
 # way"): engaged = attacking, or facing the player and near or coming closer. The target changes to an engaged
 # enemy that scores SWITCH_MARGIN better (target_score) once the current one has been held TARGET_HOLD.
@@ -532,11 +553,24 @@ class Fighter:
         # (a roll can follow a roll after DODGE_EVERY: a soldier's two-swing chain hit the player while a
         # "not while dodging" rule blocked the second roll)
         long_hit = soonest is not None and soonest[2] > LONG_HIT
-        # invincible ~0.10-0.33 s after the press: centred on a long hit when pressed 0.215 - length/2 ahead
-        lead = DODGE_LEAD - (soonest[2] - 0.11) / 2 if long_hit else DODGE_LEAD
+        # invincible ~0.10-0.33 s after the press: a long hit's invincibility starts a little before it, not
+        # centred on it (twenty-fourth session: a running attack timed for its middle connected at its start)
+        lead = DODGE_LEAD - min(LONG_SHIFT, (soonest[2] - 0.11) / 2) if long_hit else DODGE_LEAD
         if soonest is not None and soonest[0] <= max(0.0, lead) and self.t - self._last_roll >= DODGE_EVERY \
                 and 'sprint' in self._last_keys:
             return Intent(frozenset(), 0.0, tuple(taps))   # the sprint's key up first: the roll next frame
+        if soonest is not None and soonest[0] <= max(0.0, lead) and self.t - self._last_roll >= DODGE_EVERY \
+                and self._roll_too_late(pl, soonest):
+            # (twenty-fourth session: a roll pressed 0.57 s into a roll came out at ~1.0 s, after the hit, and
+            # then rolled right through the soldier's recovery: the opening missed twice in one fight)
+            self.state = 'evading'
+            self.debug['evade'] = True
+            if doing != 'free':
+                return Intent(frozenset(), 0.0, tuple(taps))
+            att = soonest[3]
+            off = _yaw((p[0] - att.pos[0], 0.0, p[2] - att.pos[2]))
+            keys = frozenset(min(DIRECTIONS, key=lambda d: abs(_wrap(off - _yaw(snap.camera.forward) - d[0])))[1])
+            return Intent(keys, 0.0, tuple(taps))
         if soonest is not None and soonest[0] <= max(0.0, lead) and self.t - self._last_roll >= DODGE_EVERY:
             follow = self._follow_up(soonest)
             then = self._next_hit(snap, p, exclude=soonest[3].id)   # the other enemies' next hit
@@ -593,7 +627,8 @@ class Fighter:
         idle_for = PASSIVE_LOW if low_poise else PASSIVE_MID if mid_poise else PASSIVE_AFTER
         passive = self.t - self._last_enemy_attack >= idle_for and self.t - self._started >= idle_for \
             and not self._shielded(e)   # a shield: only after its attacks
-        opening = self._opening(e, PUNISH_LOW if low_poise else PUNISH_MID if mid_poise else PLAYER_COMMIT)
+        opening = self._opening(e, PUNISH_LOW) if low_poise else self._opening(e, HIT_LANDS, PUNISH_MID_HIT) \
+            if mid_poise else self._opening(e, HIT_LANDS, PLAYER_COMMIT + DODGE_LEAD)
         reel = self._reeling(e)   # None, 'flinch' (our last hit landed) or 'broken'
         clear = soonest is None or soonest[0] > PLAYER_COMMIT + DODGE_LEAD
         wind_up = self._wind_up(e)          # seconds to its next hit, in an attack's wind-up
@@ -635,13 +670,25 @@ class Fighter:
         # Chain: our hit landed and it's reeling: press again during our swing (the game buffers it
         # into the next combo attack), up to the combo cap (no cap while it's broken).
         cap = COMBO_LOW if low_poise else COMBO_HIGH
+        if reel == 'flinch' and self._counters(e):
+            cap = 1                                  # it counters out of a flinch: one swing, then ready to roll
+        self.debug['counters'] = bool(self._counters(e))
         chain = reel is not None and doing == 'attacking' and self.t - self._last_swing >= CHAIN_MIN \
             and (reel == 'broken' or self._combo < cap) and stamina_ok
         can_swing = go_in and doing == 'free' and self.t - self._last_swing >= SWING_EVERY and stamina_ok
         walled = self.sees(e.id) is False
         self.debug['walled'] = walled
+        # Where it will be when the hit lands: a swing pressed in a roll comes out ~0.77 s into it (a rolling
+        # attack), its hit ~0.35 s after; meanwhile the target moves (twenty-fifth session: three swings at bats
+        # pressed 0.5 s into rolls, at 1.9 m, came out as the bat flew off to 3.2 m: none landed).
+        out_in = max(0.0, ROLL_SWING_OUT - pl.anim_time) if player_doing(pl.anim) == 'dodging' else 0.0
+        vx, vz = self._vel.get(e.id, (0.0, 0.0))
+        dd = _flat(p, e.pos) or 1e-6
+        leaving = (vx * (e.pos[0] - p[0]) + vz * (e.pos[2] - p[2])) / dd     # m/s away from the player
+        gap_hit = gap + max(0.0, leaving) * (out_in + HIT_LANDS) * LEAVING_WEIGHT
+        self.debug['gap_hit'] = round(gap_hit, 2)
         if gap <= reach + (0.5 if chain else 0.0) and (can_swing or chain) and abs(err) < 40.0 \
-                and not walled:
+                and not walled and (chain or gap_hit <= reach):
             if not chain:
                 self._swing_check = [self.t, e.id, attacking, False, self._attack_anim(e), _base(e.model),
                                      e.health, gap, err, wind_up is not None]
@@ -685,17 +732,29 @@ class Fighter:
         self.state = 'waiting'
         return Intent(frozenset(), 0.0, tuple(taps))
 
-    def _opening(self, e, need: float = PLAYER_COMMIT) -> bool:
+    def _opening(self, e, need: float = PLAYER_COMMIT, need_hit: float | None = None) -> bool:
         """The target is in an attack whose hits are all over and still needs at least `need` seconds to
         finish: PLAYER_COMMIT for a swing and a roll after it; less for a low-poise enemy our hit flinches.
         An attack it is known to chain into another (chains) ends where that one starts (eighth session: a
-        swing into 3002's "recovery" met the 3000 it chains into: three hits)."""
+        swing into 3002's "recovery" met the 3000 it chains into: three hits). With need_hit: the next attack
+        may start after `need` (our hit lands first) as long as its first hit is need_hit away (twenty-fourth
+        session: a c4351 soldier chains every attack into the next ~0.7 s after its hit, but that one's hit
+        comes 1.6 s after: "no opening" all fight, 9 swings in 90 s)."""
         speed = e.anim_speed if e.anim_speed > 0 else 1.0
         known = self.chains.get(_base(e.model), {})
         for anim, t, length in (e.anims or ((e.anim, e.anim_time, e.anim_length),)):
             w = self.windows(e.model, anim)
-            end = min([length] + [sw for sw, _nxt in known.get(str(anim), [])])
-            if w and t > max(end_ for _s, end_ in w) and (end - t) / speed >= need:
+            if not w or t <= max(end_ for _s, end_ in w):
+                continue
+            follows = known.get(str(anim), [])
+            end = min([length] + [sw for sw, _nxt in follows])
+            if need_hit is None:
+                if (end - t) / speed >= need:
+                    return True
+                continue
+            hits = [length + NEXT_WINDUP] + [sw + (self.windows(e.model, nxt) or [(NEXT_WINDUP, 0)])[0][0]
+                                            for sw, nxt in follows]
+            if (end - t) / speed >= need and (min(hits) - t) / speed >= need_hit:
                 return True
         return False
 
@@ -827,19 +886,71 @@ class Fighter:
                 self._lunge_from.pop(e.id, None)
                 continue
             t = next((t for a, t, _l in (e.anims or ((e.anim, e.anim_time, e.anim_length),)) if a == anim), 0.0)
+            self._learn_rest(e, anim, t, p)
             start = self._lunge_from.get(e.id)
             if start is None or start[0] != anim:
                 if t < 0.3:
-                    self._lunge_from[e.id] = (anim, e.pos)
+                    self._lunge_from[e.id] = (anim, e.pos, p)
                 continue
             w = self.windows(e.model, anim)
             if w and t >= w[0][0] and start[1] is not None:
-                moved = min(LUNGE_MAX, _flat(start[1], e.pos))
+                # toward where the player stood at its start (a bat flying off isn't lunging)
+                e0, p0 = start[1], start[2] if len(start) > 2 else p
+                n = _flat(e0, p0) or 1e-6
+                moved = ((e.pos[0] - e0[0]) * (p0[0] - e0[0]) + (e.pos[2] - e0[2]) * (p0[2] - e0[2])) / n
+                moved = min(LUNGE_MAX, max(0.0, moved))
                 table = self.chains.setdefault('_lunge', {}).setdefault(_base(e.model), {})
                 if moved > table.get(str(anim), -1.0) + 0.1:
                     table[str(anim)] = round(moved, 2)
                     self.chains_changed = True
                 self._lunge_from[e.id] = (anim, None)        # measured once per attack
+
+    def _learn_rest(self, e, anim, t, p) -> None:
+        """Where an attack leaves the attacker REST_AFTER s after its last hit: (along, across) metres from where
+        the player stood when it started, along the line from the attacker to the player then (a bat's dive:
+        ~2 m past the player; a soldier's lunge: in front of the player). Learned per attack (chains '_rest')."""
+        rest = self.__dict__.setdefault('_rest_from', {})
+        cur = rest.get(e.id)
+        if cur is None or cur[0] != anim:
+            if t < 0.3:
+                rest[e.id] = [anim, e.pos, p, False]
+            return
+        w = self.windows(e.model, anim)
+        if cur[3] or not w or t < max(end for _s, end in w) + REST_AFTER:
+            return
+        cur[3] = True
+        e0, p0 = cur[1], cur[2]
+        ux, uz = p0[0] - e0[0], p0[2] - e0[2]
+        n = math.hypot(ux, uz)
+        if n < 0.5:
+            return
+        ux, uz = ux / n, uz / n
+        rx, rz = e.pos[0] - p0[0], e.pos[2] - p0[2]
+        along, across = rx * ux + rz * uz, rx * uz - rz * ux
+        table = self.chains.setdefault('_rest', {}).setdefault(_base(e.model), {})
+        old = table.get(str(anim))
+        if old is None:
+            table[str(anim)] = [round(along, 2), round(across, 2), 1]
+        else:
+            k = min(old[2], 9)
+            table[str(anim)] = [round((old[0] * k + along) / (k + 1), 2), round((old[1] * k + across) / (k + 1), 2),
+                                old[2] + 1]
+        self.chains_changed = True
+
+    def _rest_spot(self, e, anim):
+        """Where this attack (now playing) will leave the attacker, in the world, or None (not learned)."""
+        known = self.chains.get('_rest', {}).get(_base(e.model), {}).get(str(anim)) \
+            or REST_SEED.get(_base(e.model), {}).get(anim)
+        cur = self.__dict__.get('_rest_from', {}).get(e.id)
+        if not known or cur is None or cur[0] != anim:
+            return None
+        e0, p0 = cur[1], cur[2]
+        ux, uz = p0[0] - e0[0], p0[2] - e0[2]
+        n = math.hypot(ux, uz)
+        if n < 0.5:
+            return None
+        ux, uz = ux / n, uz / n
+        return (p0[0] + known[0] * ux + known[1] * uz, p0[1], p0[2] + known[0] * uz - known[1] * ux)
 
     def _learn_reach(self, snap: Snapshot, pl, p) -> None:
         """Health just went down: the enemy whose hit window is out now hit from this far. More than its
@@ -893,6 +1004,10 @@ class Fighter:
         d = _flat(p, e.pos) or 1e-6
         toward = (vx * (p[0] - e.pos[0]) + vz * (p[2] - e.pos[2])) / d
         travel = max(LUNGE_DEFAULT if lunge is None else lunge, max(0.0, toward) * wait)
+        if toward < -LEAVING_FAST and lunge is None:
+            # flying off fast: no lunge assumed toward the player (twenty-fifth session: rolls for bats 5 m away
+            # and leaving, 35 rolls in 50 s, the stamina gone)
+            travel = 0.0
         return d <= reach + travel + PLAYER_RADIUS + REACH_MARGIN
 
     def _reeling(self, e) -> str | None:
@@ -1068,6 +1183,13 @@ class Fighter:
             return None
         return _yaw((q[0] - p[0], 0.0, q[2] - p[2]))
 
+    def _roll_too_late(self, pl, soonest) -> bool:
+        """In a roll's first ROLL_AGAIN s a roll press is held until then: true when the roll would only start
+        after the hit has begun (pressing then rolls through the recovery that follows instead)."""
+        if player_doing(pl.anim) != 'dodging' or pl.anim_time is None or pl.anim_time >= ROLL_AGAIN:
+            return False
+        return (ROLL_AGAIN - pl.anim_time) + IFRAME_START > soonest[0] + 0.03
+
     def _pick_roll(self, snap: Snapshot, p, soonest, away: bool, cam: float):
         """Where to roll: (score, keys, world heading), or None when every way drops away. The keys are read
         by the game relative to the camera, locked on or not, so each of the 8 directions is turned into the
@@ -1091,6 +1213,13 @@ class Fighter:
         d = _flat(p, e.pos) or 1e-6
         rushing = lunge > 2.0 or (vx * (p[0] - e.pos[0]) + vz * (p[2] - e.pos[2])) / d > 3.0
         through = 45.0 if ROLL_FORWARD else 90.0
+        # Where the attack will leave it: land within reach of that (twenty-fifth session: rolling "through" a bat's
+        # dive, toward where it came from, ended 5 m from where it hovered after passing: no swing ever landed)
+        # (one on one only: with others near, landing next to one of them weighs more; it raised the damage in
+        # a pack of soldiers by a quarter in the simulation)
+        alone = not any(_flat(p, x.pos) - x.radius < PUNISH_ALONE for x in others)
+        spot = self._rest_spot(e, soonest[4]) if alone and (not away or self._follow_up(soonest) is None) else None
+        self.debug['rest_spot'] = None if spot is None else (round(spot[0], 1), round(spot[2], 1))
         best = None
         for rel, keys in DIRECTIONS:
             w = _wrap(cam + rel)
@@ -1100,13 +1229,15 @@ class Fighter:
             q = (p[0] + math.sin(r) * ROLL_DIST, p[1], p[2] + math.cos(r) * ROLL_DIST)
             off = abs(_wrap(w - at))                  # 0: at the attacker, 180: straight away
             if away:
-                score = _flat(q, e.pos) + (1.5 * math.sin(math.radians(off)) if rushing else 0.0)
+                score = _flat(q, e.pos) + (LUNGE_SIDEWAYS * math.sin(math.radians(off)) if rushing else 0.0)
             else:
                 score = 3.0 - abs(off - through) / 30.0
             for x in others:
                 dq = _flat(q, x.pos) - x.radius
                 if dq < ROLL_CROWD:
                     score -= (ROLL_CROWD - dq) * (2.0 if self._attack_anim(x) is not None else 1.0)
+            if spot is not None and 0.6 < _flat(q, spot) - e.radius <= self.my_reach - 0.2:
+                score += PUNISH_SPOT
             if heading is not None:
                 score += 3.0 * math.cos(math.radians(_wrap(w - heading)))
             if any(abs(_wrap(w - b)) < LEDGE_NEAR for b in walls):
@@ -1143,7 +1274,9 @@ class Fighter:
                 d = _flat(p, x.pos)
                 vx, vz = self._vel.get(x.id, (0.0, 0.0))
                 toward = (vx * (p[0] - x.pos[0]) + vz * (p[2] - x.pos[2])) / (d or 1e-6)
-                if d < REACH_GUESS + LUNGE_DEFAULT + max(0.0, toward) * HEAL_VULNERABLE + PLAYER_RADIUS:
+                lunge = max(self.chains.get('_lunge', {}).get(_base(x.model), {}).values(), default=LUNGE_DEFAULT)
+                # (its longest lunge: twenty-fourth session, a flask at 6 m from a soldier with a 4.5 m lunge)
+                if d < REACH_GUESS + max(LUNGE_DEFAULT, lunge) + max(0.0, toward) * HEAL_VULNERABLE + PLAYER_RADIUS:
                     safe = False
                     break
         if safe:
@@ -1265,6 +1398,12 @@ class Fighter:
         self._last_enemy_attack = self.t
         self.events.append(why)
 
+    def _counters(self, e) -> bool:
+        """Whether this kind of enemy is known to counter out of a flinch."""
+        base = _base(e.model)
+        return base in COUNTER_SEED or \
+            any(n >= COUNTER_SEEN for n in self.chains.get('_counter', {}).get(base, {}).values())
+
     def _follow_up(self, hit) -> float | None:
         """Seconds from this hit's start to the same enemy's next hit: a later window of the same attack,
         or the first hit of an attack learned to follow it (chains), or None."""
@@ -1281,11 +1420,14 @@ class Fighter:
         """An enemy near the player going from one attack straight into another: remember it. An attack
         followed by none within SOLO_WAIT: count it as ending on its own."""
         ended = self.__dict__.setdefault('_ended', {})
+        flinched = self.__dict__.setdefault('_flinched', {})
         for e in snap.entities:
             if not e.hostile or e.dead or e.model is None or _flat(p, e.pos) > 15.0:
                 continue
-            playing = [(a, t) for a, t, _l in (e.anims or ((e.anim, e.anim_time, e.anim_length),))
-                       if a is not None and self.windows(e.model, a)]
+            every = e.anims or ((e.anim, e.anim_time, e.anim_length),)
+            if any(a is not None and 8000 <= a % 1_000_000 < 9000 for a, _t, _l in every):
+                flinched[e.id] = self.t                     # (8XXX: a flinch, not the 9XXX layers)
+            playing = [(a, t) for a, t, _l in every if a is not None and self.windows(e.model, a)]
             if not playing:
                 prev = self._attacking.get(e.id)
                 if prev is not None and e.id not in ended:
@@ -1301,6 +1443,13 @@ class Fighter:
             ended.pop(e.id, None)
             anim, t = min(playing, key=lambda x: x[1])      # the newest attack
             prev = self._attacking.get(e.id)
+            if t <= CHAIN_SEEN and self.t - flinched.get(e.id, -1e9) <= COUNTER_WITHIN \
+                    and (prev is None or prev[0] != anim):
+                # out of a flinch straight into an attack: its counter (kept; COUNTER_SEEN times: no combos)
+                table = self.chains.setdefault('_counter', {}).setdefault(_base(e.model), {})
+                table[str(anim)] = table.get(str(anim), 0) + 1
+                self.chains_changed = True
+                flinched.pop(e.id, None)
             self._attacking[e.id] = (anim, t, self.t)
             if prev is None or prev[0] == anim or t > CHAIN_SEEN or self.t - prev[2] > 0.4:
                 continue

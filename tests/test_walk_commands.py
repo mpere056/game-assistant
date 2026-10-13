@@ -286,3 +286,41 @@ class SequenceOrderTests(unittest.TestCase):
         self.assertEqual(a.then, ['kill any remaining soldiers'])
         b = r.handle(a.then[0])
         self.assertEqual((b.kind, b.attack, b.every), ('walk', 'fight', 'Godrick Soldier'), b.say)
+
+
+class TwentySixthSessionTests(unittest.TestCase):
+    """2026-10-12 21:34-21:36 at Agheel Lake North: 'Wait, kill the bat actually.' stopped instead; 'kill the
+    soldier' found no 'soldier' (the one meant was a Kaiden Sellsword) and began a search."""
+
+    def _adapter(self):
+        from game_assistant.core.interface import Entity
+        bat = Entity(5, 3, 'c4200', (4.0, 0.0, 6.0), (4.0, 1.0, 6.0), 0.5, 1.0, True, False, 100, 100)
+        rider = Entity(6, 4, 'c4050', (20.0, 0.0, 5.0), (20.0, 1.0, 5.0), 0.6, 2.5, True, False, 400, 400)
+        a = FakeAdapter([], [], [bat, rider])
+        a.knowledge = lambda type_id: {'name': {3: 'Man-Bat', 4: 'Kaiden Sellsword'}.get(type_id)}
+        return a
+
+    def test_a_stop_word_before_a_new_order_is_that_order(self):
+        r = CommandResolver(self._adapter())
+        a = r.handle('Wait, kill the bat actually.')
+        self.assertEqual((a.kind, a.name, a.attack), ('walk', 'Man-Bat', 'fight'))
+        a = r.handle('No wait, attack the bat instead')
+        self.assertEqual((a.kind, a.name), ('walk', 'Man-Bat'))
+        self.assertEqual(r.handle('cancel that and kill the bat').name, 'Man-Bat')
+        self.assertEqual(r.handle('Wait.').kind, 'stop')
+        self.assertEqual(r.handle('okay stop').kind, 'stop')
+
+    def test_a_name_that_matches_nothing_goes_to_the_model_with_the_characters_around(self):
+        asked = []
+
+        def model(text):
+            asked.append(text)
+            return WalkAction('walk', "Let's take the Kaiden Sellsword down!", (20.0, 0.0, 5.0), 'Kaiden Sellsword', 6,
+                              attack='fight')
+        r = CommandResolver(self._adapter(), ask_model=model)
+        a = r.handle('Kill the soldier')
+        self.assertEqual((a.kind, a.name), ('walk', 'Kaiden Sellsword'))
+        self.assertEqual(len(asked), 1)
+        r2 = CommandResolver(self._adapter(), ask_model=model)
+        self.assertEqual(r2.handle('kill the bat').name, 'Man-Bat')      # (a name that matches: no model)
+        self.assertEqual(len(asked), 1)

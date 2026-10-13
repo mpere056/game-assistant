@@ -34,6 +34,9 @@ CHARACTER_RANGE = 150.0  # metres: characters this near can be walked to by name
 NAME_MATCH = 0.72   # how alike a heard word and a name word must be (difflib ratio)
 
 _STOP = re.compile(r"\b(stop|halt|cancel|never ?mind|wait)\b", re.I)  # in a short order (STOP_WORDS words)
+# ...unless another order follows it: 'wait, kill the bat actually' is that order (2026-10-12 21:36: it stopped)
+_STOP_LEAD = re.compile(r"^\W*(?:(?:no|oh|okay|ok|sorry|hmm)\b[\s,.!-]*)*(?:wait|stop|hold on|cancel(?: that)?|"
+                        r"never ?mind|scratch that)\b[\s,.!-]*(?:(?:no|actually|instead)\b[\s,.!-]*)*", re.I)
 STOP_WORDS = 5
 _NEAREST = re.compile(r"\b(nearest|closest|next|near(?:est)?by)\s+(?P<what>[a-z' -]+)", re.I)
 _TARGET = re.compile(r"\b(go|walk|run|head|move|take|lead|bring|get|travel|guide)\b.*?\b(to|towards?|for)\s+"
@@ -46,7 +49,8 @@ _ONE_HIT = re.compile(r"\b(once|one hit|a hit|single hit|one blow|one strike|jus
 _PRONOUN = re.compile(r"^(it|him|her|them|that|this|that one|this one|that guy|this guy)?$", re.I)
 _THAT = re.compile(r"^(that|there|it|this|that one|that place|over there|right there|this way)$", re.I)
 _FILLER = re.compile(r"\b(please|in front of me|ahead of me|in front|ahead|near me|nearby|around here|"
-                     r"right there|over there|for me|thanks|thank you|i mean|my character|you see|that is)\b", re.I)
+                     r"right there|over there|for me|thanks|thank you|i mean|my character|you see|that is|"
+                     r"actually|instead|first|now|then|right now)\b", re.I)
 _ARTICLES = {'the', 'a', 'an', 'one', 'some', 'that', 'this', 'those', 'these'}
 _NOT_NAME = {'of', 'from', 'me', 'us', 'too', 'also', 'again', 'for', 'another', 'other', 'more', 'as', 'well',
              'ones', 'guy', 'guys', 'next', 'them', 'either', 'any', 'all', 'every', 'each', 'around', 'here',
@@ -141,6 +145,10 @@ class CommandResolver:
     def _handle(self, text: str) -> WalkAction:
         t = normalize(text).strip().rstrip('?')
         parts = split_orders(t)
+        while len(parts) > 1 and not _STOP_LEAD.sub('', parts[0]).strip():
+            parts = parts[1:]   # 'cancel that and kill the bat': the new order replaces the current one
+        if len(parts) == 1 and parts[0] != t:
+            return self._handle(parts[0])
         if len(parts) > 1:   # one at a time: the app runs the next when this one is done
             first = self._handle(parts[0])
             if first.kind == 'walk':
@@ -153,6 +161,9 @@ class CommandResolver:
                 self.pending = None
                 return self._walk(*choice)
         self.pending = None
+        rest = _STOP_LEAD.sub('', t).strip()
+        if rest != t and rest and (_ATTACK.search(rest) or _TARGET.search(rest) or _NEAREST.search(rest)):
+            return self._handle(rest)                    # a new order instead of the current one
         if _STOP.search(t) and len(t.split()) <= STOP_WORDS:
             return WalkAction('stop', 'Stopping.')
         m = _ATTACK.search(t)
@@ -254,7 +265,7 @@ class CommandResolver:
         label = name or 'that enemy'
         return WalkAction('walk', f"There's a {label} {round(d)} metres away. Let's go!", tuple(e.pos), label, e.id)
 
-    def _attack(self, target: str, mode: str = 'fight', text: str = '') -> WalkAction:
+    def _attack(self, target: str, mode: str = 'fight', text: str = '', ask: bool = True) -> WalkAction:
         """'attack the nearest Godrick soldier', 'hit that enemy', 'attack it': walk up and fight it
         ('hit it once': land one hit). Without a name: a kind named earlier in the order ('there was a boar
         around here, kill that too'), else the kind last fought ('the next one'), else what the player looks
@@ -286,6 +297,15 @@ class CommandResolver:
                 got = WalkAction('walk', '', tuple(e.pos), e.name or 'that enemy', e.id)
             words = 'enemy'
         got = got or self.character(words or 'enemy', in_view=in_view, same_level=every)
+        if got is None and ask and self.ask_model is not None and words and words != 'enemy':
+            # The words match no name around: the model picks from the characters around (it knows them by
+            # name): 'kill the soldier' for a Kaiden Sellsword (2026-10-12 21:35: a search for soldiers began
+            # instead). (Through _model_order, which comes back here with ask=False.)
+            got = self.ask_model(text or f'kill the {words}')
+            if got is not None and got.kind != 'walk':
+                got = None
+            if got is not None:
+                return got
         if got is None:
             return WalkAction('none', f"I don't see any {words or 'enemy'} to attack.")
         got.attack = mode

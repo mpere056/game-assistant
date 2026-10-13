@@ -612,7 +612,9 @@ class BulletTests(unittest.TestCase):
         self.assertIsNotNone(rolled)
         t, keys = rolled
         self.assertIn('back', keys)                       # away, not through
-        self.assertTrue(1.08 <= t <= 1.14, t)             # invincible ~1.2-1.45 s: over the bullet's hit
+        # invincible from just before 1.167 (a lunge connects at its start; twenty-fourth session), away from
+        # the rest of it
+        self.assertTrue(1.167 - DODGE_LEAD - 0.02 <= t <= 1.167 - DODGE_LEAD + 0.07, t)
         # a short swing (seen to end on its own) is still rolled through, 0.16 s ahead
         f2 = Fighter(windows, lambda tid: 30.0, chains={'_solo': {'c4300': {'3000': 2}}})
         f2.start(1)
@@ -1417,3 +1419,117 @@ class TwentyThirdSessionTests(unittest.TestCase):
         for _ in range(int((STALE_S + 1) * 10)):             # then frozen
             f.update(Snapshot(s.game, 2, True, s.player, s.camera, s.entities, None, screen=s.screen), 0.1)
         self.assertFalse(f.active)
+
+
+class TwentyFourthSessionTests(unittest.TestCase):
+    """2026-10-12 18:14: a c4351 soldier (poise 65) that chains attack after attack: 90 s, 9 swings, timeout. A roll
+    pressed in a roll's tail came out after the hit and through the soldier's recovery; its counter out of a
+    flinch; a running attack's long hit met at its start; a flask at 6 m from a 4.5 m lunge."""
+
+    def _me(self, anim, t, entities, hp=600):
+        cam = Camera((0.0, 2.0, -3.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 60, 16 / 9)
+        pl = Player((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 'alive', hp, 1000, 100, 100, anim=anim, anim_time=t)
+        return Snapshot('test', 1, True, pl, cam, tuple(entities), None, screen=Screen(0, 0, 1280, 720, True))
+
+    def test_no_roll_press_that_would_come_out_after_the_hit(self):
+        WINDOWS[('c4300', 3800)] = [(0.4, 0.5)]
+        f = Fighter(windows, lambda tid: 65.0)
+        f.start(1)
+        f._last_roll = f.t - 0.6
+        it = f.update(self._me(27120, 0.6, [_enemy(1, (0.0, 0.0, 1.6), anim=3800, t=0.26)]), 1 / 60)
+        self.assertNotIn('roll', it.taps)           # it would only roll at ~0.95 s: 0.2 s after the hit
+        self.assertEqual(f.state, 'evading')
+        f2 = Fighter(windows, lambda tid: 65.0)       # late in the tail it still comes in time: pressed
+        f2.start(1)
+        f2._last_roll = f2.t - 0.9
+        it = f2.update(self._me(27120, 0.9, [_enemy(1, (0.0, 0.0, 1.6), anim=3800, t=0.26)]), 1 / 60)
+        self.assertIn('roll', it.taps)
+
+    def test_learns_a_counter_out_of_a_flinch_and_stops_after_one_swing(self):
+        WINDOWS[('c4300', 3801)] = [(0.77, 0.87)]
+        f = Fighter(windows, lambda tid: 65.0)
+        f.start(1)
+        f.update(_snap([_enemy(1, (0.0, 0.0, 6.0), anim=8200, t=0.1, length=0.6)]), 1 / 60)
+        f.update(_snap([_enemy(1, (0.0, 0.0, 6.0), anim=3801, t=0.05)]), 1 / 60)
+        self.assertEqual(f.chains['_counter']['c4300']['3801'], 1)
+        # our swing landed, it flinches: no second press
+        f._last_swing, f._combo = f.t - 0.4, 1
+        it = f.update(self._me(23030000, 0.4, [_enemy(1, (0.0, 0.0, 1.8), anim=8200, t=0.05, length=0.6)]), 1 / 60)
+        self.assertNotIn('attack', it.taps)
+
+    def test_an_opening_is_counted_to_the_next_hit_not_the_next_attack(self):
+        WINDOWS[('c4300', 3802)] = [(1.03, 1.17)]
+        WINDOWS[('c4300', 3803)] = [(0.6, 0.7)]
+        f = Fighter(windows, lambda tid: 65.0, chains={'c4300': {'3802': [[1.83, 3803]]}})
+        f.start(1)
+        target = _enemy(1, (0.0, 0.0, 1.8), anim=3802, t=1.25, length=2.5)
+        # its next attack starts 0.58 s on, but hits 1.18 s on: our hit lands first
+        self.assertTrue(f._opening(target, 0.4, 1.0))
+        self.assertFalse(f._opening(target, 0.8))           # (counted to its start, as before: no opening)
+        self.assertIn('attack', f.update(_snap([target]), 1 / 60).taps)
+
+    def test_no_flask_within_reach_of_a_long_lunge(self):
+        f = Fighter(windows, lambda tid: 65.0, chains={'_lunge': {'c4300': {'3804': 4.5}}})
+        f.start(1)
+        f._last_enemy_attack = f.t
+        it = f.update(self._me(0, 0.0, [_enemy(1, (0.0, 0.0, 6.0))], hp=300), 1 / 60)
+        self.assertNotIn('item', it.taps)
+        f2 = Fighter(windows, lambda tid: 65.0)              # a short one: 6 m is far enough
+        f2.start(1)
+        it = f2.update(self._me(0, 0.0, [_enemy(1, (0.0, 0.0, 6.0))], hp=300), 1 / 60)
+        self.assertIn('item', it.taps)
+
+
+class TwentyFifthSessionTests(unittest.TestCase):
+    """2026-10-12 18:42: three Man-Bats, 50 s, 3 swings and none landed: each pressed 0.5 s into a roll came out at
+    ~0.77 s as the bat glided off (1.9 m -> 3.2 m); rolls went "through" its dive, toward where it came from, while
+    it hovers ~2 m past the player; 35 rolls in 50 s (some for bats 5 m off and leaving), the stamina gone."""
+
+    def _me(self, anim, t, entities):
+        cam = Camera((0.0, 2.0, -3.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 60, 16 / 9)
+        pl = Player((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 'alive', 600, 1000, 100, 100, anim=anim, anim_time=t)
+        return Snapshot('test', 1, True, pl, cam, tuple(entities), None, screen=Screen(0, 0, 1280, 720, True))
+
+    def test_no_swing_at_a_target_gliding_out_of_reach_before_it_lands(self):
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        for i in range(10):                                   # the bat glides off at 3 m/s
+            bat = _enemy(1, (0.0, 0.0, 2.2 + 3.0 * i / 60), facing=(0.0, 0.0, 1.0))
+            it = f.update(self._me(27120, 0.5 + i / 60, [bat]), 1 / 60)
+            self.assertNotIn('attack', it.taps)               # (out at 0.77 s in, hit 0.35 s later: 3.5 m)
+        self.assertGreater(f.debug['gap_hit'], f.my_reach)
+
+    def test_learns_where_a_dive_leaves_it_and_rolls_to_land_near_there(self):
+        WINDOWS[('c4300', 3810)] = [(1.0, 1.1)]
+        f = Fighter(windows, lambda tid: 30.0)
+        f.start(1)
+        # a dive from 8 m north through the player, ending 2 m south of it
+        for i in range(110):
+            t = i / 60
+            z = 8.0 - 8.0 * min(1.0, t / 1.05) - (2.0 * min(1.0, (t - 1.05) / 0.3) if t > 1.05 else 0.0)
+            f._update(self._me(0, 0.0, [_enemy(1, (0.0, 0.0, z), anim=3810, t=t, length=2.5)]), 1 / 60)
+        along, across, n = f.chains['_rest']['c4300']['3810']
+        self.assertTrue(1.5 < along < 2.5 and abs(across) < 0.5, (along, across))
+        # the next dive: the roll lands within reach of that spot (south), not toward where it came from
+        f2 = Fighter(windows, lambda tid: 30.0, chains={'_rest': f.chains['_rest'], '_solo': {'c4300': {'3810': 2}}})
+        f2.start(1)
+        rolled = None
+        for i in range(70):
+            t = i / 60
+            z = 8.0 - 8.0 * min(1.0, t / 1.05)
+            it = f2.update(self._me(0, 0.0, [_enemy(1, (0.0, 0.0, max(z, 0.6)), anim=3810, t=t, length=2.5)]), 1 / 60)
+            if 'roll' in it.taps:
+                rolled = it.keys
+                break
+        self.assertIsNotNone(rolled)
+        self.assertIn('back', rolled)
+
+    def test_no_roll_for_one_flying_off(self):
+        WINDOWS[('c4300', 3811)] = [(0.33, 0.77)]
+        f = Fighter(windows, lambda tid: 30.0, reach_of=lambda m, ty, a: 2.0)
+        f.start(1)
+        taps = []
+        for i in range(30):                                   # 4.2 m off and leaving at 6 m/s
+            bat = _enemy(1, (0.0, 0.0, 4.7 + 6.0 * i / 60), facing=(0.0, 0.0, 1.0), anim=3811, t=0.05 + i / 60)
+            taps += f.update(_snap([bat]), 1 / 60).taps
+        self.assertNotIn('roll', taps)

@@ -1207,3 +1207,63 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   logged while out of the game.
 - A rough pack simulation (scratch) reproduced the flee-forever loop; it is too harsh on long thrusts to tune
   damage with. 229 tests pass.
+
+## 2026-10-12: the c4351 soldier, measured in a simulation built from the logs
+- Twenty-fourth session (user): much better, but a hard time with the last enemy. It was a c4351 soldier (poise
+  65, the 1003XXX moveset): 90 s, 9 swings, 3 hits taken, "timeout". From its log: it chains attack into attack
+  (1003000->1003001, 1003006->1003008 six times of six, ...), and counters out of every flinch (8200 for 0.22 s,
+  then 1003012, three of three).
+- A duel simulation replays it from the log (scratch: duelsim.py; its moves, what follows each and when, the
+  game's hit windows, learned lunges, its counter; the player's roll and swing timings, and no control of a
+  roll before ~1.0 s, measured from the log). The merged fighter there: no kill in 90 s, ~6 hits landed, ~7
+  taken, like the real fight. Now: 70% killed, ~11 landed, ~4 taken (60 fights).
+- What changed: (1) a roll press in a roll's tail only comes out at ~0.95 s; when that is after the hit it isn't
+  pressed (it rolled through the soldier's recovery: the opening flag was up while it rolled, twice). (2)
+  Openings against middle- and high-poise enemies are counted to the next attack's hit, not its start (the
+  soldier's next attack starts ~0.7 s after a hit, but hits 1.6 s after: "no opening" all fight). (3) Counters
+  out of a flinch are learned (seeded: c4350's 1003012); against one, one swing, not a combo (the second swing
+  was still going when the counter landed). (4) A long hit's roll covers its start (a running attack timed for
+  its middle connected at once). (5) No flask within an enemy's longest learned lunge (4.5 m: hit at 6 m).
+- Tried and dropped (worse in the simulation): holding still instead of closing in while the target winds up;
+  more or less sideways in away rolls from lunges. 233 tests pass.
+
+## 2026-10-12: Man-Bats, and where an attack leaves its attacker
+- Twenty-fifth session (user): the c4351 soldier killed twice (43-44 s, 0 and 2 hits taken); but three Man-Bats
+  (c4200): no hit landed, the user took over. Their log: a dive (1003011) from 6-9 m through the player at
+  ~1.05 s, a glide on and a hover 2-4 m past it until ~2.5 s, then off to ~10 m (1003014) and back; close-ins
+  (1003010) and a three-hit flurry (1003009) at ~2 m. The fighter: 3 swings in 50 s, each pressed 0.5 s into a
+  roll, which comes out only at ~0.77 s (measured from the log: 0.5-0.8 s presses all came out at 0.74-0.80 s
+  as rolling attacks, later ones at once) while the bat glided from 1.9 to 3.2 m: none landed. 35 rolls in
+  50 s, some for bats 5 m off and leaving; its stamina ran out (25 samples recovering).
+- A swing is now judged by where the target will be when its hit lands: the delay to come out of a roll plus
+  the hit's 0.35 s, the target's speed away (half of it: a glide slows down).
+- Where each attack leaves the attacker is learned (REST_AFTER s after its last hit, relative to the player's
+  place and the line at its start; seeded: the bat's dive, ~2 m past the player). A roll landing within reach
+  of that spot is preferred (rolling "through" a dive went toward where it came from, ~5 m from where it then
+  hovered). A soldier's lunge leaves it in front: through rolls were already landing there.
+- No lunge assumed for an attack not yet measured when its attacker is leaving fast, and a lunge is now
+  measured toward where the player stood (a bat flying off counted as a 'lunge').
+- A bat simulation from the log (scratch: batsim.py, shared player mechanics in fightsim.py).
+- Kept per enemy (the user: a general strategy, plus each enemy's own data, and learning one enemy must not
+  make others worse): everything learned is keyed by the enemy's base model (combos, attacks ending on their
+  own, lunges, reaches, armoured attacks, counters, where attacks leave it); the general rules are the game's
+  mechanics (rolls, swings, timings). Each change was checked on all three simulations (the c4351 duel, the
+  bats, a pack of soldiers): the roll toward where an attack leaves its attacker helped the bats but raised the
+  damage in the pack by a quarter (it outweighed landing next to another soldier), so it applies one on one
+  only (no other enemy within 6 m). Simulations (means): duel 61% killed, 11 hits landed, 4.2 taken (merged
+  #14: 0%, 6.5, 7.0); bats 6.0 landed, 1.8 of 3 killed, 8.5 taken (#14: 4.8, 1.3, 9.3); pack unchanged.
+  236 tests pass.
+
+## 2026-10-12: orders in parts at Agheel Lake North
+- Twenty-sixth session (user, screenshot): combat much better; but several orders went wrong. From the chat and
+  combat logs: (1) 'kill the bat and the soldier(s)': on the way a Kaiden Sellsword (the "soldier", on a horse)
+  came at the player and was fought first (as it should), but its death counted as the bat's: "Now the next
+  part!", and the next part, 'kill the soldier', found no "soldier" (the name doesn't say so; and it was down
+  already), so the planner began a wander-search for Godrick Soldiers. (2) 'Wait, kill the bat actually.'
+  stopped (a short order with 'wait'). (3) "Here we are: Man-Bat!" from the fairy while the character fought.
+- Now: the enemy an order (part) names is remembered; a fight won against another one sends it back to that
+  one ("Now back to the Man-Bat!") instead of on to the next part. A next part whose enemy isn't around is
+  said and skipped, not searched for. A name that matches nobody around goes to the model with the characters
+  around ('the soldier' -> Kaiden Sellsword) before giving up. A stop word in front of an order ('wait, ...',
+  'no wait, ...', 'hold on, ...', 'cancel that and ...') is that order; 'actually', 'instead', 'first' and
+  'now' aren't part of a name. The fairy says nothing on its own while the character fights.

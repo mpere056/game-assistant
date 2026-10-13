@@ -57,6 +57,7 @@ MAX_CHASES = 3
 ESCAPE_LINE_EVERY = 20.0            # seconds: "Too many! Getting some room!" at most this often
 REKEY_AFTER = 0.6                   # seconds a held movement key may leave the character idle (_rekey)
 COMING_RANGE = 20.0                 # metres: an enemy coming at the player this near is fought next
+_ATTACK_WORDS = re.compile(r"\b(kill|attack|fight|hit|strike|defeat|beat|take (?:down|out)|finish)\b", re.I)
 ON_THE_WAY = 6.0                    # metres: an enemy this near coming at the player on the way is fought
 PLAN_TOO_LONG = 12.0                # a plan running this long is taken as hung
 LEG_CHECK_EVERY = 1.0               # seconds between re-checks of the walk's next legs (collision far off isn't
@@ -239,23 +240,32 @@ class App:
         rest = list(then)
 
         def work():
-            self._order_work(nxt)
+            self._order_work(nxt, queued=True)
             if rest and not getattr(self, '_then', None):   # the part didn't queue its own: keep the rest
                 self._then = rest
         threading.Thread(target=work, daemon=True).start()
         return True
 
-    def _order_work(self, text: str, from_plan_queue: bool = False) -> None:
+    def _order_work(self, text: str, from_plan_queue: bool = False, queued: bool = False) -> None:
         if not from_plan_queue and needs_plan(text) and self._can_plan():
             return self._plan_order(text)
         try:
             action = self.resolver.handle(text)
         except Exception as e:  # show it instead of dying
             action = WalkAction('none', f"Hmm, I couldn't work that out ({type(e).__name__}).")
+        if action.kind == 'none' and queued and _ATTACK_WORDS.search(text):
+            # the next part of an order, its enemy not around (killed already: 'kill the bat and the soldier'
+            # when the soldier attacked first and went down; 2026-10-12 21:35 it started a search instead)
+            self._navi_line(action.say)
+            if not self._next_order():
+                self._navi_line("That's everything!")
+            return
         if action.kind == 'none' and not from_plan_queue and self._can_plan():
             return self._plan_order(text)              # the rules didn't get it: the planner might
         if action.kind in ('walk', 'stop'):
             self._plan_cmd = 'stop'                    # a new order replaces a plan
+            # the enemy this order (part) is about: other kills on the way don't finish it (_back_to_order)
+            self._order_target = action.entity_id if action.kind == 'walk' and action.attack else None
             self._fight_all = action.every if action.kind == 'walk' else None   # 'kill all of them'
             self._then = list(action.then) if action.kind == 'walk' else []      # '... and then ...'
         if action.kind == 'walk':
@@ -340,9 +350,9 @@ class App:
             return None
         tool, inp = r['tool'], r['input']
         if tool == 'attack_character':
-            return self.resolver._attack(inp.get('name', 'enemy'), 'hit')
+            return self.resolver._attack(inp.get('name', 'enemy'), 'hit', ask=False)
         if tool == 'fight_character':
-            return self.resolver._attack(inp.get('name', 'enemy'), 'fight')
+            return self.resolver._attack(inp.get('name', 'enemy'), 'fight', ask=False)
         if tool == 'walk_to_character':
             got = self.resolver.character(inp.get('name', 'enemy'))
             return got or WalkAction('none', f"I don't see any {inp.get('name', 'of those')} near you.")
@@ -687,15 +697,19 @@ class App:
                 ev = 'target_gone' if not getattr(self, '_fight_all', None) else 'won'
             if self.plan.active and ev != 'fled' and self.plan.on_event(ev):
                 pass                                              # the plan goes on by itself
+            elif ev == 'won' and self._back_to_order(snap):
+                line = "Got it! Now back to the " + (self._order_name or 'one you asked for') + '!'
             elif ev == 'won' and getattr(self, '_fight_all', None):   # 'kill all of them': the next one
                 coming = self._coming_at_me(snap)
                 got = None if coming is not None else                     self.resolver.character(self._fight_all, max_range=ALL_RANGE, same_level=True,
                                             exclude=self.fighter.unreachable)
                 if coming is not None:      # first whatever is coming at us, whatever it is (a wolf, a bat)
                     name = self._enemy_name(coming)
+                    self._order_target = None
                     self._walk_request('start', tuple(coming.pos), name, coming.id, 'fight')
                     line = 'Got it! ' + (f'Now the {name} coming at us!' if name else 'Now the one coming at us!')
                 elif got is not None:
+                    self._order_target = got.entity_id
                     self._walk_request('start', got.point, got.name, got.entity_id, 'fight')
                     line = (line + ' ' if line and 'reach' in line else 'Got it! ') + f"Next {got.name or 'one'}!"
                 else:
@@ -827,6 +841,25 @@ class App:
             self.fighter.chains_changed = False
         except OSError:
             pass
+
+    def _back_to_order(self, snap) -> bool:
+        """A fight won against another enemy than the one the order named (it came at the player on the way):
+        back to that one if it's still around (2026-10-12 21:35: 'kill the bat and the soldier', the soldier
+        attacked first; its death counted as the bat's and the order went on to 'the soldier')."""
+        tgt = getattr(self, '_order_target', None)
+        if tgt is None:
+            return False
+        if tgt == self.fighter.target_id:          # the one asked for is down: done with it
+            self._order_target = None
+            return False
+        e = next((x for x in snap.entities if x.id == tgt and not x.dead and (x.health is None or x.health > 0)),
+                 None)
+        if e is None or not snap.player or math.dist(e.pos, snap.player.pos) > ALL_RANGE:
+            self._order_target = None
+            return False
+        self._order_name = self._enemy_name(e)
+        self._walk_request('start', tuple(e.pos), self._order_name, e.id, 'fight')
+        return True
 
     def _coming_at_me(self, snap):
         """The nearest enemy of any kind coming at the player (fighter._engaged, out to COMING_RANGE): fought
@@ -1105,7 +1138,7 @@ class App:
                         self.speaker.say(line)
                     continue
                 if event.startswith('arrived:'):
-                    if self.walk.active:  # walking there: say it when the walk itself arrives
+                    if self.walk.active or self.fighter.active:  # walking there (it says so), or fighting
                         continue
                     line = f"Here we are: {event.split(':', 1)[1]}!"
                     self.q.put(('meta', '\n' + line + '\n'))
