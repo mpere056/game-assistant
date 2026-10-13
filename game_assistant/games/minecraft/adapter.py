@@ -78,7 +78,13 @@ _FILLER_WORDS = {'the', 'a', 'an', 'nearest', 'closest', 'nearby', 'near', 'me',
 PROMPT_NOTES = """- Minecraft facts: the game reports names, health (in half-hearts: 20 health is 10 hearts) and the
   block or creature at the crosshair exactly. Recipes, how to get or use things, mob behaviour and
   strategies: search the Minecraft Wiki (web_search) rather than answering from memory.
-- Distances are in blocks (one block is about a metre); say "blocks"."""
+- Distances are in blocks (one block is about a metre); say "blocks".
+- Moving: the character's own walk finds the way and takes it all into account: it steps up one block, drops
+  up to 3 onto ground and any height into water (no harm), swims at the surface, climbs ladders, jumps gaps
+  (a walking jump clears 1 block, a sprinting jump 2, with a run-up 3; a sprinting jump also goes up 1 over a
+  1-block gap), mines through what's in the way (with the best tool held; it makes a pickaxe first when that's
+  quicker), digs down, pillars up and bridges with blocks held. So "go there" is usually one order, however
+  rough the way."""
 
 
 def _mirror(v) -> Vec3:
@@ -875,6 +881,17 @@ class MinecraftAdapter:
             if sky is not None:
                 tops = [sky(xx, zz) for xx in range(lo[0], hi[0] + 1) for zz in range(lo[2], hi[2] + 1)]
                 hi[1] = max(hi[1], max(t for t in tops if t is not None) + 2)
+        if not sky_goal:
+            # down to the lowest ground (or water) and up to the highest between here and there: the way may be
+            # down a cliff into the sea and up the other side (12 either way didn't see the sea 14 down, and
+            # found no way to a spider across it, 2026-10-13)
+            tops = self._heights(lo[0], lo[2], hi[0] - lo[0] + 1, hi[2] - lo[2] + 1)
+            if tops is not None:
+                hs = [tops(xx, zz) for xx in range(lo[0], hi[0] + 1, 2) for zz in range(lo[2], hi[2] + 1, 2)]
+                hs = [h for h in hs if h is not None]
+                if hs:
+                    lo[1] = min(lo[1], min(hs) - 3)
+                    hi[1] = max(hi[1], max(hs) + 3)
         size = [hi[i] - lo[i] + 1 for i in range(3)]
         while size[0] * size[1] * size[2] > 160 * 1024 and size[1] > 16:
             size[1] -= 2
@@ -1039,6 +1056,12 @@ def _action(a: tuple) -> tuple:
     what, frm = a[0], _mirror(a[1])
     if what == 'step':
         return ('step', frm, _mirror(a[2]))
+    if what == 'parkour':                            # a jump over a gap: to the landing block's middle
+        (lx, ly, lz), gap, sprint, runup = a[2], a[3], a[4], a[5]
+        info = {'gap': gap, 'sprint': sprint}
+        if runup is not None:
+            info['runup'] = _mirror((runup[0] + 0.5, float(runup[1]), runup[2] + 0.5))
+        return ('parkour', frm, _mirror((lx + 0.5, float(ly), lz + 0.5)), info)
     if what == 'break':
         c = a[2]
         return ('break', frm, _mirror((c[0] + 0.5, c[1] + 0.5, c[2] + 0.5)), {'key': tuple(c)})

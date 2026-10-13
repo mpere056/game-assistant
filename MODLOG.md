@@ -1656,3 +1656,19 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
 - The arena: none taken with one to four zombies (four round the player: 0, was 1). Bridge version 11. Tests:
   retreating then handing over; a route round a wall; to the surface by the way out; running away. Not yet tried
   in the game.
+
+## 2026-10-13: "kill that spider" found no way (user): the sea under a cliff; parkour
+- The user, on a cliff 14 above the sea with the spider across it: "Hmm, I can't find a way". The planner's box
+  went 12 up and down from the player: it never saw the sea. Now the box reaches the lowest ground (or water) and
+  the highest between here and there (the bridge's heights): the live route was found at once (36 blocks: a
+  14-block drop into the sea, a swim, up the far slope).
+- The user: it should know it can jump into water safely, and how running and jumping work. Parkour in the
+  planner (straight on, the 4 ways): a walking jump over a 1-block gap, a sprinting one over 2 (or over 1 and up
+  1), a sprinting one from a run-up block over 3; landing level or 1 lower, with room for the arc; dearer when
+  missing it would hurt (a deep drop, lava). The walk does it: back to the run-up block first for 3; face the
+  landing squarely; walk or sprint at the edge; jump 0.32 past the middle of the block (the edge is at 0.5); keep
+  going till landed, then on along the route from there; missed and fallen: plan again. Minecraft's notes for
+  the models say what the walk takes into account (jumps, falls into water, swimming, mining with a pickaxe made
+  first, pillars, bridges), so "go there" is one order however rough the way.
+- Tests: jumps of 1, 2 (sprint) and 3 (sprint, run-up), none over 4; up 1 over 1; a simulated sprint jump over
+  a 2-block gap (jumped just before the edge, landed, arrived). Not yet tried in the game.

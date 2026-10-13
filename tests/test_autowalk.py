@@ -508,3 +508,43 @@ class PreciseWalkTests(unittest.TestCase):
         self.assertFalse(w.held_attack)
         self.assertNotIn('breaking', [aw.state])
         self.assertIn('arrived', aw.events)
+
+
+class LeapWorld(World):
+    """Ground for z < 1 and z >= 3 (a 2-block gap between, falling away); walking 4.3, sprinting 5.6 a second; a
+    jump: up at 8.4, down at 28 (about 0.6 s in the air)."""
+
+    def __init__(self):
+        super().__init__(pos=(0.5, 0.0, 0.2), yaw=0.0)
+        self.vy, self.jumped_at, self.sprinted = 0.0, None, False
+
+    def apply(self, intent, dt):
+        self.yaw += intent.turn
+        if 'jump' in intent.taps and self.pos[1] >= 0.0 and self.vy == 0.0:
+            self.vy, self.jumped_at = 8.4, self.pos[2]
+        self.sprinted = self.sprinted or 'sprint' in intent.keys
+        fx = ('forward' in intent.keys) - ('back' in intent.keys)
+        r = math.radians(self.yaw)
+        v = (5.6 if 'sprint' in intent.keys else 4.3) * dt * fx
+        self.pos[0] += math.sin(r) * v
+        self.pos[2] += math.cos(r) * v
+        ground = self.pos[2] < 1.0 or self.pos[2] >= 3.0
+        if self.vy != 0.0 or not ground or self.pos[1] < 0.0:
+            self.vy -= 28.0 * dt
+            self.pos[1] += self.vy * dt
+            if ground and self.pos[1] <= 0.0 and self.pos[1] > -0.5:
+                self.pos[1], self.vy = 0.0, 0.0
+
+
+class LeapTests(unittest.TestCase):
+    def test_sprint_jumps_a_two_block_gap_at_the_edge_and_lands(self):
+        w = LeapWorld()
+        aw = AutoWalk(sprint=False, precise=True)
+        route = [(0.5, 0.0, 0.5), (0.5, 0.0, 3.5), (0.5, 0.0, 4.5), (0.5, 0.0, 5.5), (0.5, 0.0, 6.5)]
+        aw.start(route, route[-1], 'Over there',
+                 actions=[('parkour', (0.5, 0.0, 0.5), (0.5, 0.0, 3.5), {'gap': 2, 'sprint': True})])
+        walk(aw, w, 6)
+        self.assertIn('arrived', aw.events)
+        self.assertTrue(w.sprinted)
+        self.assertTrue(0.7 < w.jumped_at < 1.0)        # just before the edge (at z = 1)
+        self.assertEqual(w.pos[1], 0.0)                 # landed, not fallen
