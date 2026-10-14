@@ -35,7 +35,7 @@ import java.util.function.Function;
 public class Bridge implements ClientModInitializer {
 	public static final int PORT = 47821;
 	/** Bumped with each change the assistant relies on (it says when the game runs an older bridge). */
-	public static final int VERSION = 11;
+	public static final int VERSION = 17;
 	static final Gson GSON = new Gson();
 
 	/** The latest snapshot as a JSON line, replaced every frame while the assistant asks for it. */
@@ -134,7 +134,8 @@ public class Bridge implements ClientModInitializer {
 			case "raycast": {
 				JsonArray rays = req.getAsJsonArray("rays");
 				boolean fluids = req.has("fluids") && req.get("fluids").getAsBoolean();
-				return GSON.toJson(onGameThread(mc -> Rays.cast(mc, rays, fluids)));
+				boolean outline = req.has("outline") && req.get("outline").getAsBoolean();
+				return GSON.toJson(onGameThread(mc -> Rays.cast(mc, rays, fluids, outline)));
 			}
 			case "grid": {
 				JsonArray min = req.getAsJsonArray("min");
@@ -165,14 +166,16 @@ public class Bridge implements ClientModInitializer {
 			case "heights": {
 				JsonArray min = req.getAsJsonArray("min");
 				JsonArray size = req.getAsJsonArray("size");
-				return GSON.toJson(onGameThread(mc -> Grid.heights(mc, min, size)));
+				boolean ground = req.has("ground") && req.get("ground").getAsBoolean();
+				return GSON.toJson(onGameThread(mc -> Grid.heights(mc, min, size, ground)));
 			}
 			case "block_ids":
 				return GSON.toJson(Finder.ids());
 			case "find_blocks": {
 				JsonArray ids = req.getAsJsonArray("ids");
 				int max = req.has("max") ? req.get("max").getAsInt() : 8;
-				return GSON.toJson(onGameThread(mc -> Finder.find(mc, ids, max)));
+				int radius = req.has("radius") ? req.get("radius").getAsInt() : 0;
+				return GSON.toJson(onGameThread(mc -> Finder.find(mc, ids, max, radius)));
 			}
 			case "locate":
 				return GSON.toJson(Places.locate(req.has("kind") ? req.get("kind").getAsString() : "structure",

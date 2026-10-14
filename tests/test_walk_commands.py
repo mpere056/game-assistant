@@ -409,3 +409,24 @@ class FleeTests(unittest.TestCase):
         got = CommandResolver(a).handle('run away!')
         self.assertEqual(got.kind, 'walk')
         self.assertLess(a.vector[1], 0)                 # away from them (they're north, +z)
+
+
+class PutDownTests(unittest.TestCase):
+    def test_place_a_held_block_is_a_task_putting_it_down(self):
+        # (the doer's "place a crafting table" wasn't understood, 2026-10-13)
+        class A(FakeAdapter):
+            held = {'mc:crafting_table': 1}
+
+            def match_item(self, what):
+                return ['mc:crafting_table'] if 'table' in what else []
+
+            def snapshot(self):
+                s = super().snapshot()
+                return s.__class__(**{**s.__dict__, 'extra': {'inventory': dict(self.held)}})
+        a = A([])
+        r = CommandResolver(a)
+        got = r.handle('place a crafting table', use_model=False)
+        self.assertEqual((got.kind, got.steps), ('task', [('station', 'mc:crafting_table')]))
+        self.assertEqual(r.handle('put the crafting table down', use_model=False).kind, 'task')
+        a.held = {}
+        self.assertEqual(r.handle('place a crafting table', use_model=False).kind, 'none')

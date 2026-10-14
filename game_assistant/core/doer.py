@@ -28,6 +28,7 @@ MODEL = 'claude-haiku-5-5'
 MAX_TOKENS = 2048
 MAX_ACTIONS = 30
 THINK_SAY = 5.0         # seconds of thinking before a word to the player that it's still working it out
+OUTCOME_GRACE = 0.8     # seconds after a step ends for what's said about it to come in
 PROGRESS_EVERY = 25.0   # seconds between progress lines while an action runs
 START_WAIT = 2.0        # seconds for an order to get going (the frame thread picks it up)
 ACTION_TIMEOUT = 900.0  # seconds one order may run
@@ -45,13 +46,24 @@ ground, check where things are, try. When there is no direct way (none near), re
 would be and how to get to it: where_is finds places, kinds
 of block and creatures anywhere the game has loaded; the wiki tells you about the game (where things live or
 spawn, what they need, when); then go there, explore (an order like 'explore 80 blocks north'), or wait for
-the right time, and check again. Be efficient: where_is gives a few of each with about how long getting
+the right time, and check again. Names of regions (biomes) are whole regions, often far off; the shape of the
+land near (hills, a mountain, high or low ground, a valley), named or not, is in the survey's land: "the
+nearest hills" are the nearest high ground there, unless the player names the region. The state says whether
+the player stands on the ground or up a tree or on something built: "the ground" is the land itself. A
+way through several points is one order: "go to x y z, then go to x y z, then go to x y z" (a hill's points
+along its top or round its foot, from the survey; "this hill" is the rise the player stands on, if they are). Be efficient: where_is gives a few of each with about how long getting
 to each takes; take the quickest, and weigh other ways too (a creature that spawns in the dark may be quicker
 found by waiting or looking around on the player's own level, at night, than by digging down to one), think
 whether getting something first makes it much quicker overall (a pickaxe before digging down through stone: where_is gives how
 long digging there would take with what's held and with each pickaxe; better tools for a lot of mining), and
-do whatever is quickest in all. If an action fails, think about why (the outcome says) and try another way;
-don't repeat the same failing action more than twice. Keep the player told: each act's `say` says what you're
+do whatever is quickest in all. If an action fails, think about why (the outcome says) and try another way (a walk with no way
+there: blocks to pillar up or bridge with, which the walk uses itself when held: dirt, cobblestone, planks or
+logs; mine some dirt first, or craft logs held into planks, four from each; a tool; a way round);
+don't repeat the same failing action more than twice. Use what's already there: something standing near to use
+(a crafting table, a furnace) is gone to and used, never made again or taken apart to get one; the outcome says
+why it couldn't be used (out of reach, in the way). Ask the player first (finish with the question)
+only when doing it would bring a risk or a cost they may not expect (a long way at night with enemies about,
+a fight when weak, using up something rare); otherwise just do it. Keep the player told: each act's `say` says what you're
 doing and why, in a few words. When the order is done, or can't be done, call finish
 with one or two short sentences for the player. Never act beyond what the order asks. Keep the player alive
 before all else: never start or go on with a fight on low health or when outnumbered; get away first ('run
@@ -73,8 +85,14 @@ TOOLS = [
                       'additionalProperties': False}},
     {'name': 'survey', 'description': 'The ground round the player from the game itself (in the dark too): where '
      'it drops away in each direction, how far down and what is at the bottom (water and how deep, ground, lava), '
-     'walls, and pools of water below, with coordinates to go to.',
-     'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+     'walls, pools of water below, the trees near (the height of each and where to stand on its top), and the lie '
+     'of the land: whether the player is on the ground or above or below it, the hills near (each top, how much '
+     'it rises, the nearest point on it, and points along the top to walk), and the highest ground each way; with '
+     'coordinates to go to. trees_within: how far out to list trees (blocks, up to 64; the nearest and the '
+     'tallest are given). land_within: how far out to read the land (blocks, up to 120).',
+     'input_schema': {'type': 'object', 'properties': {'trees_within': {'type': 'integer'},
+                                                       'land_within': {'type': 'integer'}},
+                      'additionalProperties': False}},
     {'name': 'say', 'description': 'Tell the player something now (one short sentence), and go on.',
      'input_schema': {'type': 'object', 'properties': {'line': {'type': 'string'}}, 'required': ['line'],
                       'additionalProperties': False}},
@@ -141,6 +159,9 @@ class Doer:
                 timer.cancel()
             self.guard.record(self.model, msg.usage, 'doer')
             uses = [b for b in msg.content if b.type == 'tool_use']
+            thought = ' '.join(getattr(b, 'text', '') for b in msg.content if b.type == 'text').strip()
+            self._log({'order': order, 'turn': _turn, 'thought': thought or None,
+                       'calls': [{'tool': b.name, 'input': dict(b.input)} for b in uses]})
             if not uses:
                 text = ' '.join(b.text for b in msg.content if b.type == 'text').strip()
                 return text
@@ -166,7 +187,9 @@ class Doer:
                 elif b.name == 'where_is':
                     out = self.world.doer_where(str(inp.get('name') or ''))
                 elif b.name == 'survey':
-                    out = getattr(self.world, 'doer_survey', lambda: 'no survey in this game')()
+                    out = getattr(self.world, 'doer_survey', lambda **k: 'no survey in this game')(
+                        trees_within=int(inp.get('trees_within') or 24),
+                        land_within=int(inp.get('land_within') or 96))
                 elif b.name == 'say':
                     self.world.doer_say(str(inp.get('line') or ''))
                     out = 'said'
@@ -178,9 +201,16 @@ class Doer:
                 else:
                     out = f'unknown tool {b.name}'
                 self.log[-1]['result'] = out if not isinstance(out, list) else '(picture)'
+                self._log({'order': order, 'tool': b.name, 'result': self.log[-1]['result']})
                 results.append({'type': 'tool_result', 'tool_use_id': b.id, 'content': out})
             msgs.append({'role': 'user', 'content': results})
         return ''
+
+    def _log(self, row: dict) -> None:
+        try:
+            getattr(self.world, 'doer_log', lambda r: None)(row)
+        except Exception:
+            pass
 
     def _act(self, order: str) -> str:
         t0 = time.monotonic()
@@ -196,8 +226,10 @@ class Doer:
             if time.monotonic() - told > PROGRESS_EVERY:          # a long one: how it's going
                 told = time.monotonic()
                 line = getattr(self.world, 'doer_progress', lambda: None)()
-                if line:
+                if line and line != getattr(self, '_last_progress', None):   # (not the same line over and over)
+                    self._last_progress = line
                     self.world.doer_say(line)
+        time.sleep(OUTCOME_GRACE)                         # (what's said as it ends: "I can't get through here")
         said = self.world.doer_said_since(t0)
         state = self.world.doer_state()
         return json.dumps({'outcome': said or ['(nothing was said)'], 'seconds': round(time.monotonic() - t0)}) \

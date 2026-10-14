@@ -10,10 +10,14 @@ game's own data, given by the adapter through a Book:
   tool_ok(need, have)  whether a held tool will do for one that needs `need` (a better one of the same kind does)
   nearby(blocks)     how far the nearest of these is (None: none known near): gathering is planned only from
                      what's near
-  station_near()     whether a crafting station is near (for recipes bigger than the hand's grid)
+  station_near(item) whether that station is near (a crafting table for recipes bigger than the hand's grid; a
+                     furnace for what's cooked)
+  fuels()            {item: ticks it burns} (what cooking takes; optional)
 
 The plan is a list of steps: ('gather', item, how many, Source), ('craft', Recipe, times), ('station', item)
-(place the station). Tools are kept, not used up; everything else a craft takes is.
+(place the station), ('smelt', Recipe, times, fuel item, how many of it) (cook in the station: iron ore's raw
+iron into ingots). Tools are kept, not used up; everything else a craft or a smelt takes is, fuel too.
+("Get me an iron pickaxe" had no plan: the ingots are smelted, and only crafting was known, 2026-10-13.)
 """
 from __future__ import annotations
 
@@ -24,6 +28,8 @@ from typing import Protocol
 MAX_DEPTH = 10
 GATHER_COST = 3.0       # per item gathered, plus the distance to the nearest source / 10
 CRAFT_COST = 1.0        # per craft
+SMELT_COST = 2.0        # per item cooked (it takes a while), on top of the craft
+MIN_FUEL = 200          # ticks: fuels that burn less than this (a stick, a sapling) aren't planned with
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,8 @@ class Recipe:
     w: int = 1
     h: int = 1
     shapeless: bool = False
+    station: str | None = None   # cooked in this (a furnace), not crafted on a grid
+    time: int = 0                # ticks to cook one
 
     @property
     def grid(self) -> int:
@@ -61,12 +69,12 @@ class Source:
 
 class Book(Protocol):
     hand_grid: int
-    station: str                                  # the item that is the crafting station
+    station: str                                  # the item that is the crafting station (the 3x3 grid)
     def recipes(self, item: str) -> list[Recipe]: ...
     def sources(self, item: str) -> list[Source]: ...
     def tool_ok(self, need: str, have: dict) -> bool: ...
     def nearby(self, blocks: tuple) -> float | None: ...
-    def station_near(self) -> bool: ...
+    def station_near(self, item: str) -> bool: ...
 
 
 class CantMake(Exception):
@@ -75,7 +83,7 @@ class CantMake(Exception):
 
 def plan(book: Book, item: str, count: int, have: dict) -> list[tuple]:
     """The steps to end up holding `count` of `item` (counting what's held). CantMake: no way known."""
-    st = _State(dict(have), book.station_near())
+    st = _State(dict(have), {})
     cost = _need(book, st, item, count, 0, frozenset(), keep=True)
     if cost is None:
         raise CantMake(st.why or f"I don't know a way to get {item}")
@@ -116,8 +124,12 @@ def _replays(book, steps: list, have: dict) -> bool:
             inv[s[1]] = inv.get(s[1], 0) - 1
             if inv[s[1]] < 0:
                 return False
-        elif s[0] == 'craft':
+        elif s[0] in ('craft', 'smelt'):
             rec, times = s[1], s[2]
+            if s[0] == 'smelt':
+                inv[s[3]] = inv.get(s[3], 0) - s[4]
+                if inv[s[3]] < 0:
+                    return False
             for fits, cells in rec.needs():
                 n = cells * times
                 for it in fits:
@@ -133,7 +145,7 @@ def _replays(book, steps: list, have: dict) -> bool:
 @dataclass
 class _State:
     have: dict
-    station: bool
+    stations: dict                 # station item -> there (near, or put down by the plan); asked once each
     steps: list = None
     why: str = ''
 
@@ -141,7 +153,47 @@ class _State:
         self.steps = self.steps or []
 
     def copy(self) -> '_State':
-        return _State(dict(self.have), self.station, list(self.steps), self.why)
+        return _State(dict(self.have), dict(self.stations), list(self.steps), self.why)
+
+
+def _station_there(book, st: _State, item: str) -> bool:
+    if item not in st.stations:
+        try:
+            st.stations[item] = bool(book.station_near(item))
+        except TypeError:                                  # (a book with the crafting table only)
+            st.stations[item] = item == book.station and bool(book.station_near())
+    return st.stations[item]
+
+
+def _fuel(book, st: _State, ticks: int, depth: int, seen: frozenset):
+    """Fuel for `ticks` of cooking: (item, how many, cost); st updated with it. What's held first (one kind,
+    enough of it); else the cheapest of what's held in part, what the land gives near (logs, coal) and what's
+    made from what's held (planks from logs). None: no way. (By what burns longest alone, it only ever tried
+    lava, coal blocks and boats.)"""
+    burn = {k: v for k, v in (getattr(book, 'fuels', lambda: {})() or {}).items()
+            if isinstance(v, (int, float)) and v >= MIN_FUEL}
+    if not burn:
+        return None
+    for it in sorted(burn, key=lambda i: -burn[i]):
+        n = math.ceil(ticks / burn[it])
+        if st.have.get(it, 0) >= n:
+            st.have[it] -= n
+            return it, n, 0.0
+    held = {h for h, n in st.have.items() if n > 0}
+    cands = [it for it in burn if it in held or book.sources(it)
+             or any(all(any(x in held for x in fits) for fits, _n in r.needs()) for r in book.recipes(it))]
+    best = None
+    for it in sorted(cands, key=lambda i: (i not in held, -burn[i]))[:MAX_TRIES]:
+        n = math.ceil(ticks / burn[it])
+        trial = st.copy()
+        c = _need(book, trial, it, n, depth, seen)
+        if c is not None and (best is None or c < best[0]):
+            best = (c, trial, it, n)
+    if best is None:
+        return None
+    c, trial, it, n = best
+    st.have, st.stations, st.steps = trial.have, trial.stations, trial.steps
+    return it, n, c
 
 
 def _need(book, st: _State, item: str, n: int, depth: int, seen: frozenset, keep: bool = False) -> float | None:
@@ -164,7 +216,13 @@ def _produce(book, st: _State, item: str, k: int, depth: int, seen: frozenset) -
         return None
     seen = seen | {item}
     best = None
+    makeable = bool(book.recipes(item))
     for src in book.sources(item):
+        # a thing that's made is made, not taken off what's built (the block is the thing itself, and it has a
+        # recipe: a crafting table, planks, a furnace): "get a crafting table" mined the one the player had put
+        # down, then put it back, 2026-10-13. What the land gives (logs, stone, ores) is gathered.
+        if makeable and src.block == item:
+            continue
         d = book.nearby((src.block,))
         if d is None:
             continue
@@ -186,13 +244,14 @@ def _produce(book, st: _State, item: str, k: int, depth: int, seen: frozenset) -
         times = math.ceil(k / max(1, rec.count))
         cost = CRAFT_COST
         ok = True
-        if rec.grid > book.hand_grid and not trial.station:
-            c = _need(book, trial, book.station, 1, depth + 1, seen)
+        need = rec.station or (book.station if rec.grid > book.hand_grid else None)
+        if need and not _station_there(book, trial, need):
+            c = _need(book, trial, need, 1, depth + 1, seen)
             if c is None:
                 continue
             cost += c
-            trial.steps.append(('station', book.station))
-            trial.station = True
+            trial.steps.append(('station', need))
+            trial.stations[need] = True
         for fits, cells in rec.needs():
             c = _ingredient(book, trial, fits, cells * times, depth + 1, seen)
             if c is None:
@@ -201,14 +260,23 @@ def _produce(book, st: _State, item: str, k: int, depth: int, seen: frozenset) -
             cost += c
         if not ok:
             continue
-        trial.steps.append(('craft', rec, times))
+        if rec.station:                                   # cooked: fuel for as long as it takes
+            got = _fuel(book, trial, times * max(1, rec.time), depth + 1, seen)
+            if got is None:
+                st.why = st.why or f"I've nothing to burn in the {_name(rec.station)}"
+                continue
+            f_item, f_n, c = got
+            cost += c + SMELT_COST * times
+            trial.steps.append(('smelt', rec, times, f_item, f_n))
+        else:
+            trial.steps.append(('craft', rec, times))
         trial.have[item] = trial.have.get(item, 0) + times * rec.count
         if best is None or cost < best[0]:
             best = (cost, trial)
     if best is None:
         st.why = st.why or f"I can't find a way to get {_name(item)} near here"
         return None
-    st.have, st.station, st.steps = best[1].have, best[1].station, best[1].steps
+    st.have, st.stations, st.steps = best[1].have, best[1].stations, best[1].steps
     return best[0]
 
 
@@ -229,7 +297,7 @@ def _ingredient(book, st: _State, fits: tuple, n: int, depth: int, seen: frozens
             best = (c, trial)
     if best is None:
         return None
-    st.have, st.station, st.steps = best[1].have, best[1].station, best[1].steps
+    st.have, st.stations, st.steps = best[1].have, best[1].stations, best[1].steps
     return best[0]
 
 

@@ -3,6 +3,11 @@ the camera turns as told."""
 import math
 import unittest
 
+try:
+    from mc_fakes import fake_sight
+except ModuleNotFoundError:                 # (run as tests.<module>)
+    from tests.mc_fakes import fake_sight
+
 from game_assistant.core.autowalk import AutoWalk
 from game_assistant.core.interface import Camera, Entity, Player, Screen, Snapshot
 
@@ -548,3 +553,86 @@ class LeapTests(unittest.TestCase):
         self.assertTrue(w.sprinted)
         self.assertTrue(0.7 < w.jumped_at < 1.0)        # just before the edge (at z = 1)
         self.assertEqual(w.pos[1], 0.0)                 # landed, not fallen
+
+
+class BreakWork(World):
+    """Blocks to break (keys); the crosshair is on `front` while it's there (it hides the target), else on the
+    target; holding attack for 0.4 s breaks what the crosshair is on."""
+
+    def __init__(self, target, front=None, seen=True):
+        super().__init__(yaw=90.0)
+        self.blocks = {target} | ({front} if front else set())
+        self.target, self.front, self.seen = target, front, seen
+        self.held = 0.0
+
+    def aimed(self):
+        if self.front in self.blocks:
+            return self.front
+        return self.target if self.target in self.blocks and self.seen else None
+
+    def snap(self):
+        s = super().snap()
+        a = self.aimed()
+        return Snapshot(s.game, s.frame, s.in_world, s.player, s.camera, s.entities, None, screen=s.screen,
+                        extra={'aim_block': list(a) if a else None})
+
+    def apply(self, intent, dt):
+        super().apply(intent, dt)
+        a = self.aimed()
+        self.held = self.held + dt if 'attack' in intent.keys and a else 0.0
+        if self.held > 0.4:
+            self.blocks.discard(a)
+            self.held = 0.0
+
+
+class BreakWorkTests(unittest.TestCase):
+    def start(self, w):
+        aw = AutoWalk()
+        aw.precise = True
+        aw.probe = lambda k: tuple(k) in w.blocks
+        aw.aimer = lambda k, eye: ((None, w.front) if w.front in w.blocks and tuple(k) == w.target
+                                   else ((float(k[0]), 2.0, float(k[2])), None))
+        route = [(0.0, 0.0, 0.0), (0.0, 0.0, 3.0)]
+        aw.start(route, route[-1], 'there', actions=[('break', (0.0, 0.0, 0.0), (0.0, 2.0, 2.5),
+                                                      {'key': w.target})])   # (at the camera's height: no tilt here)
+        return aw
+
+    def test_a_hidden_block_has_the_one_in_front_broken_first(self):
+        # (a pit's wall hid the block to break: the crosshair on another, taken as broken, a minute stuck,
+        # 2026-10-13)
+        w = BreakWork((0, 1, 2), front=(0, 1, 1))
+        aw = self.start(w)
+        walk(aw, w, 6)
+        self.assertEqual(w.blocks, set())                         # both broken
+        self.assertNotIn('work_failed:break', aw.events)
+
+    def test_one_never_seen_but_still_there_is_failed_work_not_taken_as_gone(self):
+        w = BreakWork((0, 1, 2), seen=False)
+        aw = self.start(w)
+        aw.aimer = lambda k, eye: (None, None)
+        walk(aw, w, 3)
+        self.assertIn('work_failed:break', aw.events)
+        self.assertIn('replan', aw.events)
+
+
+class AimPointTests(unittest.TestCase):
+    def test_a_log_under_another_is_aimed_at_on_its_side(self):
+        # beside a trunk (logs at y 0 and 1), the eye level with the upper one: the lower one's middle is behind
+        # the upper one; a point on its near side is in sight
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter, _mirror
+        from game_assistant.core.interface import RayHit
+        solid = {(0, 0, 0), (0, 1, 0)}
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+
+        a._sight = fake_sight(lambda c: c in solid)
+        eye = _mirror((0.5, 1.62, 1.6))                          # (snapshot coordinates)
+        pt, blocker = a.aim_point((0, 0, 0), eye)
+        self.assertIsNotNone(pt)
+        g = _mirror(pt)
+        self.assertAlmostEqual(g[2], 1.0)                         # its near side (z = 1)...
+        self.assertLess(g[1], 1.0)                                # ...on the lower log
+        solid.add((0, 0, 1))                                      # a block in front of it too
+        solid.add((0, 1, 1))
+        pt, blocker = a.aim_point((0, 0, 0), _mirror((0.5, 1.62, 2.5)))
+        self.assertIsNone(pt)
+        self.assertIn(blocker, {(0, 1, 1), (0, 0, 1)})

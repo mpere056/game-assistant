@@ -73,6 +73,47 @@ class CraftingPlanTests(unittest.TestCase):
         steps = plan(Book(near=('mc:birch_log',)), 'mc:stick', 4, {})
         self.assertEqual(kinds(steps)[0], ('gather', 'mc:birch_log'))
 
+    def test_what_is_built_is_not_taken_apart(self):
+        # (a crafting table the player put down was mined to "get a crafting table", 2026-10-13)
+        b = Book(near=('mc:oak_log', 'mc:crafting_table', 'mc:oak_planks'))
+        b.src['mc:crafting_table'] = [Source('mc:crafting_table', ('mc:crafting_table',))]
+        b.src['mc:oak_planks'] = [Source('mc:oak_planks', ('mc:oak_planks',))]
+        k = kinds(plan(b, 'mc:crafting_table', 1, {}))
+        self.assertNotIn(('gather', 'mc:crafting_table'), k)
+        self.assertNotIn(('gather', 'mc:oak_planks'), k)
+        self.assertEqual(k[0], ('gather', 'mc:oak_log'))
+
+    def smelting_book(self, near=('mc:oak_log', 'mc:stone', 'mc:iron_ore')):
+        b = Book(near=near, table_near=True)
+        S, _ = ('mc:stick',), ()
+        I, C = ('mc:iron_ingot',), ('mc:cobblestone',)
+        b.book['mc:iron_ingot'] = [Recipe('r:ingot', 'mc:iron_ingot', 1, (('mc:raw_iron',),), shapeless=True,
+                                          station='mc:furnace', time=200)]
+        b.book['mc:iron_pickaxe'] = [shaped('mc:iron_pickaxe', 1, [[I, I, I], [_, S, _], [_, S, _]])]
+        b.book['mc:furnace'] = [shaped('mc:furnace', 1, [[C, C, C], [C, _, C], [C, C, C]])]
+        b.src['mc:raw_iron'] = [Source('mc:iron_ore', ('mc:raw_iron',), 'mc:stone_pickaxe')]
+        b.fuels = lambda: {'mc:oak_log': 300, 'mc:oak_planks': 300, 'mc:stick': 100, 'mc:coal': 1600}
+        b.station_near = lambda item=None: item != 'mc:furnace'
+        return b
+
+    def test_an_iron_pickaxe_smelts_its_ingots(self):
+        # ("get me an iron pickaxe": "I can't find a way", the ingots being smelted, 2026-10-13)
+        steps = plan(self.smelting_book(), 'mc:iron_pickaxe', 1, {'mc:stone_pickaxe': 1, 'mc:stick': 2})
+        k = [(s[0], s[1].result if s[0] in ('craft', 'smelt') else s[1]) for s in steps]
+        smelt = next(s for s in steps if s[0] == 'smelt')
+        self.assertEqual((smelt[1].result, smelt[2]), ('mc:iron_ingot', 3))
+        self.assertEqual(smelt[4], 2)                                   # 600 ticks: two logs or planks
+        self.assertLess(k.index(('station', 'mc:furnace')), k.index(('smelt', 'mc:iron_ingot')))
+        self.assertLess(k.index(('gather', 'mc:raw_iron')), k.index(('smelt', 'mc:iron_ingot')))
+        self.assertEqual(k[-1], ('craft', 'mc:iron_pickaxe'))
+
+    def test_fuel_held_is_burnt_first(self):
+        steps = plan(self.smelting_book(), 'mc:iron_pickaxe', 1,
+                     {'mc:stone_pickaxe': 1, 'mc:stick': 2, 'mc:coal': 1, 'mc:raw_iron': 3, 'mc:furnace': 1})
+        smelt = next(s for s in steps if s[0] == 'smelt')
+        self.assertEqual((smelt[3], smelt[4]), ('mc:coal', 1))
+        self.assertNotIn('gather', [s[0] for s in steps])
+
     def test_no_way(self):
         with self.assertRaises(CantMake):
             plan(Book(near=()), 'mc:wooden_pickaxe', 1, {})

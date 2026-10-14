@@ -34,29 +34,40 @@ SHIFT_FIRST = 0.15      # seconds Shift is held before a shift-click (pressed in
                         # missed it and the click picked the result up instead, 2026-10-13)
 MINE_TIMEOUT = 25.0
 OPEN_TIMEOUT = 3.0
+SPOT_TIME = 5.0         # seconds trying to put a block down in one spot before another is tried...
+SPOTS = 3               # ...this many in all
 COLLECT_WAIT = 1.2      # seconds for a mined block's drop to come to the player
 PICKUP_RANGE = 6.0      # blocks: dropped items this near are walked to
 PICKUP_TRIES = 2        # times one dropped item is walked to before it's left (it didn't come: out of reach)
 REACH = 4.3             # blocks: a station this near is used where it stands
 STEP_TIMEOUT = 300.0
+COOK_SPARE = 15.0       # seconds over the cooking time before a smelt is given up
+NO_FUEL_S = 4.0         # seconds with the furnace out and something left to cook: out of fuel
 SETTLE = 0.4            # seconds for a screen to fill in (just opened), or the grid after the last click
 
 
 class TaskWorld(Protocol):
     def task_find(self, blocks: tuple, exclude: set) -> tuple | None: ...   # (point, name, key): nearest
     def task_items(self, items: tuple, radius: float) -> list: ...          # [point]: dropped items near
-    def task_walk(self, point, name: str) -> None: ...
+    def task_walk(self, point, name: str, beside=None) -> None: ...   # beside: right up beside that block
     def task_stop(self) -> None: ...
     def task_say(self, line: str) -> None: ...
     def task_point(self, x: float, y: float) -> None: ...          # the pointer to (x, y): the game window's pixels
     def task_press(self, button: str) -> None: ...                 # click where the pointer is
-    def task_place_spot(self) -> tuple | None: ...   # (aim point, against key, face, new block's key)
+    def task_place_spot(self, exclude=()) -> tuple | None: ...   # (aim point, against key, face, new block's
+                                                                  # key); exclude: new blocks' keys tried
     def task_tool(self, need: str, have: dict) -> str | None: ...   # the held tool that will do for `need`
     def task_food(self, hotbar: list) -> int | None: ...          # the hotbar slot with the best food
+    def task_aim(self, key, eye) -> tuple: ...   # (a point on the block the crosshair reaches it at, or None; the
+                                                 # block in the way when none does)
 
 
 def _cell(p) -> tuple:
     return (math.floor(p[0]), math.floor(p[1] + 0.01), math.floor(p[2]))
+
+
+def _at(key) -> str:
+    return ' '.join(str(int(v)) for v in key)
 
 
 def _name(item: str) -> str:
@@ -105,6 +116,8 @@ class TaskRunner:
                 bits.append(f'craft {s[1].count * s[2]} {_name(s[1].result)}')
             elif s[0] == 'station':
                 bits.append(f'place a {_name(s[1])}')
+            elif s[0] == 'smelt':
+                bits.append(f'smelt {s[2]} {_name(s[1].cells[0][0])} with {s[4]} {_name(s[3])}')
             elif s[0] == 'eat':
                 bits.append('eat')
         return ', '.join(bits)
@@ -119,6 +132,10 @@ class TaskRunner:
         self.tries = 0
         self.hotbar = None          # moving an item into the hotbar: (item, phase)
         self.item_tries: dict = {}  # dropped items walked to (by their block): how often (one may not come)
+        self.station_pt = None      # where to aim at the station: a point on it in reach and in sight (or None)
+        self.station_eye = None     # ...from this eye
+        self.walked_to_station = 0
+        self.out_since = None       # cooking: the furnace out with something left to cook (since)
         self._set('start')
 
     def _set(self, phase: str, note: str = '') -> None:
@@ -126,7 +143,7 @@ class TaskRunner:
         step = self.steps[self.i] if self.active and self.i < len(self.steps) else None
         what = None
         if step is not None:
-            what = f'{step[0]} {_name(step[1].result) if step[0] == "craft" else _name(str(step[1]))}'
+            what = f'{step[0]} {_name(step[1].result) if step[0] in ("craft", "smelt") else _name(str(step[1]))}'
         self.trace.append({'t': round(self.t, 2), 'step': self.i, 'what': what, 'phase': phase, 'note': note})
 
     def _next(self) -> None:
@@ -136,7 +153,10 @@ class TaskRunner:
             self.events.append('done')
             self.result = 'done'
             self.trace.append({'t': round(self.t, 2), 'phase': 'done'})
-            self.world.task_say(f'Done! You have your {_name(self.goal)}.')
+            if self.steps and self.steps[-1][0] == 'station':
+                self.world.task_say(f'Done! The {_name(str(self.steps[-1][1]))} is down.')
+            else:
+                self.world.task_say(f'Done! You have your {_name(self.goal)}.')
             return
         self._begin()
 
@@ -172,10 +192,14 @@ class TaskRunner:
 
     def update(self, snap, dt: float, walking: bool) -> Intent | None:
         """What to press now (None: nothing; the walk, when walking, presses its own)."""
-        self.t += dt
         if not self.active:
             return None
-        if self.t - self.since > STEP_TIMEOUT:
+        ex0 = snap.extra or {}
+        if (snap.screen is not None and not snap.screen.focused) or (snap.menu and not ex0.get('container')):
+            return Intent()                              # (paused: the clock stops; it timed out while the
+                                                         # player was in another window, 2026-10-13)
+        self.t += dt
+        if self.t - self.since > STEP_TIMEOUT and self.phase != 'cook':   # (cooking has its own limit)
             self._fail("This is taking too long. Over to you!")
             return None
         step = self.steps[self.i]
@@ -189,6 +213,8 @@ class TaskRunner:
             return self._station(snap, ex, step)
         if step[0] == 'eat':
             return self._eat(snap, ex)
+        if step[0] == 'smelt':
+            return self._smelt(snap, ex, inv, step)
         return self._craft(snap, ex, inv, step, walking)
 
     # ---- moving an item into the hotbar ----
@@ -357,7 +383,16 @@ class TaskRunner:
         point, _name_, key = self.target
         cam = snap.camera
         centre = (point[0], point[1] + 0.5, point[2])
-        turn, tilt, err = aim_at(cam, centre)
+        # a point on it that can be seen (its middle was behind the log above it, seen from beside: skipped as
+        # "could not mine it", 2026-10-13): asked as mining starts and when the eye has moved
+        if self.held_at is None and (getattr(self, '_aim_eye', None) is None
+                                     or math.dist(cam.pos, self._aim_eye) > 0.4):
+            self._aim_eye = cam.pos
+            try:
+                self._aim_pt, _blocker = getattr(self.world, 'task_aim', lambda k, e: (None, None))(key, cam.pos)
+            except Exception:
+                self._aim_pt = None
+        turn, tilt, err = aim_at(cam, getattr(self, '_aim_pt', None) or centre)
         aimed = ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(key)
         keys, taps = set(), []
         if aimed:
@@ -370,11 +405,13 @@ class TaskRunner:
         elif self.held_at is not None and err < 12.0:
             self.got_before = (ex.get('inventory') or {}).get(item, 0)
             self.held_at = None
+            self._aim_eye = self._aim_pt = None
             self._set('collect')
             return Intent()
         if self.t - self.since > MINE_TIMEOUT or (self.held_at is None and err < 2.0 and self.t - self.since > 2.0):
             self.skip.add(tuple(key))                  # can't mine it (or can't see it): another one
             self.held_at = None
+            self._aim_eye = self._aim_pt = None
             self._set('find', 'could not mine it')
             return Intent()
         return Intent(frozenset(keys), turn, tuple(taps), tilt)
@@ -418,10 +455,12 @@ class TaskRunner:
             if not any(s and s[0] == item for s in hot):
                 self._fail(f"I don't have a {_name(item)} to place.")
                 return None
-            self.spot = self.world.task_place_spot()
+            self.bad_spots = set()
+            self.spot = self._spot()
             if self.spot is None:
                 self._fail(f"I can't find a spot to put the {_name(item)}.")
                 return None
+            self.station_had = (ex.get('inventory') or {}).get(item, 0)
             self._set('aim')
         hot = ex.get('hotbar') or []
         slot = next((i for i, s in enumerate(hot) if s and s[0] == item), None)
@@ -429,21 +468,231 @@ class TaskRunner:
         cam = snap.camera
         turn, tilt, err = aim_at(cam, point)
         taps = []
-        if ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(into):
-            self._next()                               # it's there
+        # there: one fewer held, or the crosshair on it where it goes (not just on something there: a flower in
+        # that spot was taken for the table, and the pickaxe after it found no table, 2026-10-13)
+        aim = tuple(ex['aim_block']) if ex.get('aim_block') is not None else None
+        fewer = (ex.get('inventory') or {}).get(item, 0) < getattr(self, 'station_had', 0)
+        if fewer or (aim == tuple(into) and ex.get('aim_id') == item):
+            self._next()
             return Intent()
-        if slot is not None and ex.get('slot') != slot and self.t - self.last_click > 0.3:
-            taps.append(f'slot{slot + 1}')
-            self.last_click = self.t
-        elif ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(against) \
-                and ex.get('aim_face') == face and self.t - self.last_click > 0.5:
-            taps.append('interact')
-            self.last_click = self.t
-            self.tries += 1
-        if self.tries > 4 or self.t - self.since > 10.0:
-            self._fail(f"I couldn't place the {_name(item)}.")
-            return None
+        # what the crosshair is on decides (as in the game): the block below's face: put it there; grass in the
+        # spot itself: put over it (it takes the grass's place); a plant in the way (no collision): knocked out
+        # (a click). Grass between was never seen, and nothing was ever clicked, 2026-10-13.
+        if slot is not None and ex.get('slot') != slot:
+            if self.t - self.last_click > 0.3:
+                taps.append(f'slot{slot + 1}')
+                self.last_click = self.t
+        elif aim is not None and self.t - self.last_click > 0.4:
+            if (aim == tuple(against) and ex.get('aim_face') == face) or \
+                    (aim == tuple(into) and ex.get('aim_replaceable')):
+                taps.append('interact')
+                self.tries += 1
+                self.last_click = self.t
+            elif aim != tuple(against) and ex.get('aim_solid') is False:
+                taps.append('attack')
+                self.last_click = self.t
+        if self.tries > 3 or self.t - self.since > SPOT_TIME:
+            # not going down there (a creature stepped in, the crosshair never got onto it): another spot
+            self.bad_spots.add(tuple(into))
+            self.spot = None if len(self.bad_spots) >= SPOTS else self._spot()
+            if self.spot is None:
+                self._fail(f"I couldn't place the {_name(item)}.")
+                return None
+            self.tries = 0
+            self._set('aim', f'another spot: {_at(self.spot[3])}')
         return Intent(frozenset({'sneak'}), turn, tuple(taps), tilt)
+
+    def _spot(self):
+        try:
+            return self.world.task_place_spot(self.bad_spots)
+        except TypeError:                              # (a world with no exclude)
+            return self.world.task_place_spot()
+
+
+    def _reach_station(self, snap, item: str) -> bool:
+        """The station (a crafting table, a furnace) is in reach and in sight from here (True: self.target is it),
+        or it's being walked to (False; or the task has failed, and said why). Used where it stands only when a
+        point on it is in sight from the eye (near wasn't enough: from the bottom of a pit it was behind the wall,
+        and never opened, 2026-10-13); else walked to where it is (the walk's goal: in reach and in sight); not in
+        sight there after all (a line of sight that only just clears a block): right up beside it."""
+        got = self.world.task_find((item,), set())
+        if got is None:
+            self._fail(f"I can't find a {_name(item)}.")
+            return False
+        self.target = got
+        self._station_aim(snap)
+        if self.station_pt is not None:
+            return True
+        if self.walked_to_station >= 2:
+            self._fail(f"I can't get to where I can reach the {_name(item)} at {_at(got[2])}: something's in the way.")
+            return False
+        self.walked_to_station += 1
+        if self.walked_to_station == 2:
+            try:
+                self.world.task_walk(got[0], got[1], beside=got[2])
+            except TypeError:                            # (a world that can't)
+                self.world.task_walk(got[0], got[1])
+        else:
+            self.world.task_walk(got[0], got[1])
+        self._set('to_station')
+        return False
+
+    def _open_station(self, snap, ex) -> Intent:
+        """Aim at the station (self.target) and click it, once a second while the crosshair is on it."""
+        point, _n, key = self.target
+        self._station_aim(snap)
+        if self.station_pt is None and self.t - self.since > 1.0:
+            self._set('start', 'not in sight from here')   # (walked there once; else it's said why)
+            return Intent()
+        turn, tilt, err = aim_at(snap.camera, self.station_pt or (point[0], point[1] + 0.5, point[2]))
+        taps = ()
+        if ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(key) and self.t - self.last_click > 1.0:
+            taps = ('interact',)
+            self.last_click = self.t
+        return Intent(frozenset(), turn, taps, tilt)
+
+    # ---- cooking (a furnace) ----
+
+    def _smelt(self, snap, ex, inv, step) -> Intent | None:
+        """Cooking in a station (a furnace): to it (in reach, in sight), open it, what's to cook into its input and
+        the fuel into its fuel slot (as many as the plan says; anything else there out first), then wait, taking
+        what's done out (Shift-click) as it comes, till there's as much as wanted."""
+        rec, times, fuel, n_fuel = step[1], step[2], step[3], step[4]
+        screen = ex.get('container')
+        carried = (screen or {}).get('carried') or ''
+        have = inv.get(rec.result, 0) + ((screen or {}).get('carried_count') or 0 if carried == rec.result else 0)
+        name = _name(rec.station or 'furnace')
+        if self.want is None:
+            self.base = inv.get(rec.result, 0)
+            self.want = self.base + times * rec.count
+        if self.phase == 'start':
+            if screen:
+                self._set('close_first')
+                return Intent(taps=('escape',))
+            if not self._reach_station(snap, rec.station):
+                return None
+            self._set('open')
+        if self.phase == 'close_first':
+            if not screen:
+                self._set('start')
+            elif self.t - self.since > 1.0:
+                self.since = self.t
+                return Intent(taps=('escape',))
+            return Intent()
+        if self.phase == 'to_station':
+            return None
+        if self.phase == 'open':
+            if screen and any(s[5] == 'input' for s in _slots(screen)):
+                self._set('settle')
+                return Intent()
+            if self.t - self.since > OPEN_TIMEOUT * 3:
+                self._fail(f"I couldn't open the {name} at {_at(self.target[2])}: the crosshair never got onto it.")
+                return None
+            return self._open_station(snap, ex)
+        if self.phase == 'settle':
+            if not screen:
+                self._set('start', 'the screen closed')
+                return Intent()
+            if self.t - self.since < SETTLE:
+                return Intent()
+            slots = _slots(screen)
+            inp = next(s for s in slots if s[5] == 'input')
+            fu = next(s for s in slots if s[5] == 'fuel')
+            fits = rec.cells[0]
+            other = [s for s in (inp, fu) if s[3] and not ((s is inp and s[3] in fits) or (s is fu and s[3] == fuel))]
+            if other:                                    # something else in it: out first (Shift-click)
+                self.clicks = [(s[0], s[1], s[2], 'left') for s in other]
+                self._set('clear', json_short({'out': [s[3] for s in other]}))
+                return Intent(frozenset({'sneak'}))
+            n_in = max(0, times - (inp[4] if inp[3] in fits else 0))
+            n_fu = max(0, n_fuel - (fu[4] if fu[3] == fuel else 0))
+            clicks = []
+            for target, kinds, n, what in ((inp, fits, n_in, fits[0]), (fu, (fuel,), n_fu, fuel)):
+                if n:
+                    got = _put_clicks(slots, target, kinds, n)
+                    if got is None:
+                        self._fail(f"I don't have the {_name(what)} for the {name}.")
+                        return Intent(taps=('escape',))
+                    clicks += got
+            self.clicks = clicks
+            self.out_since = None
+            self._set('fill', json_short({'clicks': clicks}))
+            return Intent()
+        if self.phase == 'clear':
+            if self.t - self.since < SHIFT_FIRST:
+                return Intent(frozenset({'sneak'}))
+            got = self._clicking(screen)
+            if got == 'failed':
+                self._fail(f"I couldn't get the pointer onto the {name}'s slots. Over to you!")
+                return Intent(taps=('escape',))
+            if got == 'done':
+                self._set('settle', 'again')
+            return Intent(frozenset({'sneak'}))
+        if self.phase == 'fill':
+            got = self._clicking(screen)
+            if got == 'failed':
+                self._fail(f"I couldn't get the pointer onto the {name}'s slots. Over to you!")
+                return Intent(taps=('escape',))
+            if got == 'done':
+                self._set('cook')
+            return Intent()
+        if self.phase == 'cook':
+            if not screen:
+                self._set('start', 'the screen closed')
+                return Intent()
+            if self.clicks:                              # taking what's done out (Shift held)
+                if self._clicking(screen) == 'failed':
+                    self._fail(f"I couldn't get the pointer onto the {name}'s slots. Over to you!")
+                    return Intent(taps=('escape',))
+                return Intent(frozenset({'sneak'}))
+            if have >= self.want:
+                self._set('close', f'have {have}')
+                return Intent(taps=('escape',))
+            slots = _slots(screen)
+            res = next((s for s in slots if s[5] == 'result'), None)
+            inp = next((s for s in slots if s[5] == 'input'), None)
+            if res and res[3] == rec.result and self.t - self.last_click > 0.8 and self.t - self.since > SHIFT_FIRST:
+                self.clicks = [(res[0], res[1], res[2], 'left')]
+                return Intent(frozenset({'sneak'}))
+            if self.t - self.since > times * max(1, rec.time) / 20.0 + COOK_SPARE:
+                self._fail(f"The {name} didn't finish: {have - self.base} {_name(rec.result)} out of "
+                           f"{self.want - self.base}.")
+                return Intent(taps=('escape',))
+            # out, with something still to cook: out of fuel
+            out = screen.get('lit') is False and inp is not None and inp[3]
+            self.out_since = (self.out_since or self.t) if out else None
+            if self.out_since is not None and self.t - self.out_since > NO_FUEL_S:
+                self._fail(f"The {name} ran out of fuel with {inp[4]} {_name(inp[3])} still to cook.")
+                return Intent(taps=('escape',))
+            return Intent(frozenset({'sneak'}))
+        if self.phase == 'close':
+            if not screen:
+                self._next()
+            elif self.t - self.since > 1.0:
+                self.since = self.t
+                return Intent(taps=('escape',))
+            return Intent()
+        return None
+
+    def _station_aim(self, snap) -> None:
+        """Where to aim at the station (self.target) from the eye now: a point on it in reach and in sight, or
+        None. Asked again when the eye has moved."""
+        cam = snap.camera
+        if cam is None or self.target is None:
+            self.station_pt = None
+            return
+        if self.station_eye is not None and math.dist(cam.pos, self.station_eye) < 0.3:
+            return
+        self.station_eye = cam.pos
+        aim = getattr(self.world, 'task_aim', None)
+        if aim is None:                                # (no way to look: near enough is taken as in reach)
+            p = self.target[0]
+            self.station_pt = (p[0], p[1] + 0.5, p[2]) if math.dist(snap.player.pos, p) <= REACH else None
+            return
+        try:
+            self.station_pt = aim(self.target[2], cam.pos)[0]
+        except Exception:
+            self.station_pt = None
 
     def _click_mark(self) -> bool:
         self.last_click = self.t
@@ -464,17 +713,8 @@ class TaskRunner:
             if screen:                                  # something else open: close it first
                 self._set('close_first')
                 return Intent(taps=('escape',))
-            if big:
-                got = self.world.task_find(('minecraft:crafting_table',), set())
-                if got is None:
-                    self._fail("I can't find a crafting table.")
-                    return None
-                self.target = got
-                me = snap.player.pos
-                if math.dist(me, got[0]) > REACH:
-                    self.world.task_walk(got[0], got[1])
-                    self._set('to_station')
-                    return None
+            if big and not self._reach_station(snap, 'minecraft:crafting_table'):
+                return None
             self._set('open')
         if self.phase == 'close_first':
             if not screen:
@@ -491,21 +731,18 @@ class TaskRunner:
                 self._set('settle')                     # (a screen just opened: let it fill in first)
                 return Intent()
             if self.t - self.since > OPEN_TIMEOUT * (3 if big else 1):
-                self._fail("I couldn't open the crafting screen.")
+                if big and self.target is not None:
+                    self._fail(f"I couldn't open the crafting table at {_at(self.target[2])}: the crosshair "
+                               f"never got onto it.")
+                else:
+                    self._fail("I couldn't open the crafting screen.")
                 return None
             if not big:
                 if self.t - self.last_click > 1.0:
                     self.last_click = self.t
                     return Intent(taps=('inventory',))
                 return Intent()
-            point, _n, key = self.target
-            turn, tilt, err = aim_at(snap.camera, (point[0], point[1] + 0.5, point[2]))
-            taps = ()
-            if ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(key) \
-                    and self.t - self.last_click > 1.0:
-                taps = ('interact',)
-                self.last_click = self.t
-            return Intent(frozenset(), turn, taps, tilt)
+            return self._open_station(snap, ex)
         if self.phase == 'settle':
             if not screen:
                 self._set('start', 'the screen closed')
@@ -627,6 +864,30 @@ def _grid_wrong(screen: dict, rec, times: int) -> list:
         elif s[3] not in fits or s[4] < times:
             wrong.append((i, f'{s[4]} {s[3]}', fits[0]))
     return wrong
+
+
+def _put_clicks(slots: list, target, fits: tuple, n: int) -> list | None:
+    """The clicks that put n of one kind of what fits into a slot (a furnace's input, its fuel): pick a held stack
+    up, one into the slot per right click, the rest put back. None: not that many held of one kind."""
+    held: dict = {}
+    for s in slots:
+        if str(s[5]).startswith(('hotbar', 'main')) and s[3] in fits and s[4] > 0:
+            held.setdefault(s[3], []).append(s)
+    kinds = sorted(held.values(), key=lambda ss: -sum(s[4] for s in ss))
+    if not kinds or sum(s[4] for s in kinds[0]) < n:
+        return None
+    src = sorted(kinds[0], key=lambda s: -s[4])
+    clicks, carried, cur = [], 0, None
+    for _ in range(n):
+        if carried == 0:
+            cur = src.pop(0)
+            clicks.append((cur[0], cur[1], cur[2], 'left'))
+            carried = cur[4]
+        clicks.append((target[0], target[1], target[2], 'right'))
+        carried -= 1
+    if carried > 0:
+        clicks.append((cur[0], cur[1], cur[2], 'left'))
+    return clicks
 
 
 def _fill_clicks(screen: dict, rec, times: int) -> list | None:

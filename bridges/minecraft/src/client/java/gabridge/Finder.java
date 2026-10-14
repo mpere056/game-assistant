@@ -33,6 +33,11 @@ final class Finder {
 	}
 
 	static JsonObject find(Minecraft mc, JsonArray idList, int max) {
+		return find(mc, idList, max, 0);
+	}
+
+	/** radius > 0: all of that radius is searched (else out in rings, stopping at the first with any). */
+	static JsonObject find(Minecraft mc, JsonArray idList, int max, int radius) {
 		JsonObject o = new JsonObject();
 		ClientLevel level = mc.level;
 		if (level == null || mc.player == null || !Bridge.singleplayer(mc)) {
@@ -52,7 +57,8 @@ final class Finder {
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		int inner = -1;
 		java.util.List<long[]> hits = new java.util.ArrayList<>();
-		for (int r : RADII) {
+		int[] radii = radius > 0 ? new int[]{Math.min(radius, 64)} : RADII;
+		for (int r : radii) {
 			int ry = Math.min(r, DEPTH);
 			for (int dy = -ry; dy <= ry; dy++) {
 				for (int dz = -r; dz <= r; dz++) {

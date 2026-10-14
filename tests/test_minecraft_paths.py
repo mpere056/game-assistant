@@ -112,14 +112,28 @@ class PathTests(unittest.TestCase):
             p = B.find(grid(d, s), (3, 7, 5), (15, 1, 5))
             self.assertEqual(p.reaches_goal, ok, width)
 
-    def test_wades_through_powder_snow(self):
+    def test_never_into_powder_snow(self):
+        # (it sinks the body and freezes it: a walk waded in, stuck, and the player lost 8 health, 2026-10-13)
         d, s = world(floor_y=2)
         for z in range(20):
             put(d, s, 10, 1, z, B.POWDER)              # a strip of powder snow in the ground...
             put(d, s, 10, 0, z, B.SOLID)               # ...one block deep
-        p = B.find(grid(d, s), (3, 2, 5), (15, 2, 5), parkour=False)   # (a jump over it is the other way)
+        p = B.find(grid(d, s), (3, 2, 5), (15, 2, 5), parkour=False)
+        self.assertFalse(p.reaches_goal)                                # no way without jumping or breaking...
+        hard = bytes(1 if k in (B.SOLID, B.POWDER) else 0 for k in d)
+        p = B.find(B.Grid((0, 0, 0), s, bytes(d), hard), (3, 2, 5), (15, 2, 5), parkour=True)
+        self.assertTrue(p.reaches_goal)                                 # ...a jump over it
+        self.assertFalse(any(10 <= pt[0] < 11 and pt[1] < 2.0 for pt in p.cells), p.cells)
+
+    def test_out_of_powder_snow_when_sunk_in_it(self):
+        d, s = world(floor_y=1, sy=8)
+        for x in range(4, 9):
+            for z in range(3, 8):
+                put(d, s, x, 1, z, B.POWDER)           # a patch, the player sunk in its middle
+        hard = bytes(1 if k in (B.SOLID, B.POWDER) else 0 for k in d)
+        p = B.find(B.Grid((0, 0, 0), s, bytes(d), hard), (6, 1, 5), (12, 1, 5), can_break=True)
         self.assertTrue(p.reaches_goal)
-        self.assertTrue(any(10 <= pt[0] < 11 and pt[1] == 1.0 for pt in p.points), p.points)
+        self.assertTrue(any(a[0] == 'break' for a in p.actions))       # broken out of it
 
     def test_keeps_off_a_cliff_edge_when_it_can(self):
         d, s = world(sy=12)
@@ -300,3 +314,168 @@ class ParkourTests(unittest.TestCase):
         leap = next(a for a in p.actions if a[0] == 'parkour')
         self.assertEqual(leap[2][1], 8)
         self.assertTrue(leap[4])
+
+
+class MineReachTests(unittest.TestCase):
+    def trunk(self, mined_up_to=0):
+        """A trunk at (10, 1..6, 5) on flat ground (stand at y = 1); the logs below mined_up_to gone."""
+        d, s = world(sy=12)
+        for y in range(max(1, mined_up_to), 7):
+            put(d, s, 10, y, 5, B.SOLID)
+        return grid(d, s)
+
+    def test_a_log_above_the_head_is_mined_from_the_ground(self):
+        p = B.find(self.trunk(mined_up_to=4), (3, 1, 5), (10, 4, 5), kind='mine')   # 3 up (the ones below mined)
+        self.assertTrue(p.reaches_goal)
+        x, y, z = (int(v) for v in p.cells[-1])
+        self.assertEqual(y, 1)                                           # on the ground...
+        self.assertTrue(B.sees(self.trunk(mined_up_to=4), (x, y, z), (10, 4, 5)))   # ...in reach, in sight
+        self.assertFalse(any(a[0] in ('place', 'break') for a in p.actions))
+
+    def test_from_inside_the_trunk_once_its_bottom_is_gone(self):
+        p = B.find(self.trunk(mined_up_to=5), (3, 1, 5), (10, 5, 5), kind='mine')   # 4 up, from under it
+        self.assertTrue(p.reaches_goal)
+        self.assertFalse(any(a[0] in ('place', 'break') for a in p.actions))
+
+    def test_out_of_reach_or_out_of_sight_is_not_there(self):
+        # (as the game reckons: 4.5 from the eye to a point on it, nothing solid between)
+        g = self.trunk()
+        self.assertTrue(B._there(g, (9, 1, 5, 0), (10, 4, 5), 'mine'))    # 3 up beside it: its side in sight
+        self.assertTrue(B._there(g, (9, 1, 5, 0), (10, 6, 5), 'mine'))    # 5 up: its underside 3.5 off
+        d, s = world(sy=12)
+        for y in range(1, 9):
+            put(d, s, 10, y, 5, B.SOLID)
+        self.assertFalse(B._there(grid(d, s), (9, 1, 5, 0), (10, 8, 5), 'mine'))   # 7 up: out of reach
+        d, s = world(sy=12)
+        for y in (1, 2, 3):
+            put(d, s, 9, y, 5, B.SOLID)                                  # a wall between
+        put(d, s, 10, 2, 5, B.SOLID)
+        put(d, s, 10, 1, 5, B.SOLID)
+        self.assertFalse(B._there(grid(d, s), (8, 1, 5, 0), (10, 2, 5), 'mine'))
+
+    def test_a_table_up_on_the_surface_from_the_bottom_of_a_pit(self):
+        # (dug 4 down for stone, the crafting table up beside the pit: "near", but behind the pit's wall, and
+        # it couldn't be opened, 2026-10-13): climbed to where it's in sight
+        d, s = world(sy=12, floor_y=5)
+        for y in range(0, 4):
+            for z in range(20):
+                for x in range(20):
+                    put(d, s, x, y, z, B.SOLID)
+        for y in range(1, 5):
+            put(d, s, 8, y, 5, B.AIR)                                   # the pit
+        put(d, s, 10, 5, 5, B.SOLID)                                     # the table, on the surface
+        hard = bytes(2 if k == B.SOLID else 0 for k in d)
+        g = B.Grid((0, 0, 0), s, bytes(d), hard)
+        self.assertFalse(B._there(g, (8, 1, 5, 0), (10, 5, 5), 'mine'))
+        p = B.find(g, (8, 1, 5), (10, 5, 5), can_break=True, kind='mine')
+        self.assertTrue(p.reaches_goal)
+        x, y, z = (int(v) for v in p.cells[-1])
+        self.assertGreater(y, 1)
+
+    def test_up_onto_a_tree_top_with_a_few_blocks(self):
+        d, s = world(sy=14)
+        for y in range(1, 6):
+            put(d, s, 10, y, 5, B.SOLID)                 # a trunk, 5 high (stand on top at y = 6)
+        for y in (4, 5, 6):
+            for dx in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if (dx, dz, y) != (0, 0, 4) and (dx, dz, y) != (0, 0, 5):
+                        put(d, s, 10 + dx, y, 5 + dz, B.SOLID)   # leaves round its top
+        hard = bytes(2 if k == B.SOLID else 0 for k in d)        # (leaves and logs: quick to break)
+        g = B.Grid((0, 0, 0), s, bytes(d), hard)
+        self.assertFalse(B.find(g, (3, 1, 5), (10, 6, 5), kind='exact').reaches_goal)          # no blocks: no way
+        p = B.find(g, (3, 1, 5), (10, 6, 5), can_break=True, blocks=8, kind='exact')   # on the trunk's top
+        self.assertTrue(p.reaches_goal)
+        self.assertGreaterEqual(p.cells[-1][1], 6.0)
+        self.assertTrue(any(a[0] == 'place' and a[4] == 'pillar' for a in p.actions))
+
+    def test_up_onto_a_canopy_by_climbing_not_tunnelling(self):
+        # a canopy of leaves 7 across, 3 deep (y 1-3) on the ground; the goal: on top of its middle (y 4)
+        d, s = world(sy=12)
+        for y in (1, 2, 3):
+            for x in range(8, 15):
+                for z in range(2, 9):
+                    put(d, s, x, y, z, B.SOLID)
+        hard = bytes(2 if k == B.SOLID else 0 for k in d)          # (leaves: quick to break)
+        g = B.Grid((0, 0, 0), s, bytes(d), hard)
+        p = B.find(g, (3, 1, 5), (11, 4, 5), can_break=True, kind='exact')
+        self.assertTrue(p.reaches_goal)
+        breaks = sum(1 for a in p.actions if a[0] == 'break')
+        self.assertLessEqual(breaks, 6, p.actions)                    # up through it, then over the top
+
+    def test_down_from_a_tree_top_to_the_ground(self):
+        # on top of an oak (trunk y 1-6, leaves y 4-7 round it); "the ground": the land itself (feet at y 1)
+        # anywhere, not the open sky the tree top already has (2026-10-13)
+        d, s = world(sy=12)
+        for y in range(4, 8):
+            for x in range(8, 13):
+                for z in range(3, 8):
+                    put(d, s, x, y, z, B.SOLID)
+        for y in range(1, 7):
+            put(d, s, 10, y, 5, B.SOLID)
+        hard = bytearray(1 if k == B.SOLID else 0 for k in d)               # (leaves: quick)
+        for y in range(1, 7):
+            hard[(y * s[2] + 5) * s[0] + 10] = 15                           # (the trunk: 3 s a log by hand)
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(hard))
+        p = B.find(g, (10, 8, 5), (10, 1, 5), can_break=True, kind='ground', ground=lambda x, z: 1)
+        self.assertTrue(p.reaches_goal)
+        self.assertEqual(int(p.cells[-1][1]), 1, p.cells)
+        ys = [c[1] for c in p.cells]
+        self.assertTrue(all(a - b <= 3 for a, b in zip(ys, ys[1:])), ys)   # no fall that hurts
+        # already on it: there at once
+        q = B.find(g, (3, 1, 3), (10, 1, 5), kind='ground', ground=lambda x, z: 1)
+        self.assertTrue(q.reaches_goal)
+        self.assertEqual(len(q.cells), 1)
+
+    def test_up_out_of_a_canopy_from_inside_it(self):
+        # stood in a pocket inside leaves 6 deep (y 1-6): up a staircase (break ahead-up and above, jump, turn
+        # where needed) with no blocks; on the top (y 7) either way
+        d, s = world(sy=14)
+        for y in range(1, 7):
+            for x in range(6, 17):
+                for z in range(2, 9):
+                    put(d, s, x, y, z, B.SOLID)
+        put(d, s, 11, 1, 5, B.AIR)
+        put(d, s, 11, 2, 5, B.AIR)
+        hard = bytes(1 if k == B.SOLID else 0 for k in d)
+        g = B.Grid((0, 0, 0), s, bytes(d), hard)
+        for blocks in (0, 16):
+            p = B.find(g, (11, 1, 5), (11, 7, 5), can_break=True, kind='exact', blocks=blocks)
+            self.assertTrue(p.reaches_goal, blocks)
+            ys = [c[1] for c in p.cells]
+            self.assertEqual(ys, sorted(ys), (blocks, p.cells))       # up all the way, never across first
+            self.assertLessEqual(len(p.cells), 8, (blocks, p.cells))
+
+
+class DigToTests(unittest.TestCase):
+    def solid_world(self, top):
+        """Solid ground up to y = top (stand at top + 1), quick to break."""
+        d, s = world(sy=16, floor_y=top + 1)
+        for y in range(0, top + 1):
+            for z in range(20):
+                for x in range(20):
+                    put(d, s, x, y, z, B.SOLID)
+        return d, s
+
+    def test_down_to_a_stone_quickly_never_through_it(self):
+        # (a stone 5 down: the search ran out of time, the route ended in the stone, dug through it, and stood
+        # there 10 s; from the bottom of the shaft planned the eye was "in" dirt the plan dug, 2026-10-13)
+        d, s = self.solid_world(10)
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(4 if k == B.SOLID else 0 for k in d))
+        p = B.find(g, (8, 11, 8), (8, 5, 8), can_break=True, kind='mine', budget_s=2.0)
+        self.assertTrue(p.reaches_goal)
+        self.assertLess(p.expanded, 3000)
+        self.assertNotIn((8, 5, 8), [tuple(a[2]) for a in p.actions if a[0] == 'break'])
+
+    def test_a_line_of_sight_that_only_grazes_a_block_is_not_one(self):
+        # (stood in a hole, the eye just below the ground's top, the crafting table on the ground 2 off: "in
+        # sight" past a corner from the cell's middle, blocked from where the player stood, 2026-10-13)
+        d, s = self.solid_world(4)
+        put(d, s, 8, 3, 5, B.AIR)
+        put(d, s, 8, 4, 5, B.AIR)                                       # the hole (stand at y 3)
+        put(d, s, 6, 5, 5, B.SOLID)                                     # the table, on the ground
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(2 if k == B.SOLID else 0 for k in d))
+        self.assertFalse(B._there(g, (8, 3, 5, 0), (6, 5, 5), 'mine'))
+        p = B.find(g, (8, 3, 5), (6, 5, 5), can_break=True, kind='mine')
+        self.assertTrue(p.reaches_goal)
+        self.assertGreater(int(p.cells[-1][1]), 3)                      # up out of the hole first
