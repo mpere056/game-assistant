@@ -50,7 +50,8 @@ class Arena:
                 continue
             d2 = [x.center[i] - eye[i] for i in range(3)]
             n2 = math.sqrt(sum(v * v for v in d2))
-            if n2 < 6 and sum(d2[i] / n2 * f[i] for i in range(3)) > math.cos(math.radians(6))                     and (aimed is None or n2 < aimed[0]):
+            if n2 < 6 and sum(d2[i] / n2 * f[i] for i in range(3)) > math.cos(math.radians(6)) \
+                    and (aimed is None or n2 < aimed[0]):
                 aimed = (n2, x.id)
         on = aimed is not None and aimed[1] == 7
         self._aimed = aimed[1] if aimed else None
@@ -151,18 +152,11 @@ class MeleeTests(unittest.TestCase):
         self.assertEqual(f.kills[0][0], 7)
 
     def test_runs_from_a_swelling_creeper(self):
-        a = Arena('creeper', at=(0.0, 0.0, 5.0), swell_at=0.5, hp=1000)
-        f = MeleeFighter(lambda e: {'explodes': True, 'reach': 2.0})
-        f.start(7)
-        states, far = [], 0.0
-        for _ in range(int(4 / DT)):
-            intent = f.update(a.snap(), DT)
-            a.step(intent)
-            states.append(f.state)
-            if 'fleeing' in states:
-                far = max(far, math.hypot(a.p[0] - a.e[0], a.p[2] - a.e[2]))
-        self.assertIn('fleeing', states)
-        self.assertGreater(far, 6.5)                    # it ran till well clear of the blast
+        # lit beside the player (by the game's rules: Field): out past 7, where it goes back down, before it blows
+        fd = Field([('creeper', 0.0, 2.5, 10.0)])
+        f, states = field_fight(fd, 10, seconds=6)
+        self.assertIn('clear of a creeper', states)
+        self.assertEqual(fd.blasted, 0.0)
 
     def test_zigzags_in_on_a_skeleton_and_holds_up_a_shield(self):
         a = Arena('skeleton', at=(0.0, 0.0, 12.0), offhand='minecraft:shield')
@@ -293,3 +287,176 @@ class RouteInTests(unittest.TestCase):
         self.assertIn('routing', states)
         self.assertTrue(went_round)
         self.assertGreater(a.hits, 0)
+
+    def test_goes_into_the_water_after_one_that_stays_there(self):
+        a = Arena(hp=1000, at=(0.0, 0.0, 6.0))
+        water_dirs = {(0, 1): 'water', (1, 1): 'water', (-1, 1): 'water'}
+
+        def terrain():                                   # the shore at z = 3: water beyond
+            if a.p[2] > 3.0:
+                return {'in_water': True, 'avoid': {c: 'water' for c in
+                                                    [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (1, -1)]}}
+            return {'in_water': False, 'avoid': water_dirs if a.p[2] > 2.0 else {}}
+        f = MeleeFighter(lambda e: {'reach': 0.83}, lambda h: None, terrain)
+        f.start(7)
+        for _ in range(int(8 / DT)):
+            intent = f.update(a.snap(), DT)
+            fx, fz = a.e[0], a.e[2]
+            a.step(intent)
+            a.e[0], a.e[2] = fx, fz                      # (it stays out in the water)
+            if not f.active:
+                break
+        self.assertGreater(a.hits, 3)                    # in after it, not waiting on the shore
+        self.assertNotIn('unreachable', f.events)
+
+
+class Field:
+    """Creepers and spiders by the game's rules, the player as in Arena (facing +z at the origin). A creeper
+    walks at the player (2 blocks a second) and lights its fuse with the player within 3 (feet to feet), then
+    stands still while it swells (20/28 a second); farther than 7 it goes back down (as fast) and walks on. At
+    30/28 it blows up: within 6 the player takes ((1 - d/6)^2 + (1 - d/6)) / 2 * 42 + 1. A spider runs at the
+    player (5 a second) and bites for 2 within 1.8 of its middle, once a second. Swings: a stone sword (5, 0.625
+    s to charge) or a fist (1, 0.25 s)."""
+
+    def __init__(self, mobs, sword=True):
+        self.p, self.yaw, self.pitch, self.t, self.health = [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, 20.0
+        self.sword, self.since_swing = sword, 10.0
+        self.mobs = [{'id': 10 + i, 'kind': k, 'pos': [x, 0.0, z], 'hp': 20.0 if k == 'creeper' else 16.0,
+                      'swell': sw, 'lit': sw > 0, 'cd': 0.0, 'gone': False}
+                     for i, (k, x, z, sw) in enumerate(mobs)]
+        self.blasted = 0.0
+        self.bitten = 0.0
+
+    def fwd(self):
+        r, pr = math.radians(self.yaw), math.radians(self.pitch)
+        return (math.sin(r) * math.cos(pr), -math.sin(pr), math.cos(r) * math.cos(pr))
+
+    def snap(self):
+        eye = (self.p[0], 1.6, self.p[2])
+        f = self.fwd()
+        ents, aimed = [], None
+        for m in self.mobs:
+            if m['gone']:
+                continue
+            h = 1.7 if m['kind'] == 'creeper' else 0.9
+            body = (m['pos'][0], h * 0.6, m['pos'][2])
+            e = Entity(m['id'], 1, f"minecraft:{m['kind']}", tuple(m['pos']), body,
+                       0.3 if m['kind'] == 'creeper' else 0.7, h, True, m['hp'] <= 0, m['hp'], 20.0, name=m['kind'],
+                       extra={'aggressive': True, 'swell': m['swell'] / 28.0 if m['kind'] == 'creeper' else None})
+            ents.append(e)
+            d = [body[i] - eye[i] for i in range(3)]
+            n = math.sqrt(sum(v * v for v in d))
+            if m['hp'] > 0 and n - e.radius < 3.0 and sum(d[i] / n * f[i] for i in range(3)) > math.cos(
+                    math.radians(8)) and (aimed is None or n < aimed[0]):
+                aimed = (n, m['id'])
+        cam = Camera(eye, f, (math.cos(math.radians(self.yaw)), 0, -math.sin(math.radians(self.yaw))), (0, 1, 0),
+                     70, 1.7)
+        hand = ['minecraft:stone_sword', 1] if self.sword else ['minecraft:oak_log', 1]
+        return Snapshot('t', 1, True, Player(tuple(self.p), None, 'alive', self.health, 20.0), cam, tuple(ents),
+                        None, target_id=aimed[1] if aimed else None, screen=Screen(0, 0, 800, 600, True),
+                        extra={'attack_strength': min(1.0, self.since_swing / (0.625 if self.sword else 0.25)),
+                               'on_ground': True, 'vy': 0.0, 'hotbar': [hand], 'slot': 0})
+
+    def step(self, intent):
+        self.t += DT
+        self.yaw += intent.turn
+        self.pitch = max(-90, min(90, self.pitch + intent.pitch))
+        self.since_swing += DT
+        if 'attack' in intent.taps:
+            s = self.snap()
+            dmg = (5.0 if self.sword else 1.0) * (1.0 if s.extra['attack_strength'] >= 0.95 else 0.2)
+            m = next((m for m in self.mobs if m['id'] == s.target_id), None)
+            if m is not None:
+                m['hp'] -= dmg
+                kx, kz = m['pos'][0] - self.p[0], m['pos'][2] - self.p[2]
+                kn = math.hypot(kx, kz) or 1.0
+                m['pos'][0] += kx / kn * 0.8
+                m['pos'][2] += kz / kn * 0.8
+                if m['hp'] <= 0:
+                    m['gone'] = True
+            self.since_swing = 0.0
+        fx = ('forward' in intent.keys) - ('back' in intent.keys)
+        sx = ('right' in intent.keys) - ('left' in intent.keys)
+        v = (5.6 if 'sprint' in intent.keys and fx > 0 else 4.3) * DT
+        n = math.hypot(fx, sx) or 1.0
+        r = math.radians(self.yaw)
+        self.p[0] += (math.sin(r) * fx + math.cos(r) * sx) / n * v
+        self.p[2] += (math.cos(r) * fx - math.sin(r) * sx) / n * v
+        for m in self.mobs:
+            if m['gone']:
+                continue
+            dx, dz = self.p[0] - m['pos'][0], self.p[2] - m['pos'][2]
+            d = math.hypot(dx, dz)
+            if m['kind'] == 'creeper':
+                if d < 3.0:
+                    m['lit'] = True
+                elif d > 7.0:
+                    m['lit'] = False
+                m['swell'] = max(0.0, m['swell'] + (20.0 if m['lit'] else -20.0) * DT)
+                if m['swell'] >= 30.0:
+                    m['gone'] = True
+                    if d < 6.0:
+                        k = 1.0 - d / 6.0
+                        self.blasted += (k * k + k) / 2.0 * 42.0 + 1.0
+                    continue
+                if not m['lit'] and m['swell'] == 0.0 and d > 1.0:
+                    m['pos'][0] += dx / d * 2.0 * DT
+                    m['pos'][2] += dz / d * 2.0 * DT
+            else:
+                if d > 1.2:
+                    m['pos'][0] += dx / d * 5.0 * DT
+                    m['pos'][2] += dz / d * 5.0 * DT
+                m['cd'] -= DT
+                if d < 1.8 and m['cd'] <= 0:
+                    self.bitten += 2.0
+                    m['cd'] = 1.0
+        self.health = 20.0 - self.blasted - self.bitten
+
+
+def field_fight(fd, target, seconds=40):
+    from game_assistant.games.minecraft.adapter import MinecraftAdapter
+    a = MinecraftAdapter.__new__(MinecraftAdapter)
+    f = MeleeFighter(a.combat_profile, lambda h: 0, weapon_damage=a.weapon_damage)
+    f.start(target, 'creeper')
+    states = []
+    for _ in range(int(seconds / DT)):
+        intent = f.update(fd.snap(), DT)
+        fd.step(intent)
+        states.append(f.state)
+        if not f.active or fd.health <= 0:
+            break
+    return f, states
+
+
+class CreeperTests(unittest.TestCase):
+    def test_with_nothing_to_kill_it_a_creeper_is_let_blow_up_harmlessly(self):
+        fd = Field([('creeper', 0.0, 9.0, 0.0)], sword=False)
+        f, states = field_fight(fd, 10)
+        self.assertTrue(fd.mobs[0]['gone'] and fd.mobs[0]['hp'] > 0, states[-5:])   # it blew up...
+        self.assertEqual(fd.blasted, 0.0)                                            # ...hurting nothing
+        self.assertIn('baiting a creeper', states)
+
+    def test_with_a_sword_a_creeper_is_hit_and_run_from_till_dead(self):
+        fd = Field([('creeper', 0.0, 9.0, 0.0)])
+        f, states = field_fight(fd, 10)
+        self.assertLessEqual(fd.mobs[0]['hp'], 0, states[-5:])
+        self.assertEqual(fd.blasted, 0.0)
+        self.assertIn('won', f.events)
+
+    def test_two_creepers_and_a_spider_none_of_them_hurts_much(self):
+        # (2026-10-13: one creeper lit beside the player, another near, a spider coming; bare-handed; the player
+        # was blown up, then bitten to death as the fighter backed off from the spider)
+        fd = Field([('creeper', 0.0, 2.5, 8.0), ('creeper', 5.0, 6.0, 0.0), ('spider', -8.0, -8.0, 0.0)],
+                   sword=False)
+        f, states = field_fight(fd, 10, seconds=60)
+        self.assertEqual(fd.blasted, 0.0, states[::30])
+        self.assertTrue(fd.mobs[2]['gone'], (fd.mobs[2]['hp'], states[::30]))           # the spider fought...
+        self.assertGreater(fd.health, 0)                                                # ...and outlived
+
+    def test_a_spider_is_fought_on_low_health_not_backed_off_from(self):
+        fd = Field([('spider', 0.0, 4.0, 0.0)])
+        fd.bitten = 14.0                                     # 6 health left: low
+        fd.health = 6.0
+        f, states = field_fight(fd, 10, seconds=20)
+        self.assertNotIn('retreating', states)
+        self.assertTrue(fd.mobs[0]['gone'], states[::30])

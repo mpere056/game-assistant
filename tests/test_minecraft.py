@@ -5,6 +5,11 @@ import socket
 import threading
 import unittest
 
+try:
+    from mc_fakes import fake_sight
+except ModuleNotFoundError:                 # (run as tests.<module>)
+    from tests.mc_fakes import fake_sight
+
 from game_assistant.core.interface import GameNotRunning, dot
 from game_assistant.games.minecraft.adapter import MinecraftAdapter
 
@@ -178,6 +183,10 @@ class SurveyTests(unittest.TestCase):
         a.raw = lambda: {'player': {'pos': [0.5, 30.0, 0.5]}}
 
         def ask(req, timeout=None):
+            if req['op'] == 'heights':                   # the land: the ledge's top (x < 3), the cave floor
+                (x0, z0), (sx, sz) = req['min'], req['size']
+                return {'ground': req.get('ground'), 'min': req['min'], 'size': req['size'],
+                        'heights': [30 if x0 + xx < 3 else 8 for zz in range(sz) for xx in range(sx)]}
             (x0, y0, z0), (sx, sy, sz) = req['min'], req['size']
             data = bytearray(sx * sy * sz)
             for yy in range(sy):
@@ -194,9 +203,66 @@ class SurveyTests(unittest.TestCase):
                         data[(yy * sz + zz) * sx + xx] = k
             return {'min': req['min'], 'size': req['size'], 'data': base64.b64encode(bytes(data)).decode()}
         a._ask = ask
+        a._block_ids = lambda: []                        # (no trees in this one)
         got = a.survey()
         east = next(e for e in got['edges_and_walls'] if e['direction'] == 'east')
         self.assertEqual(east['drop_after_blocks'], 3)
         self.assertEqual(east['bottom'], 'ground')
         pool = got['water_below'][0]
         self.assertEqual((pool['centre']['x'], pool['deepest']), (6, 3))
+        self.assertEqual(got['land']['you_are'], 'on the ground')
+        self.assertEqual(got['land']['your_ground_height'], 30)
+
+
+class PlaceSpotTests(unittest.TestCase):
+    def test_a_spot_from_a_dip_with_a_sheep_beside(self):
+        # (stood in a one-block dip on plains, animals about: "I can't find a spot to put the crafting table",
+        # twice, 2026-10-13): on top of the ground beside it, not where the sheep stands
+        import base64
+        import math
+        from game_assistant.core.interface import RayHit
+        from game_assistant.games.minecraft import blocks as B
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter, _mirror
+        solid = lambda c: c[1] <= 61 and c != (0, 61, 0)               # the ground's top at 62; the dip
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        a.raw = lambda: {'player': {'pos': [0.5, 61.0, 0.5]}, 'camera': {'pos': [0.5, 62.62, 0.5]},
+                         'entities': [{'pos': [1.5, 62.0, 0.5], 'w': 0.9, 'h': 1.3, 'living': True}]}
+
+        def ask(req, timeout=None):
+            (x0, y0, z0), (sx, sy, sz) = req['min'], req['size']
+            data = bytes(B.SOLID if solid((x0 + i, y0 + j, z0 + k)) else B.AIR
+                         for j in range(sy) for k in range(sz) for i in range(sx))
+            return {'min': req['min'], 'size': req['size'], 'data': base64.b64encode(data).decode()}
+
+        a._ask, a._sight = ask, fake_sight(solid)
+        spot = a.place_spot()
+        self.assertIsNotNone(spot)
+        _aim, against, face, into = spot
+        self.assertEqual(face, 'up')
+        self.assertEqual(into[1], 62)                                   # on top of the ground
+        self.assertNotEqual(into, (1, 62, 0))                           # not where the sheep is
+        self.assertTrue(solid(against))
+
+    def test_a_spot_in_grass_seen_as_the_crosshair_sees_it(self):
+        # (grass on every block round the player: the crosshair, crouched, stops on it; the table never went
+        # down, 2026-10-13): a spot whose grass the table takes the place of, or a face that's really in sight
+        import base64
+        from game_assistant.games.minecraft import blocks as B
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter
+        solid = lambda c: c[1] <= 61
+        grass = {(x, 62, z): True for x in range(-4, 5) for z in range(-4, 5) if (x, z) != (0, 0)}
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        a.raw = lambda: {'player': {'pos': [0.5, 62.0, 0.5]}, 'camera': {'pos': [0.5, 63.62, 0.5]}, 'entities': []}
+
+        def ask(req, timeout=None):
+            (x0, y0, z0), (sx, sy, sz) = req['min'], req['size']
+            data = bytes(B.SOLID if solid((x0 + i, y0 + j, z0 + k)) else B.AIR
+                         for j in range(sy) for k in range(sz) for i in range(sx))
+            return {'min': req['min'], 'size': req['size'], 'data': base64.b64encode(data).decode()}
+        a._ask, a._sight = ask, fake_sight(solid, grass)
+        spot = a.place_spot()
+        self.assertIsNotNone(spot)
+        _aim, against, face, into = spot
+        self.assertEqual((face, into[1]), ('up', 62))
+        sight = fake_sight(solid, grass)([((0.5, 62 + 1.27, 0.5), _aim and (-_aim[0], _aim[1] - 0.01, _aim[2]))])[0]
+        self.assertIn(sight['block'], (into, against))       # the crosshair lands on the spot's grass or face

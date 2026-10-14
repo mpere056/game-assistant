@@ -117,6 +117,9 @@ class _Action:
     held: float | None = None                  # mining since (the crosshair on the block)
     seen: bool = False
     probed: bool = False                       # asked whether the block is still there
+    aim: tuple | None = None                   # where to aim to break it (a point on it in sight)
+    aim_eye: tuple | None = None               # ...as seen from here
+    blocker: tuple | None = None               # a block in front of it, broken first
     phase: str = ''
     last: float = -1e9                         # the last press (slot, place, jump)
 
@@ -159,6 +162,8 @@ class AutoWalk:
     # again while digging still had the blocks just dug, and each was aimed at for 1.5 s before being given up
     # (digging stopped after every block or two, 2026-10-13). None: not known (aim and see).
     probe: object = None
+    aimer: object = None    # (block key, eye) -> (a point on it the crosshair reaches it at, or None; the block in
+                            # the way when none does): set by the app (adapter.aim_point)
     active: bool = False
     route: list = field(default_factory=list)
     goal: Vec3 | None = None
@@ -270,6 +275,9 @@ class AutoWalk:
         special = self._special_action(snap, p)
         if special is not None:
             return special
+        if not self.route:
+            return Intent()                               # (work that failed just now cleared it: planned again;
+                                                          # reading it anyway was an IndexError, 2026-10-13)
         if self.precise:
             return self._step(snap, p, dt)
         target, straight = self._pursuit(p)
@@ -676,6 +684,27 @@ class AutoWalk:
     def _aim(self, cam, point: Vec3, dt_k: float = 0.35) -> tuple[float, float, float]:
         return aim_at(cam, point, dt_k)
 
+    def _aim_break(self, act: _Action, cam, p: Vec3) -> None:
+        """Where to aim to break act's block: a point on it the crosshair reaches (self.aimer), asked as the work
+        starts and again when the eye has moved; hidden, the block in front first (act.blocker), unless it's
+        below the feet (never the floor stood on)."""
+        if self.aimer is None or act.held is not None:
+            return
+        if act.aim_eye is not None and math.dist(cam.pos, act.aim_eye) < 0.25:   # (crouching: 0.35 lower)
+            return
+        act.aim_eye = cam.pos
+        target = act.blocker or tuple(act.info.get('key') or ())
+        try:
+            pt, blocker = self.aimer(target, cam.pos)
+        except Exception:
+            pt, blocker = None, None
+        if pt is not None:
+            act.aim = pt
+            return
+        if act.blocker is None and blocker is not None and blocker[1] >= math.floor(p[1] + 0.01):
+            act.blocker, act.aim = tuple(blocker), None
+            act.aim_eye = None                            # (where to aim at it: asked next frame)
+
     def _work(self, act: _Action, snap: Snapshot, p: Vec3) -> Intent | None:
         """Breaking or placing a block for the route (Minecraft): aim, choose the hotbar slot, mine or place.
         None: done (or given up: the walk goes on, and gets stuck and re-plans if it must)."""
@@ -700,7 +729,10 @@ class AutoWalk:
         keys, taps = {'sneak'}, []
         self.state = 'breaking' if act.what == 'break' else 'building'
         if act.what == 'break':
-            turn, tilt, err = self._aim(cam, act.end)
+            self._aim_break(act, cam, p)
+            target = act.blocker or key
+            aimed = ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(target)
+            turn, tilt, err = self._aim(cam, act.aim or act.end)
             if aimed:
                 act.seen = True
                 tool = ex.get('tool_slot', -1)
@@ -710,9 +742,26 @@ class AutoWalk:
                 keys.add('attack')
                 act.held = act.held or self.t
             elif act.held is not None and err < 10.0:
-                return None                               # it was on the crosshair and is gone: broken
+                if act.blocker is None:
+                    return None                           # it was on the crosshair and is gone: broken
+                act.blocker, act.held, act.aim, act.seen = None, None, None, False   # what was in front: now it
+                act.t0 = self.t
             elif not act.seen and err < 2.0 and self.t - act.t0 > 1.5:
-                return None                               # never in sight (already gone, or something else in front)
+                # never in sight: gone already, or hidden. Still there: failed, and planned again (taken as gone,
+                # the walk jumped at the wall it was, again and again, 2026-10-13)
+                there = None
+                if self.probe is not None:
+                    try:
+                        there = self.probe(key)
+                    except Exception:
+                        there = None
+                if there:
+                    self.events.append('work_failed:break')
+                    self.failed_work.append((act.what, dict(act.info)))
+                    if self.precise:
+                        self.events.append('replan')
+                        self.route, self._progress = [], 0
+                return None
             return Intent(frozenset(keys), turn, tuple(taps), tilt)
         into = tuple(info.get('into') or ())
         if ex.get('aim_block') is not None and tuple(ex['aim_block']) == into:

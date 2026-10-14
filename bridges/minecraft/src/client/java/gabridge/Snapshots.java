@@ -119,7 +119,7 @@ final class Snapshots {
 		// the hotbar: what's in each slot, which is selected, and which holds blocks to build with
 		Inventory inv = p.getInventory();
 		JsonArray bar = new JsonArray();
-		int blockSlot = -1, blocks = 0;
+		int blockSlot = -1, blocks = 0, blockRank = 9;
 		for (int i = 0; i < 9; i++) {
 			ItemStack st = inv.getItem(i);
 			String id = st.isEmpty() ? "" : String.valueOf(BuiltInRegistries.ITEM.getKey(st.getItem()));
@@ -127,10 +127,15 @@ final class Snapshots {
 			one.add(id);
 			one.add(st.getCount());
 			bar.add(one);
-			if (st.getItem() instanceof BlockItem && (THROWAWAY.contains(id) || id.endsWith("_planks"))) {
+			// what the walk may build with: dirt and stone first, then planks, then logs (no blocks held but logs,
+			// it found no way up a tree, 2026-10-13)
+			int rank = !(st.getItem() instanceof BlockItem) ? -1 : THROWAWAY.contains(id) ? 0
+					: id.endsWith("_planks") ? 1 : (id.endsWith("_log") || id.endsWith("_stem")) ? 2 : -1;
+			if (rank >= 0) {
 				blocks += st.getCount();
-				if (blockSlot < 0) {
+				if (blockSlot < 0 || rank < blockRank) {
 					blockSlot = i;
+					blockRank = rank;
 				}
 			}
 		}
@@ -208,6 +213,8 @@ final class Snapshots {
 			o.addProperty("face", bh.getDirection().getSerializedName());
 			o.addProperty("block", String.valueOf(BuiltInRegistries.BLOCK.getKey(st.getBlock())));
 			o.addProperty("name", st.getBlock().getName().getString());
+			o.addProperty("replaceable", st.canBeReplaced());   // a block put there takes its place (grass)
+			o.addProperty("solid", !st.getCollisionShape(mc.level, bp).isEmpty());
 			// the hotbar slot that breaks it fastest (-1: none is faster than the hand)
 			Inventory inv = p.getInventory();
 			int best = -1;
@@ -243,6 +250,7 @@ final class Snapshots {
 		}
 		if (e instanceof net.minecraft.world.entity.Mob mob) {
 			o.addProperty("aggressive", mob.isAggressive());
+			o.addProperty("baby", mob.isBaby());          // (a baby zombie: too quick to get away from)
 		}
 		if (e instanceof net.minecraft.world.entity.monster.Creeper c) {
 			o.addProperty("swell", c.getSwelling(0.0f));  // 0..1: about to explode

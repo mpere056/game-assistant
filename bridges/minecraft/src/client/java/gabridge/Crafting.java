@@ -23,6 +23,8 @@ import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.item.crafting.ShapedRecipe;
 import net.minecraft.world.item.crafting.ShapelessRecipe;
+import net.minecraft.world.item.crafting.SmeltingRecipe;
+import net.minecraft.world.inventory.AbstractFurnaceMenu;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -34,7 +36,9 @@ import java.util.concurrent.TimeUnit;
 /**
  * The game's own crafting knowledge, and the open crafting screen (read-only):
  *   {"op":"recipes"}  every shaped and shapeless crafting recipe: {"recipes":[{"id","result","count","w","h",
- *                     "cells":[[item ids that fit],...] (w*h, row by row; [] for an empty cell),"shapeless"}]}
+ *                     "cells":[[item ids that fit],...] (w*h, row by row; [] for an empty cell),"shapeless"}]}; and
+ *                     the furnace's (smelting): one cell, "station":"minecraft:furnace", "time": ticks to cook one;
+ *                     and "fuels": {item id: ticks it burns} (as the game's own furnace reckons them)
  *   {"op":"sources"}  what each block drops, and the least tool it needs for that (the game's loot tables, tried
  *                     with no tool, then each tool): {"sources":{"minecraft:stone":{"drops":["minecraft:cobblestone"],
  *                     "tool":"minecraft:wooden_pickaxe"},...}}
@@ -103,6 +107,16 @@ final class Crafting {
 						r.addProperty("w", cells.size());
 						r.addProperty("h", 1);
 						r.addProperty("shapeless", true);
+					} else if (v instanceof SmeltingRecipe s) {   // the furnace: one in, one out, in its time
+						result = (ItemStackTemplate) field(s, "result");
+						JsonArray cells = new JsonArray();
+						cells.add(ids(s.input()));
+						r.add("cells", cells);
+						r.addProperty("w", 1);
+						r.addProperty("h", 1);
+						r.addProperty("shapeless", true);
+						r.addProperty("station", "minecraft:furnace");
+						r.addProperty("time", s.cookingTime());
 					} else {
 						continue;
 					}
@@ -115,8 +129,36 @@ final class Crafting {
 				}
 			}
 			o.add("recipes", all);
+			o.add("fuels", fuels(server));
 			return o;
 		}).get(10, TimeUnit.SECONDS);
+	}
+
+	/** Each item that burns in a furnace, and for how many ticks (the game's own furnace asked, item by item). */
+	static JsonObject fuels(MinecraftServer server) {
+		JsonObject out = new JsonObject();
+		try {
+			ServerLevel level = server.overworld();
+			net.minecraft.world.level.block.entity.FurnaceBlockEntity f =
+					new net.minecraft.world.level.block.entity.FurnaceBlockEntity(BlockPos.ZERO,
+							net.minecraft.world.level.block.Blocks.FURNACE.defaultBlockState());
+			java.lang.reflect.Method burn = net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity.class
+					.getDeclaredMethod("getBurnDuration", ServerLevel.class, ItemStack.class);
+			burn.setAccessible(true);
+			for (Item item : BuiltInRegistries.ITEM) {
+				ItemStack st = new ItemStack(item);
+				if (!st.has(net.minecraft.core.component.DataComponents.COOKING_FUEL)) {
+					continue;
+				}
+				int ticks = (Integer) burn.invoke(f, level, st);
+				if (ticks > 0) {
+					out.addProperty(id(item), ticks);
+				}
+			}
+		} catch (Exception e) {
+			out.addProperty("error", String.valueOf(e));
+		}
+		return out;
 	}
 
 	static JsonObject sources() throws Exception {
@@ -195,7 +237,9 @@ final class Crafting {
 				one.add(st.isEmpty() ? "" : id(st.getItem()));
 				one.add(st.getCount());
 				String role;
-				if (sl instanceof ResultSlot) {
+				if (menu instanceof AbstractFurnaceMenu && sl.index < 3) {
+					role = sl.index == 0 ? "input" : sl.index == 1 ? "fuel" : "result";   // (the furnace's own)
+				} else if (sl instanceof ResultSlot) {
 					role = "result";
 				} else if (sl.container instanceof CraftingContainer) {
 					role = "grid" + grid++;
@@ -209,6 +253,10 @@ final class Crafting {
 				slots.add(one);
 			}
 			o.add("slots", slots);
+			if (menu instanceof AbstractFurnaceMenu fm) {
+				o.addProperty("cooking", fm.getBurnProgress());   // 0..1 through the one cooking now
+				o.addProperty("lit", fm.isLit());
+			}
 			// where the pointer is (framebuffer pixels), and the slot under it as the game sees it: clicks are
 			// checked against these before they're made (a click outside the window throws the held stack away)
 			Object hovered = field(cs, "hoveredSlot");

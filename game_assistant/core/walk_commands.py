@@ -80,6 +80,11 @@ _AFTER_CLAUSE = re.compile(r"^(?:after|once|when)\b[^,]*?(?:,\s*|\s+(?=(?:please
 _GET = re.compile(r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:go\s+)?(?:get|gather|collect|mine|chop|"
                   r"craft|draft|make|build|fetch|obtain|grab)\b(?:\s+(?:me|us|myself))?\s+(?!to\b|towards?\b|back\b|"
                   r"there\b|over\b|me\s+to\b)(?P<what>.+)$", re.I)
+# Putting a held block down: 'place a crafting table', 'put the furnace down' (the doer's "place a crafting table" wasn't
+# understood, 2026-10-13).
+_PLACE = re.compile(r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:place|put down|set down|put)\s+(?:down\s+)?"
+                    r"(?:a|an|the|my|one|your)?\s*(?P<what>.+?)(?:\s+(?:down|here|somewhere|near me|next to me))*\W*$",
+                    re.I)
 _AMOUNT = re.compile(r"^(?:(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|a couple of|a few|a stack of)|"
                      r"(?P<one>an?|one)|some|more)\s+", re.I)
 ONE_OF = re.compile(r"(pickaxe|axe|shovel|sword|hoe|table|furnace|chest|bed|door|boat|bucket|shield|helmet|"
@@ -237,6 +242,11 @@ class CommandResolver:
                 where = (m.group('dir') or 'ahead').lower()
                 self.last_walk_t = time.monotonic()
                 return WalkAction('walk', f"Exploring {where}!", tuple(point), f'{where} ({m.group("n") or 64})')
+        m = _PLACE.match(rest or t)
+        if m and hasattr(self.adapter, 'match_item'):
+            got = self._put_down(m.group('what'))
+            if got is not None:
+                return got
         m = _GET.match(rest or t)
         if m and hasattr(self.adapter, 'book'):
             got = self._get_item(m.group('what'))
@@ -571,6 +581,20 @@ class CommandResolver:
                 say = f"{name.capitalize()}s come {last[1].count} at a time, so I'll make {made}."
             return WalkAction('task', say, name=item, count=n, steps=steps)
         return WalkAction('none', f"{why or 'I do not know how to get that'}.")
+
+    def _put_down(self, what: str) -> WalkAction | None:
+        """'a crafting table': a task putting a held one down near the player, or None (not an item)."""
+        items = self.adapter.match_item(_FILLER.sub(' ', what.lower()).strip(' .!?'))
+        if not items:
+            return None
+        snap = self.adapter.snapshot()
+        have = (snap.extra or {}).get('inventory') or {}
+        held = [i for i in items if have.get(i, 0) > 0]
+        name = items[0].split(':')[-1].replace('_', ' ')
+        if not held:
+            return WalkAction('none', f"I don't have a {name} to put down.")
+        name = held[0].split(':')[-1].replace('_', ' ')
+        return WalkAction('task', f'Putting the {name} down!', name=held[0], count=1, steps=[('station', held[0])])
 
     def _place_or_character(self, what: str, avoid: str = '') -> WalkAction | None:
         """A character near the player by that name, or a place (or kind of block) by that name. A character

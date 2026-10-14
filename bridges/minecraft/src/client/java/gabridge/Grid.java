@@ -45,6 +45,12 @@ final class Grid {
 			"minecraft:soul_campfire", "minecraft:wither_rose", "minecraft:cobweb",
 			"minecraft:pointed_dripstone");
 
+	/** Not the land: what grows on it (passed over for the ground's height). */
+	static final Set<String> TREE_PARTS = Set.of("minecraft:mushroom_stem", "minecraft:brown_mushroom_block",
+			"minecraft:red_mushroom_block", "minecraft:bamboo", "minecraft:cactus", "minecraft:sugar_cane",
+			"minecraft:bee_nest", "minecraft:cocoa", "minecraft:mangrove_roots", "minecraft:moss_carpet",
+			"minecraft:snow");
+
 	private Grid() {
 	}
 
@@ -166,9 +172,11 @@ final class Grid {
 	/**
 	 * The height of the top of each column in a rectangle ({"op":"heights","min":[x,z],"size":[sx,sz]} ->
 	 * {"heights":[...]} x fastest): the first air above the highest block that stops movement, i.e. where the
-	 * open sky starts (the surface).
+	 * open sky starts (the surface). ground: the land's own height instead, under the trees and plants (logs,
+	 * leaves, big mushrooms, and whatever has nothing to stand on are passed over down to the first other block, or
+	 * water): "take me to the ground" from a tree top was "already on the surface", 2026-10-13.
 	 */
-	static JsonObject heights(Minecraft mc, JsonArray min, JsonArray size) {
+	static JsonObject heights(Minecraft mc, JsonArray min, JsonArray size, boolean ground) {
 		JsonObject o = new JsonObject();
 		ClientLevel level = mc.level;
 		if (level == null || !Bridge.singleplayer(mc)) {
@@ -178,11 +186,28 @@ final class Grid {
 		int x0 = min.get(0).getAsInt(), z0 = min.get(1).getAsInt();
 		int sx = Math.min(size.get(0).getAsInt(), 256), sz = Math.min(size.get(1).getAsInt(), 256);
 		JsonArray h = new JsonArray();
+		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		for (int z = 0; z < sz; z++) {
 			for (int x = 0; x < sx; x++) {
-				h.add(level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, x0 + x, z0 + z));
+				int top = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, x0 + x, z0 + z);
+				if (ground) {
+					int y = top - 1;
+					while (y > level.getMinY()) {
+						pos.set(x0 + x, y, z0 + z);
+						BlockState st = level.getBlockState(pos);
+						if (!st.getFluidState().isEmpty() || !(st.is(BlockTags.LEAVES) || st.is(BlockTags.LOGS)
+								|| TREE_PARTS.contains(String.valueOf(BuiltInRegistries.BLOCK.getKey(st.getBlock())))
+								|| st.getCollisionShape(level, pos).isEmpty())) {
+							break;
+						}
+						y--;
+					}
+					top = y + 1;
+				}
+				h.add(top);
 			}
 		}
+		o.addProperty("ground", ground);
 		o.add("min", min);
 		o.add("size", size);
 		o.add("heights", h);

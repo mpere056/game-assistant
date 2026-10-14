@@ -10,8 +10,13 @@ swing, a fist 0.25 s); a hit lands on what the crosshair is on, within reach (3 
           own reach while the swing charges again: hit and run)
   block   with a shield in the off hand: hold it up while a shooter draws its bow, or a fighter is about to
           hit and the swing isn't charged yet
-  flee    a creeper about to blow (swelling): run straight away till it's done or far; never stand next to one
-  give up on low health (over to the player), a target that can't be got at, or a minute's fight
+  creepers  whichever one is fought: never near one unless to hit it; one swelling (its 1.5 s fuse lit when
+          the player came within 3) is got away from at once, out past 7 (where it calms down; its blast hurts
+          nothing past 6). With a weapon that kills it in a few hits: hit, then away till it has calmed; with
+          nothing (a fist: 20 hits): let it blow up harmlessly (near enough to light it, then held 6.4-6.8 off
+          till it goes)
+  give up on low health (getting away first, from what can be outrun; what can't, a spider, is fought on), a
+          target that can't be got at, or a minute's fight
 
 What each kind of character is (explodes, shoots, how far it reaches) comes from the adapter (combat_profile);
 its state (swelling, aggressive, drawing a bow) from the snapshot's entity extras. The app drives this like the
@@ -31,7 +36,14 @@ TOO_CLOSE = 1.1         # back off when nearer
 CHARGED = 0.95          # attack strength for a full-damage swing
 AFTER_HIT = 0.35        # seconds of backing off after a hit
 ZIGZAG = 0.6            # seconds each way, closing in on a shooter
-CREEPER_RUN = 7.0       # blocks: run from a swelling creeper till this far
+IGNITE = 3.0            # a creeper lights its fuse (1.5 s) with the player this near (feet to feet)...
+CALM = 7.0              # ...and puts it out, going back down, with the player farther than this
+CALM_MARGIN = 0.6       # (out past CALM by this much: the positions read lag a frame)
+BAIT_HOLD = (6.4, 6.8)  # nothing to kill it with: held here while it swells, it blows up hurting nothing (past 6)
+BAIT_IN = 2.6           # ...after coming this near to light it
+KILL_DAMAGE = 4.0       # a weapon hitting this hard (a sword, an axe) kills a creeper in a few hits; less (a fist,
+                        # 1: two creepers hurt the player while it punched at one, 2026-10-13): baited instead
+BLAST_LOOK = 0.15       # seconds ahead each way is tried, getting clear of a blast (the band held is narrow)
 LOW_HEALTH = 0.3        # of max health: over to the player
 FIGHT_TIMEOUT = 60.0
 STUCK_S = 4.0           # seconds out of reach without getting any nearer: jump; twice that: unreachable
@@ -43,7 +55,7 @@ KEEP_MARGIN = 0.6       # kept out of a fighter's reach by this much more...
 CHARGING_MARGIN = 0.5   # ...and this much while the swing charges (it keeps walking at us)
 OTHERS_MARGIN = 0.8
 HIT_AT = 2.7            # step in, charged, to this far from the target's edge (our reach is 3 from the eye)
-CREEPER_KEEP = 3.5      # never nearer a creeper than this, but to hit it
+CREEPER_KEEP = 3.8      # never nearer a creeper than this (it lights at 3), but to hit it
 FOE_RANGE = 8.0         # hostile ones this near count in where to stand
 WALK_SPEED = 4.3        # blocks a second, the player walking (any way)
 MOB_SPEED = 2.3         # ...and a fighter coming at them
@@ -59,6 +71,8 @@ CRIT_FROM = 0.85        # ...and to jump for a critical hit (falling at the top 
 CRIT_WAIT = 0.6         # seconds after a jump to wait for the fall before hitting anyway
 CRIT_EVERY = 0.9        # seconds between jumps
 CRIT_CLEAR = 4.0        # no other hostile one this near for a jump
+IDLE_HALVES = 1.0       # seconds of waiting, ready, that halve the cost of a step into water
+WATER_COST = 1.0        # a step into water, against the rest (out of reaches, nearer the target): slow, not barred
 LAND_PULL = 1.5         # in water: how much more a way onto land counts
 RETREAT_CLEAR = 12.0    # low on health: away till no hostile one is this near...
 RETREAT_S = 8.0         # ...or this long
@@ -100,6 +114,11 @@ def _toward(d, avoid: dict) -> bool:
     return False
 
 
+def _swell(e) -> float:
+    """How far a creeper's fuse has burnt (0: not lit; 1: going off)."""
+    return float((e.extra or {}).get('swell') or 0.0)
+
+
 def _cell_of(d) -> tuple:
     """The neighbouring cell (dx, dz) a direction points at."""
     a = math.atan2(d[1], d[0])
@@ -116,9 +135,11 @@ def _keys_toward(d, cam) -> set:
 
 
 class MeleeFighter:
-    def __init__(self, profile=lambda e: {}, weapon_slot=lambda hotbar: None, terrain=lambda: {}, route_fn=None):
-        self.profile = profile          # adapter.combat_profile(entity) -> {'explodes', 'ranged', 'reach'}
+    def __init__(self, profile=lambda e: {}, weapon_slot=lambda hotbar: None, terrain=lambda: {}, route_fn=None,
+                 weapon_damage=lambda hotbar: None):
+        self.profile = profile          # adapter.combat_profile(entity) -> {'explodes', 'ranged', 'reach', 'fast'}
         self.weapon_slot = weapon_slot  # adapter.weapon_slot(hotbar) -> the slot to fight with
+        self.weapon_damage = weapon_damage   # adapter.weapon_damage(hotbar) -> the best one's damage (None: not known)
         self.terrain = terrain          # adapter.terrain() -> {'in_water', 'avoid': {(dx, dz): what}}
         self.route_fn = route_fn        # adapter.route(start, goal): a way to a target there's no straight way to
         self._ground = ({}, -1e9)
@@ -166,8 +187,10 @@ class MeleeFighter:
         avoid = ground.get('avoid') or {}
         in_water = bool(ground.get('in_water'))
         wet = {c for c, k in avoid.items() if k == 'water'}
-        if in_water:                          # (all round is water: keeping out of it, it never moved, 2026-10-13)
-            avoid = {c: k for c, k in avoid.items() if k != 'water'}
+        # water is slow, not forbidden (lava, drops and walls are): kept out of it, the fighter waited 40 s on
+        # the shore for a zombie in the water, 2026-10-13. Going in costs WATER_COST; out of it, land pulls.
+        avoid = {c: k for c, k in avoid.items() if k != 'water'}
+        self._steered = True
         foes = []
         for o in snap.entities:
             if o.dead or not o.hostile:
@@ -180,7 +203,10 @@ class MeleeFighter:
             if po.get('ranged'):
                 reach = 0.0                                       # (a shooter doesn't hit up close)
             elif po.get('explodes'):
-                reach = CREEPER_KEEP
+                # (stepping in to hit the one fought, calm and charged: in, the hit knocks it back; kept off
+                # while ours charged, it backed off across the map with the creeper after it)
+                reach = CALM + CALM_MARGIN if _swell(o) > 0.02 else 0.0 if (charged and o.id == e.id) \
+                    else CREEPER_KEEP
             else:
                 reach = o.radius + PLAYER_RADIUS + (po.get('reach') or MOB_REACH) + KEEP_MARGIN
                 if not (charged and o.id == e.id):
@@ -236,6 +262,10 @@ class MeleeFighter:
                 score += 0.05                                     # (standing still, all else equal)
             if in_water:
                 score += 0.0 if (m == 0 or c in wet) else LAND_PULL   # out onto land
+            elif m and c in wet:
+                # in: only when it pays, and more readily the longer we've been ready to hit with nothing in
+                # reach (waiting on the shore for one that stays in the water is the slow way)
+                score -= WATER_COST / (1.0 + self.idle_ready / IDLE_HALVES)
             scored.append((score, c))
         # the best way the keys really go (8 ways round the camera, not the world: up to 22 degrees off)
         best = None
@@ -245,7 +275,8 @@ class MeleeFighter:
                 break
         keys = {'jump'} if in_water else set()   # (afloat)
         d = _flat(p, e.pos)
-        self.state = ('backing' if just_hit else 'closing' if charged else 'spacing') +             (' (others near)' if len(foes) > 1 else '')
+        self.state = ('backing' if just_hit else 'closing' if charged else 'spacing') + \
+            (' (others near)' if len(foes) > 1 else '')
         if best is None or best == (0, 0):
             self.state = 'waiting' + (' (others near)' if len(foes) > 1 else '')
             return keys
@@ -308,6 +339,9 @@ class MeleeFighter:
         foes = [o for o in snap.entities if o.hostile and not o.dead and _flat(p, o.pos) < RETREAT_CLEAR
                 and abs(o.pos[1] - p[1]) < 4.0]
         if not foes or self.t - self.retreating > RETREAT_S:
+            if any(_flat(p, o.pos) < 3.0 and (o.extra or {}).get('aggressive', False) for o in foes):
+                self.retreating, self.stand = None, True     # still on the player: fought on, not handed over
+                return Intent()
             self.events.append('low_health')
             self.stop()
             return Intent()
@@ -337,6 +371,67 @@ class MeleeFighter:
             keys.add('jump')
         return Intent(frozenset(keys), turn, (), tilt)
 
+    def _weak(self, snap) -> bool:
+        """Nothing held that kills a creeper in a few hits (not known: a weapon is assumed)."""
+        dmg = self.weapon_damage((snap.extra or {}).get('hotbar') or [])
+        return dmg is not None and dmg < KILL_DAMAGE
+
+    def _blast(self, snap, e) -> Intent | None:
+        """A creeper near with its fuse lit (whichever one is fought): away from it, out past CALM, before
+        anything else (when it's the target and there's nothing to kill it with: held BAIT_HOLD off till it blows
+        up). The way kept clear of every lit one, never into lava, a drop or a wall, not near an unlit one, a
+        little away from the other fighters' reach. None: no creeper near is lit. (The fighter ran 'back' from
+        the camera, which had turned to a spider: not away from the creeper, 2026-10-13.)"""
+        p = snap.player.pos
+        lit, unlit = [], []
+        for o in snap.entities:
+            if o.dead or not (self.profile(o) or {}).get('explodes'):
+                continue
+            d = math.dist(o.pos, p)
+            if _swell(o) > 0.02 and d < CALM + CALM_MARGIN:
+                lit.append(o)
+            elif d < 12.0:
+                unlit.append(o)
+        if not lit:
+            return None
+        bait = len(lit) == 1 and lit[0].id == e.id and self._weak(snap)
+        lo, hi = BAIT_HOLD if bait else (CALM + CALM_MARGIN, math.inf)
+        self._ground_now(p)
+        ground = self._ground[0] or {}
+        avoid = {c: k for c, k in (ground.get('avoid') or {}).items() if k != 'water'}
+        others = [o for o in snap.entities if o.hostile and not o.dead and o not in lit and o not in unlit
+                  and (o.extra or {}).get('aggressive', False) and _flat(p, o.pos) < FOE_RANGE]
+        best = None
+        for c in [(0.0, 0.0)] + [(math.cos(math.radians(a)), math.sin(math.radians(a))) for a in range(0, 360, 30)]:
+            if c != (0.0, 0.0) and _toward(c, avoid):
+                continue
+            q = (p[0] + c[0] * WALK_SPEED * BLAST_LOOK, p[1], p[2] + c[1] * WALK_SPEED * BLAST_LOOK)
+            score = 0.0
+            for o in lit:
+                d = math.dist(q, o.pos)
+                score -= max(0.0, lo - d) * 10.0 + (max(0.0, d - hi) if bait else 0.0)
+            for o in unlit:
+                score -= max(0.0, CREEPER_KEEP - math.dist(q, o.pos)) * 3.0
+            for o in others:
+                score -= max(0.0, 2.5 - _flat(q, o.pos)) * 0.5
+            if c == (0.0, 0.0):
+                score += 0.01
+            if best is None or score > best[0]:
+                best = (score, c)
+        near = min(lit, key=lambda o: math.dist(o.pos, p))
+        turn, tilt, _err = aim_at(snap.camera, (near.pos[0], near.pos[1] + 1.0, near.pos[2]), 0.5)
+        self.state = 'baiting a creeper' if bait else 'clear of a creeper'
+        keys = set() if best is None or best[1] == (0.0, 0.0) else _keys_toward(best[1], snap.camera)
+        if ground.get('in_water'):
+            keys.add('jump')
+        return Intent(frozenset(keys), turn, (), tilt)
+
+    def _outrun(self, snap) -> bool:
+        """Whether the hostile ones near can be got away from (not a spider: it's as quick as a sprint)."""
+        p = snap.player.pos
+        return not any(o.hostile and not o.dead and _flat(p, o.pos) < RETREAT_CLEAR
+                       and (self.profile(o) or {}).get('fast') for o in snap.entities)
+
     def _crit_ok(self, snap, e, prof, in_water: bool) -> bool:
         """Whether to jump for critical hits: on land, not at a shooter or a creeper, nobody else hostile within
         CRIT_CLEAR (a jump can't be steered away from them)."""
@@ -363,7 +458,7 @@ class MeleeFighter:
         lake, 2026-10-13)."""
         self._ground_now()
         ground = self._ground[0]
-        avoid = ground.get('avoid') or {}
+        avoid = {c: k for c, k in (ground.get('avoid') or {}).items() if k != 'water'}   # (water: slow, not barred)
         moves = {'forward', 'back', 'left', 'right'}
         if ground.get('in_water'):
             keys.add('jump')
@@ -401,13 +496,14 @@ class MeleeFighter:
         self.zig_at = self.t
         self.seen_hurt = False
         self.armed = False
-        self.fleeing = False
         self.retreating = None       # low on health: getting away (since)
+        self.stand = False           # low on health, but fought on (what's near can't be outrun)
         self.route = None            # a way to the target when there's no straight one: [cells]
         self.route_for = None        # (where the target was when it was planned, when)
         self._planning = False
         self._blocked_since = None
         self.jumped_at = -1e9
+        self.idle_ready = 0.0        # seconds ready to hit with the target out of reach (lately)
         self.primary = None          # the one asked for, while one that came at us is fought first
 
     def stop(self, why: str = '') -> None:
@@ -431,12 +527,30 @@ class MeleeFighter:
                 self.target_id, self.primary, self.seen_hurt = self.primary, None, False
                 self.in_reach_at, self.nearest = self.t, math.inf
                 return Intent()
+            # another one on the player: it next, not stood still (a creeper blew up, and a spider bit the player
+            # to death while nothing fought it, 2026-10-13)
+            p = pl.pos
+            nxt = min((x for x in snap.entities if x.hostile and not x.dead and x.id != self.target_id
+                       and x.id not in self.unreachable and (x.extra or {}).get('aggressive', False)
+                       and _flat(p, x.pos) < SWITCH_NEAR and abs(x.pos[1] - p[1]) < 2.5),
+                      key=lambda x: _flat(p, x.pos), default=None)
+            if nxt is not None:
+                self.events.append('next_target')
+                self.target_id, self.name, self.seen_hurt = nxt.id, nxt.name, False
+                self.in_reach_at, self.nearest, self.started = self.t, math.inf, self.t
+                return Intent()
             if e is not None or self.seen_hurt:
                 self.events.append('won')
             else:
                 self.events.append('target_gone')
             self.stop()
             return Intent()
+        # a lit creeper near (whichever one is fought): away from it before anything else
+        blast = self._blast(snap, e)
+        if blast is not None:
+            self.debug = {'target': e.id, 'across': round(_flat(pl.pos, e.pos) - e.radius, 2),
+                          'swell': (e.extra or {}).get('swell')}
+            return blast
         # another one closing in on the player, nearer than the target: it first (self-defence; then back)
         p0 = pl.pos
         d_t = _flat(p0, e.pos)
@@ -453,8 +567,11 @@ class MeleeFighter:
         if e.health is not None and e.max_health and e.health < e.max_health:
             self.seen_hurt = True
         if pl.health is not None and pl.max_health and pl.health <= pl.max_health * LOW_HEALTH \
-                and not self.retreating:
-            self.retreating = self.t                     # (handed over standing still, it died: 2026-10-13)
+                and not self.retreating and not self.stand:
+            if self._outrun(snap):
+                self.retreating = self.t                 # (handed over standing still, it died: 2026-10-13)
+            else:
+                self.stand = True                        # (a spider: backing off from it, it bit till death)
         if self.retreating:
             return self._retreat(snap)
         if self.t - self.started > FIGHT_TIMEOUT:
@@ -480,22 +597,19 @@ class MeleeFighter:
         self.debug = {'target': e.id, 'across': round(across, 2), 'reach': round(reach_d, 2),
                       'strength': round(strength or 0, 2), 'on_target': on_target, 'aim_err': round(err, 1),
                       'swell': st.get('swell'), 'aggressive': st.get('aggressive'), 'using': st.get('using_item')}
-        # a creeper about to blow: run
-        if prof.get('explodes') and (st.get('swell') or 0) > 0.05:
-            self.fleeing = True                          # (till far enough: it calms down as one gets away)
-        if self.fleeing:
-            if across > CREEPER_RUN:
-                self.fleeing = False
-            else:
-                self.state = 'fleeing'
-                return Intent(frozenset({'back', 'sprint'}), turn, (), tilt)
+        # a creeper with nothing to kill it with: near enough to light it (then _blast holds off till it blows)
+        if prof.get('explodes') and self._weak(snap) and _swell(e) <= 0.02:
+            self.state = 'lighting a creeper'
+            keys = set() if math.dist(p, e.pos) < BAIT_IN else {'forward'}
+            return Intent(frozenset(self._footing(keys, cam, p, e)), turn, tuple(taps), tilt)
         # hit: charged, on it, in reach; a critical hit (falling: half as much again) when the jump's under way
         self._ground_now(p)
         in_water = bool((self._ground[0] or {}).get('in_water'))
         on_ground = ex.get('on_ground', True)
         falling = not on_ground and (ex.get('vy') or 0.0) < -0.05
         crit_ok = self._crit_ok(snap, e, prof, in_water)
-        if strength >= CHARGED and on_target and reach_d <= REACH and err < 12.0:
+        if strength >= CHARGED and on_target and reach_d <= REACH and err < 12.0 \
+                and (not prof.get('explodes') or _swell(e) <= 0.02):
             if falling or not crit_ok or self.t - self.jumped_at > CRIT_WAIT:
                 taps.append('attack')
                 self.hit_at = self.t
@@ -507,7 +621,12 @@ class MeleeFighter:
             self.jumped_at = self.t
         # move: keep out of its reach while the swing charges; step in to the edge of ours when charged (from a
         # little before: it arrives as the swing is ready)
-        moves = self._spacing(snap, e, prof, strength >= STEP_IN_FROM or 'attack' in taps, across)
+        if strength >= CHARGED and reach_d > REACH and 'attack' not in taps:
+            self.idle_ready += dt                        # ready to hit, nothing in reach: time going to waste
+        else:
+            self.idle_ready = max(0.0, self.idle_ready - dt * 2.0)
+        calm = not prof.get('explodes') or _swell(e) <= 0.02
+        moves = self._spacing(snap, e, prof, (strength >= STEP_IN_FROM or 'attack' in taps) and calm, across)
         # no straight way in (a wall, a drop, a step it can't take) while out of reach: a route to it
         out_of_reach = reach_d > REACH + 0.3 and not prof.get('explodes')
         if out_of_reach and (self.state.startswith(('waiting', 'closing')) and not moves & {'forward', 'left', 'right'}
@@ -535,7 +654,7 @@ class MeleeFighter:
                 self.events.append('unreachable')
                 self.stop()
                 return Intent()
-        keys = self._footing(keys, cam, p, e) if not self._steered else keys
+        keys = self._footing(keys, cam, p, e)
         # a shield up against arrows and a hit coming in, while the swing isn't ready
         if ex.get('offhand') in SHIELDS and 'attack' not in taps:
             shooting = prof.get('ranged') and st.get('using_item') and across > 2.5

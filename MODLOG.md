@@ -1672,3 +1672,254 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   first, pillars, bridges), so "go there" is one order however rough the way.
 - Tests: jumps of 1, 2 (sprint) and 3 (sprint, run-up), none over 4; up 1 over 1; a simulated sprint jump over
   a 2-block gap (jumped just before the edge, landed, arrived). Not yet tried in the game.
+
+## 2026-10-13: a zombie in the water (user): the fighter waited on the shore
+- Merged parkour (PR #21).
+- The fight went well on land; when the zombie went into the water, the fighter planned a route to it (through
+  the water) and then held still: the footing check barred every step into water ("routing (held: hazard)", 40 s).
+  The user: land is preferred, but not when it's much slower; commands done as efficiently as they can be.
+- Water is now a cost in fights, not a bar (lava, drops and walls still are): a step into it costs 1, halved
+  for every second spent ready to hit with nothing in reach (waiting on the shore is the slow way); a planned
+  route through water is followed. Walking routes weigh swimming at its time (2.2 a block, was 4: half pace).
+- Tests: in after one that stays in the water (hits, never unreachable); land fights unchanged (none taken with
+  one to four zombies). Not yet tried in the game.
+
+## 2026-10-13: "take me to the top of one of these trees" (user); keeping safe on every order
+- The doer chose the top of a trunk (-7 68 -13, 7 up); the walk found no way (no blocks held to pillar with) but
+  never gave up: it planned the same few blocks again and again, and the doer, waiting on it, said "Still on the
+  way: 4 blocks across, 7 up" for minutes. The user: get dirt to build up with, or another way; think it through.
+- A walk getting no nearer its goal (nor digging, building or jumping) for 20 s gives up. When a route finds no
+  way and few blocks are held, the planner tries again as if 64 were held: if that works, Navi says how many it
+  would take ("I'd need about 7 blocks to build my way there"), which the doer hears. A walk from a simple order
+  (the rules') that finds no way goes to the doer to think through. The doer is told the ways round a walk with no
+  way: blocks to pillar or bridge with (mine some dirt first; the walk uses them itself), a tool, a way round.
+  The same progress line isn't said twice running.
+- The user: by default, keep safe from being attacked. On any walk (an order's, a task's, the doer's), a hostile
+  one after the player within 6 blocks (or nearer when the player was just hurt) is fought off first by the
+  fighter (out of its reach), then the walk goes on (the adapter's defend_on_walks; Minecraft's on).
+- The user asked for fuller logs: runtime/doer-<date>.jsonl, written as it happens (each turn's thinking text and
+  calls, each result); the walk log's rows carry the planner's route_note (the goal kind, the box, there / part
+  / no way, nodes searched, blocks held, blocks it would take).
+- Tests pass. Not yet tried in the game.
+
+## 2026-10-13: "take me up the tallest nearest tree ... put me on top of it" (user): stuck in a loop
+- The doer meant well ("No way up yet and nothing in my hands, so I'll chop some birch logs for blocks to build up
+  with!") but the task chopping logs got 2 and then walked for 20 s at each higher log, three times ("no way":
+  above the head, no block to stand on), and logs weren't blocks to build with for the walk anyway. The user: place
+  blocks under the character, craft the logs into planks for more, walk up a hill and build across, parkour...
+  (the new doer and walk logs showed all of it).
+- Mining: a block to mine is reached from anywhere within reach ('mine' goals): beside it from one below to three
+  above the feet, or under it in its own column 2 to 4 up (a trunk mined from the bottom), the line from the eyes
+  clear. Building blocks: dirt and stone first, then planks, then logs (the bridge: block_slot and the count;
+  version 12). A route with no way at all gives up at once (not 20 s of the same). Coordinate orders are exact
+  goals (that block, or one beside it, at that height: on the top, not 2 below in the leaves). The survey lists the
+  trees near (each one's foot, height and where to stand on its top), so "the tallest nearest tree" is a lookup;
+  the doer knows logs make planks, four each, to build with.
+- Live: the survey listed five trees (heights 3 to 7). Tests: mining within reach (beside and from under a trunk;
+  not past a log in the way, nor 5 up); up onto a tree top through its leaves with 8 blocks (pillared; none
+  held: no way). Not yet tried in the game.
+
+## 2026-10-13: up the tallest tree (user: it got there, then trouble); from the new logs
+- It reached the top of a 7-high birch (pillared with planks it had crafted, broke through the leaves). Then:
+  "the tallest tree within 50 blocks" was answered "you're already on the tallest": the survey's trees came from a
+  block search that stops at the first ring with anything in it (8 blocks out). Now find_blocks can search a whole
+  radius (bridge version 13); the survey lists the trees within trees_within (the doer chooses, up to 64), the
+  nearest and the tallest.
+- Going back to the birch with no blocks left: the walk found no way and stopped, but the doer read the outcome the
+  moment the walk ended and missed "I can't get through here" and the blocks it would take; it waited 30 s and
+  tried the same again. The doer now gives a step 0.8 s after it ends for what's said about it.
+- "Chop 3 logs" (the old code, before mining within reach) ran 6 minutes and timed out while the player was in
+  another window; "I couldn't open the crafting screen" for planks, the same (the game out of focus: no E reaches
+  it). A task's clock now stops while the game isn't in front or is paused.
+- Live: 12 trees round the player, the tallest 10 high (the old bridge still). Tests pass. Not yet tried in game.
+
+## 2026-10-13: "the top of the tallest tree within 50 blocks" (user): no way up, a crash, the same tries again
+- The doer found the tallest (an 11-high oak) and sent the walk to its top; with no blocks held the walk found no
+  way, and the doer tried the same twice more ("I can't get through here"), then a 10-high one. One try had 2
+  blocks (from leaves broken): the planner made a pillar of more than 2 (it doesn't count blocks as it places them)
+  and ran out half way up. Then "Auto-walk error: IndexError": work that failed cleared the route to plan again,
+  and the walk read it in the same frame.
+- Fixes: a cleared route is never read (no crash). A plan placing more blocks than are held isn't followed: the
+  walk stops at once and says how many it takes. And then it gets them itself, as with a tool: the quickest of
+  dirt dug near, planks from logs held or chopped, cobblestone (core/crafting.py plans each; live, with nothing
+  held: 4 logs into 16 planks, about 40 s, against 14 dirt, about 85 s), 4 over, then on with the walk ("I need
+  about 10 blocks to build my way there: getting oak planks first!"); once per goal. The check "with blocks, would
+  there be a way" gets 1.5 s (0.5 found nothing for an 11-high climb).
+- Two more lines joined by the shell (the test caught them) put right. Tests pass. Not yet tried in the game.
+
+## 2026-10-13: up a tree "much more efficiently" (user): it tunnelled across the canopy instead of climbing
+- The log: on a hill beside the tree at y104, the walk broke its way straight across through the leaves, two blocks
+  at a time (about 18, two of them logs at 3.5 s each by hand), placed one block, tunnelled on at y105, then dug 4
+  down to the target: the trunk's top, inside the leaves, 2 below the top of the tree.
+- Why: in the planner, a step straight on breaking what's in the way ended the moves for that side, so stepping up
+  one (break ahead-up and over the head, jump) was never weighed wherever a tunnel straight on was possible. Now
+  all of them are, and the cheapest wins. Breaking costs more too (8 ticks a block over its time: about 0.7 s a
+  leaf in the log, most of it aiming and the next step), and the survey's "stand on top at" for a tree is the
+  top of its leaves, not of its trunk.
+- Tests: a canopy 3 deep reached from the ground in 3 breaks up a staircase (was 8 across at the bottom, and not
+  there); out from inside leaves 6 deep, a staircase turning as it needs (no blocks) or partly pillared (blocks),
+  always up. Tests pass. Not yet tried in the game.
+
+## 2026-10-13: "take me to the ground, then walk 50 blocks on top of the nearest hills" (user): wrong on both
+- On a tree top, "the ground" became "the surface" (the open sky over the head), which a tree top has: "Here we
+  are: the surface!", "You're already on the ground". And "the nearest hills" were looked up as a biome by name:
+  the Windswept Hills, 1,946 blocks off, with hills (unnamed) beside the player.
+- The ground: the bridge's heights (version 14) can give the land's own height, under the trees ("ground": logs,
+  leaves, big mushrooms, bamboo and anything with nothing to stand on passed over, down to the first other
+  block or water). "The ground" ("get me down", "off this tree") is a goal of its own: on the land anywhere
+  round the player (a slab or path block on it counts; a stump doesn't), the quickest way down (or up out of a
+  cave). Through an oak's leaves: 3 quick breaks and a 3-block drop; where the lowest leaves are too high to
+  drop from safely, down the trunk instead. The state the doer reads says where the player stands: on the
+  ground, n blocks above it (up a tree or on something built), or n below it (underground).
+- The land (core/terrain.py, for any game that can give the ground's height): from a height map round the
+  player (96 blocks; the doer can ask up to 120), the hills: tops that are the highest for about 28 blocks
+  round and rise 6 or more above the land round them; each one's top, how much it rises, the nearest point on
+  its top, and a line along the top (from the top each way, a step at a time to the highest ground ahead,
+  while in the upper half of the hill), points about 8 blocks apart to 'go to' in turn; one ridge is one hill.
+  And the highest ground each way. In the survey as "land". Live (sky heights, the old bridge): a hill 33 high
+  east, its top's nearest point 27 blocks off, 112 blocks along; read and worked out in 0.03 s.
+- The doer is told: biomes are named regions, often far; the land near, named or not, is in the survey's land
+  ("the nearest hills": the nearest high ground there, unless a region is named). And when to ask first (the
+  user liked "it's night with zombies about: head there anyway, or wait until morning?"): only when doing it
+  brings a risk or cost the player may not expect; otherwise just do it.
+- Tests: the terrain (flat land: none; a ridge: one hill, a line along it end to end; the nearer first; each
+  way; unknown columns), down from a tree top to the ground (and there at once when on it), the survey's land.
+  Tests pass. The bridge builds; installing it needs Minecraft closed (Build-MinecraftBridge.bat).
+
+## 2026-10-13: two creepers hurt the player, then a spider killed them while nothing fought it (user)
+- The combat log: the walk (exploring) stopped for a creeper coming at the player and fought it with a fist (an
+  oak log held: one hit landed in 18 s, of 20 health). Lit, it was run from ('back', 'sprint', the camera on it);
+  then a spider came nearer and became the target, and the 'fleeing' switch stayed on: 'back' was now away
+  from the spider, with the camera turned to it, not away from the creeper. The player went on walking backwards
+  from the spider, 0.7 blocks off, never swinging, till they died (health and the creepers near weren't logged).
+- Creepers now (core/melee.py), whichever one is fought: a lit one (its swell: the fuse burns 1.5 s from the
+  player coming within 3) within 7.6 is got away from before anything else, the way that keeps clear of every
+  lit one (its blast hurts nothing past 6; past 7 it goes back down), not into lava, a drop or a wall, not near
+  an unlit one. With a weapon that kills one in a few hits (a sword or an axe: the adapter's weapon_damage), hit
+  when it's calm, then away till it has gone back down; with less (a fist, 1): lit on purpose (within 2.6) and
+  held 6.4-6.8 off till it blows up, harmlessly. An unlit one is kept 3.8 off unless it's being hit.
+- When the one fought is gone (blown up, killed) and another is after the player within 8, it's fought next
+  ('next_target'), not stood still. Low on health, the fighter gets away only from what can be outrun: a spider,
+  cave spider, wolf, enderman, baby zombie and the like ('fast' in the adapter's profile; babies from the bridge,
+  version 15) are fought on; after getting away, one still on the player is fought, not handed over.
+- The combat log has the player's health and the hostile ones within 12 (kind, distance, swell).
+- Tests, by the game's rules (a Field: creepers light within 3, stand still while lit, go back down past 7, blow
+  up at 30 ticks, the blast as the game reckons it; spiders at 5 blocks a second): a fist lets a creeper blow up
+  hurting nothing; a sword kills one, never blown up; the case here (a lit creeper beside the player, another
+  near, a spider coming, a fist): no blast damage, the spider fought and killed; a spider on low health fought,
+  not backed off from. Two more lines joined by the shell, and one in the tests, put right; the test for them
+  now catches more kinds. Tests pass. The bridge is built and installed (restart Minecraft). Not tried in game.
+
+## 2026-10-13: "still a bunch of issues" (user): the logs of a stone pickaxe from nothing (158 s) and a walk order
+- The pickaxe took 158 s, about 75 of them lost. Back to the crafting table from the pit dug for stone (5 deep, 2
+  wide), the walk went round the same cycle for a minute: two breaks, a jump at a wall, plan again, the same two
+  breaks. The first break of each never had its block on the crosshair (no attack in the log): aimed at the
+  block's middle, it was hidden behind another, and after 1.5 s 'never in sight' was taken as already broken. And
+  the first log of the tree, beside the player at their feet: its middle was behind the log above it, seen from
+  the eye; skipped after 2 s as "could not mine it" (a log left floating).
+- Now, breaking for a route and mining for a task aim at a point on the block that's in sight: the adapter's
+  aim_point casts rays (the bridge's, through the game's own shapes) at 5 points on each face turned toward the
+  eye, within reach, and takes the nearest that the ray reaches first; asked as the work starts and when the eye
+  has moved. Hidden altogether: the block in front is broken first (never one below the feet). Never in sight and
+  still there (asked of the game): failed work, planned again, not walked into as if gone.
+- "Walk around 50 meters around this hill": the doer's "walk a loop of about 50 blocks round the base of this
+  hill" wasn't understood and it explored 50 north instead. The survey's land now says where the player stands:
+  how much the spot rises above the land round it, and on a rise, its top and a loop round its foot (from the
+  top out 16 ways to a quarter of the way up, in order); each hill has its loop too. The doer is told a way
+  through several points is one order ("go to x y z, then go to x y z, ...": it splits into one after another).
+- Tests: the walk breaks the block in front of a hidden one first, then it; one never seen but still there is
+  failed work and planned again; a log under another is aimed at on its near side, and a hidden one gives the
+  block in front; the rise stood on, with a loop round its foot. Tests pass. Not yet tried in the game (it was
+  closed); no new bridge needed.
+
+## 2026-10-13: "Make me a stone pickaxe" (user): "I can't find a crafting table" with one in the hotbar
+- In a flower forest: the logs, planks and a table crafted, then the table to put down: 0.2 s later the step was
+  taken as done and the sticks crafted; the pickaxe then found no table (it was still held). The spot chosen had a
+  flower in it (no collision: open to the grid), and "it's there" was the crosshair on that spot, which the
+  flower filled.
+- Now it's there when one fewer is held, or the crosshair is on it in that spot by its id (the snapshot gives the
+  aimed block's id: aim_id); a plant in the spot (the crosshair on it there, something else) is knocked out first.
+- Test: a flower in the spot is knocked out and the table really put down. Tests pass. Not yet tried in game.
+
+## 2026-10-13: a stone pickaxe made, with "a bunch of issues" (user): a table it couldn't reach, mined and put back, nowhere to put it
+- The log: the table was put down by the tree; the stone dug 5 down beside it; then "craft stone pickaxe" opened at
+  once, the table within 4.3 straight-line, but behind the pit's wall: 9 s, "I couldn't open the crafting screen",
+  twice. The doer then ordered "craft a crafting table": the plan's cheapest way was to mine the one standing there.
+  Then "I can't find a spot to put the crafting table" twice on open plains (stood in a dip where dirt had been dug,
+  every cell round the feet ground; animals about), till it walked 6 blocks on. "Place a crafting table" wasn't an
+  order it knew.
+- Reach (root): "can reach and use (or mine) a block from here" is now one thing everywhere, as the game reckons it:
+  within 4.5 of the eye to a point on a face turned toward it (its middle or near a corner), nothing in between but
+  what the body can be in (blocks.sees). The planner's goal for mining and using is that (its old rules, beside it from
+  1 below to 3 above, were wrong both ways: a block 5 up beside the player is in reach; a table behind a wall wasn't
+  out of it); a station is used where it stands only when a point on it is in sight from the eye (the adapter's rays),
+  else walked to where it is (in reach, in sight); aimed at that point; and if that fails it says where the table is
+  and why.
+- Built things (root): a thing that has a recipe is made, not taken off the world where the block is the thing itself
+  (a table, planks, a furnace: someone's build); what the land gives (logs, stone, ores) is gathered.
+- Putting down (root): any open cell within reach (not the player's body, not where a creature stands: their cells
+  from their size), beside a solid block whose face toward it the eye can see (by the game's rays); on the ground near
+  the feet first. A new order puts a held block down ("place a crafting table").
+- The doer is told: use what's there (gone to and used, never made again or taken apart).
+- Tests: the reach rule both ways (in sight 3 and 5 up; 7 up out of reach; a wall between), a table up beside a pit
+  climbed to; built things not taken apart; a spot found from a dip with a sheep beside; "place a crafting table".
+  Tests pass. Not yet tried in game (the world was closed).
+
+## 2026-10-13: "still getting stuck with placing the crafting table" (user, a grassy hill): four times 10 s, nothing clicked
+- The task log: each try 'aim', then 10 s, "I couldn't place the crafting table"; never one click. The spot was chosen
+  with rays through the blocks' collision shapes, which grass hasn't got: "in sight". But the crosshair stops on
+  the blocks' outlines, and grass has one: aimed at the ground's top, it was on grass (crouched, the eye 0.35 lower,
+  the line down to the spot passes through the grass in front), neither the block below nor the spot, and nothing
+  was ever clicked.
+- Root: what's "in sight" is now what the crosshair would be on. The bridge's rays (version 16) can go through the
+  outlines (as the crosshair) and say what they stop on: its cell, whether a block put there takes its place
+  (replaceable: grass) and whether it's solid; the snapshot says the same of what the crosshair is on. Aiming at a
+  block to break or mine it and choosing a spot to put one down use those rays; the spot from the eye as it will be
+  (crouched, 1.27).
+- Putting down goes by what the crosshair is on, as the game does: the block below's face, put it there; grass in
+  the spot itself, put over it (it takes the grass's place, no need to knock it out); a plant in the way, knocked out
+  with a click. A spot it can't put it in within 5 s (a creature stepped in) is left for another, three in all.
+- Tests: a flower in the spot; grass in the way; grass in the spot put over; a spot in grass all round, the crosshair
+  landing on its grass or face. Tests pass. The bridge is built and installed (restart Minecraft). Not tried in game.
+
+## 2026-10-13: "doesn't realize how to reach the crafting table from certain angles"; idle while mining down (user)
+- The table: in a jungle, the stone dug down beside it, the last cobblestone mined from a hole 2 deep; the walk to the
+  table arrived at once (the planner: in reach and in sight) and the game's rays said not in sight: failed. The
+  planner looked at points 0.15 in from a face's edges, from the cell's middle: the line to the table's top corner
+  cleared the grass block's corner by 0.03; from where the player stood (0.06 off the middle) it didn't.
+- Mining down (25 s for 5 blocks): 3 s standing before the first break and 10 s at the bottom. The planner ran out
+  of time (8192 nodes, 1.5 s) each time: from the bottom of the shaft it planned, the eye was "in" the dirt the
+  plan itself dug (the grid as read before), so the stone was never in sight, and the search went on across the
+  whole surface. Its best part-way route ended in the stone itself: dug through, then waiting at the end of a route
+  for the rest, planned slowly, and "could not mine it" (gone).
+- Root fixes: in sight from a cell counts its own two cells as open (the body is there); the points looked at are
+  0.3 in from the edges (a line only grazing a corner isn't one); the line walked cell by cell (a voxel walk, each
+  cell once) and each cell's answer kept for the plan; the block to mine or use is never broken on the way; toward a
+  block in the ground each block up or down counts as three blocks' walk in the search's estimate (it's dug). The
+  live jungle ground: down to stones 6-10 below in 0.1-0.6 s (were: not found in 1.6 s).
+- And if the table still isn't in sight where the walk ends, it's walked to right beside it before saying why.
+- Tests: down to a stone quickly, never through it; a line that only grazes a block isn't in sight (out of the hole
+  first). Tests pass. Not yet tried in game.
+
+## 2026-10-13: "get me an iron pickaxe" (user, a snowy grove): no way to plan it; stuck freezing in powder snow
+- The doer: "I can't find a way to get iron pickaxe near here" (twice): iron ingots are smelted in a furnace, and
+  the planner knew crafting and gathering only. It went on to "mine 3 iron ore": one mined, then the walk stood in
+  powder snow (the planner had it as passable: wading, a little slower) going forward and jumping for 30 s, four
+  routes planned and given up, health 20 to 12.5 (freezing). Then "I can't find any more iron ore near here". And
+  where_is("iron_ore") was "no block called iron_ore" (the game's own id).
+- Smelting: the bridge (version 17) gives the furnace's recipes (one in, one out, the ticks to cook it), every fuel
+  and how long it burns (the game's own furnace asked, item by item: in 26.3 it depends on the item), and the
+  furnace screen's slots (input, fuel, result) and whether it's lit. The planner (core/crafting.py) has stations by
+  item (a crafting table for the 3x3 grid, a furnace for what's cooked; each asked once whether one's near) and
+  smelt steps with their fuel: what's held first; else the cheapest of what's held, what the land gives near (logs,
+  coal) and what's made from what's held (planks) (by burn time alone it only ever tried lava, coal blocks and
+  boats). An iron pickaxe holding a stone one: 8 cobblestone, a furnace crafted and put down, 3 raw iron, 2 logs,
+  smelt, craft. The task (core/tasks.py): to the furnace (in reach and in sight, as the crafting table), open it,
+  anything else in it out, exactly so many in and so much fuel, then wait, taking what's done out as it comes, till
+  there's enough; out of fuel or too long: says so. Getting to a station is one way for both now.
+- Powder snow: not passable and not a soft landing any more: never walked, stood or fallen into; broken to get
+  through; stood in already, the way out is planned from there. The survey names it.
+- Names: the game's ids are understood (iron_ore, minecraft:iron_ore) for places and items.
+- Tests: an iron pickaxe plan (smelting, fuel held first); a furnace worked by the game's rules (exactly 3 in, 2 logs,
+  3 ingots out); never into powder snow (a jump over it), out of it when sunk in it. Tests pass. The bridge is built
+  and installed (restart Minecraft). Not tried in the game.
