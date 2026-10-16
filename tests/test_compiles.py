@@ -33,7 +33,8 @@ class CompileTests(unittest.TestCase):
     def test_no_joined_continuation_lines(self):
         """A backslash-newline lost in shell escaping joins two lines with a run of spaces (still valid Python,
         hard to read): six of them, 2026-10-13; three more going on with '+' or '(', in the tests too, later."""
-        joined = re.compile(r"\S {12,}((and|or|if|else)\b|\+ )|[+\-*/] {12,}\S")
+        # (and two strings run together: "...round '      f'it is...", 2026-10-15)
+        joined = re.compile(r"\S {12,}((and|or|if|else)\b|\+ )|[+\-*/] {12,}\S|['\"] {12,}[rfb]?['\"]")
         bad = []
         for path in sorted([*(ROOT / 'game_assistant').rglob('*.py'), *(ROOT / 'tests').rglob('*.py')]):
             for i, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):

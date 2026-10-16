@@ -266,3 +266,19 @@ class PlaceSpotTests(unittest.TestCase):
         self.assertEqual((face, into[1]), ('up', 62))
         sight = fake_sight(solid, grass)([((0.5, 62 + 1.27, 0.5), _aim and (-_aim[0], _aim[1] - 0.01, _aim[2]))])[0]
         self.assertIn(sight['block'], (into, against))       # the crosshair lands on the spot's grass or face
+
+
+class BuildingBlockTests(unittest.TestCase):
+    def test_built_with_only_what_the_task_doesnt_need(self):
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        pl = {'hotbar': [['minecraft:cobblestone', 8], ['minecraft:oak_planks', 3], ['', 0]],
+              'inventory': {'minecraft:cobblestone': 8, 'minecraft:oak_planks': 3}, 'blocks': 11, 'block_slot': 0}
+        self.assertEqual(a._building(pl), (0, 11))
+        a.reserve = {'minecraft:cobblestone': 8}                       # a furnace to come: not built with
+        self.assertEqual(a._building(pl), (1, 3))
+        a.reserve = {'minecraft:cobblestone': 8, 'minecraft:oak_planks': 3}
+        self.assertEqual(a._building(pl), (-1, 0))
+        pl = {'hotbar': [['minecraft:cobblestone', 20]], 'inventory': {'minecraft:cobblestone': 20}, 'blocks': 20}
+        a.reserve = {'minecraft:cobblestone': 8}
+        self.assertEqual(a._building(pl), (0, 12))                     # what's over is

@@ -394,3 +394,90 @@ class SmeltTests(unittest.TestCase):
         self.assertEqual(fz.inv.get('mc:iron_ingot'), 3)
         self.assertEqual(fz.inv.get('mc:raw_iron'), 1)                  # exactly 3 went in
         self.assertEqual(fz.inv.get('mc:oak_log'), 1)                   # and 2 logs
+
+
+class ReserveTests(unittest.TestCase):
+    def test_what_the_steps_to_come_use_is_reserved(self):
+        # (8 cobblestone dug for a furnace went into a pillar out of the hole: "I don't have what the furnace
+        # takes", 2026-10-15)
+        C = ('mc:cobblestone',)
+        furnace = Recipe('r:furnace', 'mc:furnace', 1, (C, C, C, C, (), C, C, C, C), 3, 3)
+        ingot = Recipe('r:ingot', 'mc:iron_ingot', 1, (('mc:raw_iron',),), shapeless=True, station='mc:furnace',
+                       time=200)
+        r = TaskRunner(World())
+        r.start([('gather', 'mc:cobblestone', 8, Source('mc:stone', ('mc:cobblestone',))), ('craft', furnace, 1),
+                 ('station', 'mc:furnace'), ('smelt', ingot, 3, 'mc:oak_log', 2)], 'mc:iron_ingot', 3)
+        self.assertEqual(r.reserved(), {'mc:cobblestone': 8, 'mc:furnace': 1, 'mc:raw_iron': 3, 'mc:oak_log': 2})
+        r.stop()
+        self.assertEqual(r.reserved(), {})
+
+
+class MineBesideTests(unittest.TestCase):
+    def test_a_block_not_reached_from_where_the_walk_ended_is_walked_up_to_first(self):
+        # (two ores beside the one just mined were left as "could not mine it", 2026-10-15)
+        class W(World):
+            near = False
+
+            def task_aim(self, key, eye):
+                return ((0.0, 1.5, 1.0), None) if self.near else (None, None)
+
+            def task_walk(self, point, name, beside=None):
+                self.walks.append((name, beside))
+                self.near = beside is not None
+        w = W()
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:oak_log', 1, Source('mc:oak_log', ('mc:oak_log',)))], 'mc:oak_log', 1)
+        for _ in range(10):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        r.on_event('arrived')
+        for _ in range(5):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertEqual(w.walks[-1], ('Oak Log', (0, 1, 1)))           # right up beside it
+        r.on_event('arrived')
+        for _ in range(120):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+            if not r.active:
+                break
+        self.assertIn('done', r.events)
+
+
+class RecoverTests(unittest.TestCase):
+    def test_a_stuck_step_gets_what_it_lacks_first_then_goes_on(self):
+        # (no way up out of the hole to the crafting table, 13 blocks wanted, 7 spare: the order was over,
+        # 2026-10-15)
+        dirt = ('gather', 'mc:dirt', 9, Source('mc:dirt', ('mc:dirt',)))
+
+        class W(World):
+            def task_recover(self):
+                return [dirt], 'getting dirt first'
+        w = W()
+        r = TaskRunner(w)
+        stick = Recipe('r:stick', 'mc:stick', 4, (P, P), 1, 2)
+        r.start([('craft', stick, 1)], 'mc:stick', 4)
+        r.phase = 'to_station'
+        r.on_event('gave_up')
+        self.assertTrue(r.active)
+        self.assertEqual(r.steps[0], dirt)                              # first the blocks...
+        self.assertEqual(r.steps[1][0], 'craft')                        # ...then the step again
+        self.assertIn('getting dirt first', w.said)
+        r.phase = 'walk'
+        r.recoveries = 2
+        r.on_event('gave_up')                                           # (twice at most: then as before)
+        self.assertEqual(r.steps[0], dirt)
+
+
+class StuckHereTests(unittest.TestCase):
+    def test_walks_given_up_from_the_same_spot_stop_trying_others(self):
+        # (from the bottom of a hole, walks to one log after another, each given up, over and over, 2026-10-15)
+        w = World()
+        w.logs = 5
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:oak_log', 3, Source('mc:oak_log', ('mc:oak_log',)))], 'mc:oak_log', 3)
+        r.pos = (0.0, 53.0, 0.0)
+        r.phase = 'walk'
+        r.on_event('gave_up')                                           # one: another may do
+        self.assertTrue(r.active)
+        r.phase = 'walk'
+        r.on_event('gave_up')                                           # again from the same spot: stuck here
+        self.assertFalse(r.active)
+        self.assertIn('failed', r.events)

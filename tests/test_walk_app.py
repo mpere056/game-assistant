@@ -49,7 +49,7 @@ def make_app():
     app.companion.route_fn = lambda s, g: Route([s, (0.0, 0.0, 20.0), g], True, 0)
     app._walk_cmd, app._walk_route, app._took_over = None, None, 0.0
     app.lines = []
-    app._navi_line = app.lines.append
+    app._navi_line = lambda line, urgent=False: app.lines.append(line)
     app._fight_log = lambda row: None   # never into the real runtime/combat log
     app._walk_log = lambda row: None    # ...nor the walk log
     app._save_chains = lambda: None     # ...nor the learned combos
@@ -360,3 +360,103 @@ class TwentySeventhSessionAppTests(unittest.TestCase):
         step(app, w, 0.3)
         self.assertIn("Got it! That's all I was asked for!", app.lines)
         self.assertFalse(app.walk.active and app.walk.target_id == 11)   # not on to a third
+
+
+class DoerQuietTests(unittest.TestCase):
+    def test_while_the_doer_runs_only_its_own_and_urgent_lines_are_shown(self):
+        # ("get me down from here": eight lines, each action's own on top of the doer's, 2026-10-15)
+        import queue
+        app = App.__new__(App)
+        app.q, app.bubble, app.speaker = queue.Queue(), None, None
+        app._doer_busy = True
+        app._navi_line("Let's go to the ground!")                      # an action's own: kept, not shown
+        app.doer_say("Down from the tree first.")                       # the doer's
+        app._navi_line('A Creeper coming at us! Dealing with it first.', urgent=True)
+        shown = []
+        while not app.q.empty():
+            shown.append(app.q.get()[1].strip())
+        self.assertEqual(shown, ['Down from the tree first.', 'A Creeper coming at us! Dealing with it first.'])
+        self.assertIn("Let's go to the ground!", app.doer_said_since(0.0))   # (the doer still reads it)
+        app._doer_busy = False
+        app._navi_line('Here we are!')
+        self.assertEqual(app.q.get()[1].strip(), 'Here we are!')
+
+
+class WithAdapterTests(unittest.TestCase):
+    def test_a_frame_with_no_task_and_an_adapter(self):
+        # (with an adapter, every frame read the task order that wasn't there: "Auto-walk error: TypeError"
+        # flooding the window at start-up, 2026-10-15; the tests' app had no adapter)
+        app = make_app()
+
+        class A:
+            reserve = None
+        app.adapter = A()
+        w = World()
+        step(app, w, 0.2)
+        self.assertEqual(app.adapter.reserve, {})
+
+
+class TaskFailedThinkTests(unittest.TestCase):
+    def test_a_failed_task_an_order_started_is_thought_through(self):
+        # (an iron pickaxe's ingredients got, then no way up: "I can't get to where I can reach the crafting
+        # table", and the order was over, 2026-10-15)
+        import threading as th
+        from game_assistant.core.tasks import TaskRunner
+        app = make_app()
+        app.doer, app._doer_busy, got = object(), False, []
+        app._doer_order = lambda text: got.append(text)
+        app.task = TaskRunner(app)
+        app.task.steps, app.task.i, app.task.result = [('station', 'mc:crafting_table')], 0, 'failed: no way up'
+        app.task.describe = lambda: 'place a crafting table'
+        app._task_order = 'make me an iron pickaxe'
+        app._task_failed_think()
+        for t in th.enumerate():
+            if t is not th.current_thread() and t.daemon:
+                t.join(timeout=1.0)
+        self.assertEqual(len(got), 1)
+        self.assertIn('make me an iron pickaxe', got[0])
+        self.assertIn('no way up', got[0])
+        app._task_failed_think()                                        # (once)
+        self.assertEqual(len(got), 1)
+
+
+class GoalReplanAppTests(unittest.TestCase):
+    def test_a_failed_step_is_planned_again_from_here_then_the_doer(self):
+        # (docs/AGENT.md: a step's failure is a fact the next plan works from; only when there's no plan, the doer)
+        from game_assistant.core.crafting import Recipe, Source
+        from game_assistant.core.goals import GoalRunner
+        from game_assistant.core.skills import UNREACHABLE, Outcome, Reason
+        from game_assistant.core.tasks import TaskRunner
+        app = make_app()
+        table = Recipe('r:t', 'mc:crafting_table', 1, (('mc:p',),) * 4, 2, 2)
+        from game_assistant.core.crafting import CantMake
+        plans = [[('station', 'mc:crafting_table'), ('craft', table, 1)]]
+
+        def planner(item, total, after=None):
+            if not plans:
+                raise CantMake('no way from here')
+            return plans.pop(0)
+        app._plan_goal = planner
+        app._held = lambda: {}
+        app.goal = GoalRunner(app._plan_goal)
+        app.task = TaskRunner(app)
+        app.doer, app._doer_busy, think = object(), False, []
+        app._doer_order = lambda text: think.append(text)
+        log = [('gather', 'mc:log', 1, Source('mc:log', ('mc:log',)))]
+        app.task.start(log, 'mc:pickaxe', 1)
+        app.goal.start('mc:pickaxe', 1, log)
+        app._task_order = 'make me a pickaxe'
+        app.task.active, app.task.result = False, 'failed: x'
+        app.task.outcome = Outcome(False, Reason(UNREACHABLE, {'step': 'gather log', 'at': (1, 2, 3)}), 'x')
+        app._task_failed_think()
+        self.assertTrue(app.task.active)                                # planned again, under way
+        self.assertEqual(app.task.steps[0], ('station', 'mc:crafting_table'))
+        self.assertEqual(think, [])
+        app.task.active, app.task.result = False, 'failed: y'
+        app.task.outcome = Outcome(False, Reason(UNREACHABLE, {'step': 'station crafting table'}), 'y')
+        app._task_failed_think()                                        # no plan now: the doer thinks it through
+        import threading as th
+        for t in th.enumerate():
+            if t is not th.current_thread() and t.daemon:
+                t.join(timeout=1.0)
+        self.assertEqual(len(think), 1)

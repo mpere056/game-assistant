@@ -22,8 +22,11 @@ frame; every change of step or phase goes to `trace` (the app writes it to runti
 from __future__ import annotations
 
 import math
+import time
 from typing import Protocol
 
+from .skills import (MISSING, NEEDS_TOOL, NO_SPOT, NO_TARGET, STUCK, TIMEOUT, UI, UNREACHABLE, Outcome,
+                     Reason)
 from .autowalk import Intent, aim_at
 
 CLICK_GAP = 0.15        # seconds between clicks on a screen (each must reach the game before the next)
@@ -41,6 +44,7 @@ PICKUP_RANGE = 6.0      # blocks: dropped items this near are walked to
 PICKUP_TRIES = 2        # times one dropped item is walked to before it's left (it didn't come: out of reach)
 REACH = 4.3             # blocks: a station this near is used where it stands
 STEP_TIMEOUT = 300.0
+MAX_RECOVERIES = 2      # a task's stuck steps got going again (what they lacked got first), at most
 COOK_SPARE = 15.0       # seconds over the cooking time before a smelt is given up
 NO_FUEL_S = 4.0         # seconds with the furnace out and something left to cook: out of fuel
 SETTLE = 0.4            # seconds for a screen to fill in (just opened), or the grid after the last click
@@ -49,7 +53,8 @@ SETTLE = 0.4            # seconds for a screen to fill in (just opened), or the 
 class TaskWorld(Protocol):
     def task_find(self, blocks: tuple, exclude: set) -> tuple | None: ...   # (point, name, key): nearest
     def task_items(self, items: tuple, radius: float) -> list: ...          # [point]: dropped items near
-    def task_walk(self, point, name: str, beside=None) -> None: ...   # beside: right up beside that block
+    def task_walk(self, point, name: str, beside=None, back=False) -> None: ...   # beside: right up beside
+                                                                 # that block; back: it's come back from
     def task_stop(self) -> None: ...
     def task_say(self, line: str) -> None: ...
     def task_point(self, x: float, y: float) -> None: ...          # the pointer to (x, y): the game window's pixels
@@ -89,12 +94,19 @@ class TaskRunner:
         self.trace: list = []
         self.t = 0.0
         self.result = ''
+        self.recoveries = 0
+        self.outcome: Outcome | None = None   # how the last task ended (docs/AGENT.md)
+        self.pos = None             # where the player is (last seen)
+        self.gave_up_at = None      # where the last walk was given up
         self.calib = [0.0, 0.0]     # what the pointer turned out to be off by (window pixels): corrected for
         self.pointing = None
 
     # ---- control ----
 
     def start(self, steps: list, goal: str, count: int) -> None:
+        self.outcome = None
+        self.recoveries = 0
+        self.gave_up_at = None
         self.steps, self.i, self.goal, self.count = list(steps), 0, goal, count
         self.active, self.t, self.result = True, 0.0, ''
         self._begin()
@@ -106,6 +118,22 @@ class TaskRunner:
             self.result = f'stopped: {why}' if why else 'stopped'
             if why:
                 self.events.append(f'stopped:{why}')
+
+    def reserved(self) -> dict:
+        """What the steps still to come use up, {item: how many} (every item that fits an ingredient, the fuel,
+        a station to put down): the walk doesn't build with these (8 cobblestone dug for a furnace went into a
+        pillar up out of the hole, and the furnace couldn't be made, 2026-10-15)."""
+        out: dict = {}
+        for s in self.steps[self.i:] if self.active else ():
+            if s[0] in ('craft', 'smelt'):
+                for fits, cells in s[1].needs():
+                    for it in fits:
+                        out[it] = out.get(it, 0) + cells * s[2]
+                if s[0] == 'smelt':
+                    out[s[3]] = out.get(s[3], 0) + s[4]
+            elif s[0] == 'station':
+                out[s[1]] = out.get(s[1], 0) + 1
+        return out
 
     def describe(self) -> str:
         bits = []
@@ -120,9 +148,12 @@ class TaskRunner:
                 bits.append(f'smelt {s[2]} {_name(s[1].cells[0][0])} with {s[4]} {_name(s[3])}')
             elif s[0] == 'eat':
                 bits.append('eat')
+            elif s[0] == 'dig':
+                bits.append(f'mine the {s[3]} at {_at(s[1])}')
         return ', '.join(bits)
 
     def _begin(self) -> None:
+        self.step_t0 = self.t
         self.base, self.want = None, None
         self.skip: set = set()
         self.clicks: list = []
@@ -132,6 +163,7 @@ class TaskRunner:
         self.tries = 0
         self.hotbar = None          # moving an item into the hotbar: (item, phase)
         self.item_tries: dict = {}  # dropped items walked to (by their block): how often (one may not come)
+        self.beside: set = set()    # blocks walked right up beside (not reached from where the walk ended)
         self.station_pt = None      # where to aim at the station: a point on it in reach and in sight (or None)
         self.station_eye = None     # ...from this eye
         self.walked_to_station = 0
@@ -147,11 +179,17 @@ class TaskRunner:
         self.trace.append({'t': round(self.t, 2), 'step': self.i, 'what': what, 'phase': phase, 'note': note})
 
     def _next(self) -> None:
+        # the step's done: told (a goal runner may plan on from here: then the task's started again)
+        hook = getattr(self.world, 'task_step_done', None)
+        if hook is not None and hook(self.i, self.t - getattr(self, 'step_t0', 0.0)):
+            return
         self.i += 1
         if self.i >= len(self.steps):
             self.active = False
             self.events.append('done')
             self.result = 'done'
+            self.outcome = Outcome(True, None, f'have {self.count} {_name(self.goal)}', took_s=self.t)
+            self.ended_at = time.monotonic()
             self.trace.append({'t': round(self.t, 2), 'phase': 'done'})
             if self.steps and self.steps[-1][0] == 'station':
                 self.world.task_say(f'Done! The {_name(str(self.steps[-1][1]))} is down.')
@@ -160,13 +198,37 @@ class TaskRunner:
             return
         self._begin()
 
-    def _fail(self, line: str) -> None:
+    def _fail(self, line: str, kind: str = UI, **data) -> None:
+        """The task's over, not done: the line for the player, and why as data (the Outcome's Reason) for what
+        decides next (docs/AGENT.md)."""
         self.active = False
         self.world.task_stop()
         self.events.append('failed')
+        data = {k: (v.brief() if isinstance(v, Reason) else v) for k, v in data.items() if v is not None}
+        self.outcome = Outcome(False, Reason(kind, {'step': self._what(), **data}), line, took_s=self.t)
+        self.ended_at = time.monotonic()
+        if kind == UNREACHABLE and data.get('at') is not None:
+            self._note('unreachable', what=str(data.get('what') or ''), at=data['at'], frm=self.pos,
+                       reason=str(data.get('reason') or ''))
         self.result = f'failed: {line}'
-        self.trace.append({'t': round(self.t, 2), 'phase': 'failed', 'note': line})
+        self.trace.append({'t': round(self.t, 2), 'phase': 'failed', 'note': line,
+                           'reason': self.outcome.reason.brief()})
         self.world.task_say(line)
+
+    def _what(self) -> str:
+        if not self.steps or self.i >= len(self.steps):
+            return ''
+        step = self.steps[self.i]
+        return f'{step[0]} {_name(step[1].result) if step[0] in ("craft", "smelt") else _name(str(step[1]))}'
+
+    def _note(self, event: str, **data) -> None:
+        """What was done or learned, for the world memory (the world passes it on, if it keeps one)."""
+        note = getattr(self.world, 'task_note', None)
+        if note is not None:
+            try:
+                note(event, **data)
+            except Exception:
+                pass
 
     def resume(self) -> None:
         """After something interrupted it (a fight): the step again from its start (what's held counts)."""
@@ -175,18 +237,64 @@ class TaskRunner:
             self.held_at = None
             self.clicks, self.pointing, self.hotbar = [], None, None
 
-    def on_event(self, ev: str) -> None:
+    def on_event(self, ev: str, reason: Reason | None = None) -> None:
         """The walk's events: 'arrived', 'gave_up'."""
         if not self.active:
             return
         if ev == 'arrived' and self.phase in ('walk', 'pickup', 'to_station'):
             self._set({'walk': 'mine', 'pickup': 'find', 'to_station': 'open'}[self.phase])
+        elif ev == 'gave_up' and self.phase == 'walk' and self.steps[self.i][0] == 'dig':
+            step = self.steps[self.i]
+            self._fail(f"I can't get to the {step[3]} at {_at(step[1])}.", UNREACHABLE, what=step[3], at=tuple(step[1]),
+                       reason=reason)
+        elif ev == 'gave_up' and self.phase == 'walk' and self._stuck_here(reason):
+            pass                                         # (no way on from here at all: said, the step over)
+        elif ev == 'gave_up' and self.phase in ('walk', 'to_station') and self._recover(reason):
+            pass                                         # (what it lacked: got first, then this step again)
         elif ev == 'gave_up' and self.phase in ('walk', 'to_station'):
             if self.target is not None and self.target[2] is not None:
                 self.skip.add(tuple(self.target[2]))   # can't get to that one: another
             self._set('find' if self.phase == 'walk' else 'start', 'gave up walking there')
         elif ev == 'gave_up' and self.phase == 'pickup':
             self._set('find')
+
+    def _stuck_here(self, reason: Reason | None = None) -> bool:
+        """Walks given up from the same spot, twice: the trouble is where the player is, not which one is walked to
+        (walks to one log after another failed from the bottom of a hole, 2026-10-15): first what it lacks, if the
+        world can say; else the step fails (and is thought through)."""
+        here = self.pos
+        last = self.gave_up_at
+        self.gave_up_at = here
+        if here is None or last is None or math.dist(here, last) > 1.5:
+            return False
+        if self._recover(reason):
+            return True
+        self._fail("I can't get anywhere from here: every way out needs something I haven't got.", STUCK,
+                   frm=self.pos, reason=reason)
+        return True
+
+    def _recover(self, reason: Reason | None = None) -> bool:
+        """The walk for this step gave up: what it lacked, got first (the world says: blocks to build the way with,
+        from what's near and cheapest), then this step again. Twice at most in a task. True: under way. (14 down
+        for cobblestone, the crafting table 14 up, the cobblestone kept for the furnace: "I can't get to where I
+        can reach the crafting table", the order over, 2026-10-15.)"""
+        if self.recoveries >= MAX_RECOVERIES or not hasattr(self.world, 'task_recover'):
+            return False
+        try:
+            got = self.world.task_recover(reason)
+        except TypeError:                                # (a world that reads the walk itself)
+            got = self.world.task_recover()
+        except Exception:
+            got = None
+        if not got:
+            return False
+        steps, line = got
+        self.recoveries += 1
+        self.steps[self.i:self.i] = list(steps)
+        self.trace.append({'t': round(self.t, 2), 'phase': 'recover', 'note': line})
+        self.world.task_say(line)
+        self._begin()
+        return True
 
     # ---- every frame ----
 
@@ -200,11 +308,13 @@ class TaskRunner:
                                                          # player was in another window, 2026-10-13)
         self.t += dt
         if self.t - self.since > STEP_TIMEOUT and self.phase != 'cook':   # (cooking has its own limit)
-            self._fail("This is taking too long. Over to you!")
+            self._fail("This is taking too long. Over to you!", TIMEOUT, what=self._what())
             return None
         step = self.steps[self.i]
         ex = snap.extra or {}
         inv = ex.get('inventory') or {}
+        if snap.player is not None:
+            self.pos = snap.player.pos
         if self.hotbar is not None:
             return self._to_hotbar(ex)
         if step[0] == 'gather':
@@ -215,6 +325,8 @@ class TaskRunner:
             return self._eat(snap, ex)
         if step[0] == 'smelt':
             return self._smelt(snap, ex, inv, step)
+        if step[0] == 'dig':
+            return self._dig(snap, ex, inv, step)
         return self._craft(snap, ex, inv, step, walking)
 
     # ---- moving an item into the hotbar ----
@@ -345,7 +457,7 @@ class TaskRunner:
             if src.tool:                                 # the tool it needs: in the hotbar, to be picked
                 tool = self.world.task_tool(src.tool, inv)
                 if tool is None:
-                    self._fail(f'I need a {_name(src.tool)} for {_name(item)}.')
+                    self._fail(f'I need a {_name(src.tool)} for {_name(item)}.', NEEDS_TOOL, tool=src.tool, item=item)
                     return None
                 if self._need_in_hotbar(ex, tool):
                     return Intent()
@@ -361,10 +473,13 @@ class TaskRunner:
                 return None
             got = self.world.task_find((src.block,), self.skip)
             if got is None:
-                self._fail(f"I can't find any more {_name(src.block)} near here.")
+                self._fail(f"I can't find any more {_name(src.block)} near here.", NO_TARGET, what=src.block, item=item)
                 return None
             self.target = got
-            self.world.task_walk(got[0], got[1])
+            try:                                       # (more steps after: it's come back from)
+                self.world.task_walk(got[0], got[1], back=self.i < len(self.steps) - 1)
+            except TypeError:
+                self.world.task_walk(got[0], got[1])
             self._set('walk', f'{got[1]} at {got[2]}')
             return None
         if self.phase in ('walk', 'pickup'):
@@ -376,6 +491,29 @@ class TaskRunner:
         if self.phase == 'collect':
             if inv.get(item, 0) > self.got_before or self.t - self.since > COLLECT_WAIT:
                 self._set('find')
+            return Intent()
+        return None
+
+    def _dig(self, snap, ex, inv, step) -> Intent | None:
+        """One block (the game's key, where to walk, its name): walked to where it's in reach and in sight, mined,
+        what it drops picked up. ("Mine the iron ore at 12 56 -5" wasn't an order it knew, 2026-10-15.)"""
+        _d, key, point, name = step
+        if self.phase == 'start':
+            self.target = (point, name, tuple(key))
+            self.world.task_walk(point, name)
+            self._set('walk', f'{name} at {_at(key)}')
+            return None
+        if self.phase == 'walk':
+            return None
+        if self.phase == 'mine':
+            got = self._mine(snap, ex, '')
+            if self.phase == 'find':                     # (left: it couldn't be mined)
+                self._fail(f"I couldn't mine the {name} at {_at(key)}.", UNREACHABLE, what=name, at=tuple(key))
+                return None
+            return got
+        if self.phase == 'collect':
+            if self.t - self.since > COLLECT_WAIT:
+                self._next()
             return Intent()
         return None
 
@@ -392,6 +530,20 @@ class TaskRunner:
                 self._aim_pt, _blocker = getattr(self.world, 'task_aim', lambda k, e: (None, None))(key, cam.pos)
             except Exception:
                 self._aim_pt = None
+        # not to be reached from here (no point on it in reach and in sight; or never on the crosshair): right up
+        # beside it first, once, before it's left for another (two ores beside the one just mined were left as
+        # "could not mine it", and then "no more iron ore near here", 2026-10-15)
+        k = tuple(key)
+        hidden = hasattr(self.world, 'task_aim') and getattr(self, '_aim_pt', None) is None
+        if self.held_at is None and k not in self.beside and (hidden or self.t - self.since > 2.0):
+            self.beside.add(k)
+            self._aim_eye = self._aim_pt = None
+            try:
+                self.world.task_walk(point, _name_, beside=key)
+            except TypeError:                            # (a world that can't)
+                self.world.task_walk(point, _name_)
+            self._set('walk', 'closer: right beside it')
+            return None
         turn, tilt, err = aim_at(cam, getattr(self, '_aim_pt', None) or centre)
         aimed = ex.get('aim_block') is not None and tuple(ex['aim_block']) == tuple(key)
         keys, taps = set(), []
@@ -403,6 +555,7 @@ class TaskRunner:
             keys.add('attack')
             self.held_at = self.held_at or self.t
         elif self.held_at is not None and err < 12.0:
+            self._note('dug', at=tuple(key))
             self.got_before = (ex.get('inventory') or {}).get(item, 0)
             self.held_at = None
             self._aim_eye = self._aim_pt = None
@@ -422,7 +575,7 @@ class TaskRunner:
         """The best food into the hand and the use button held till one is eaten (about 1.6 s)."""
         slot = self.world.task_food(ex.get('hotbar') or [])
         if slot is None:
-            self._fail("I've nothing to eat in the hotbar.")
+            self._fail("I've nothing to eat in the hotbar.", MISSING, item='food', count=1)
             return None
         if self.phase == 'start':
             self.food_before = sum(n for _i, n in [(s[0], s[1]) for s in (ex.get('hotbar') or []) if s and s[0]])
@@ -453,12 +606,12 @@ class TaskRunner:
                 return Intent()
             hot = ex.get('hotbar') or []
             if not any(s and s[0] == item for s in hot):
-                self._fail(f"I don't have a {_name(item)} to place.")
+                self._fail(f"I don't have a {_name(item)} to place.", MISSING, item=item, count=1)
                 return None
             self.bad_spots = set()
             self.spot = self._spot()
             if self.spot is None:
-                self._fail(f"I can't find a spot to put the {_name(item)}.")
+                self._fail(f"I can't find a spot to put the {_name(item)}.", NO_SPOT, item=item)
                 return None
             self.station_had = (ex.get('inventory') or {}).get(item, 0)
             self._set('aim')
@@ -473,6 +626,7 @@ class TaskRunner:
         aim = tuple(ex['aim_block']) if ex.get('aim_block') is not None else None
         fewer = (ex.get('inventory') or {}).get(item, 0) < getattr(self, 'station_had', 0)
         if fewer or (aim == tuple(into) and ex.get('aim_id') == item):
+            self._note('put_down', item=item, at=tuple(into))
             self._next()
             return Intent()
         # what the crosshair is on decides (as in the game): the block below's face: put it there; grass in the
@@ -496,7 +650,7 @@ class TaskRunner:
             self.bad_spots.add(tuple(into))
             self.spot = None if len(self.bad_spots) >= SPOTS else self._spot()
             if self.spot is None:
-                self._fail(f"I couldn't place the {_name(item)}.")
+                self._fail(f"I couldn't place the {_name(item)}.", NO_SPOT, item=item, tried=len(self.bad_spots))
                 return None
             self.tries = 0
             self._set('aim', f'another spot: {_at(self.spot[3])}')
@@ -517,14 +671,15 @@ class TaskRunner:
         sight there after all (a line of sight that only just clears a block): right up beside it."""
         got = self.world.task_find((item,), set())
         if got is None:
-            self._fail(f"I can't find a {_name(item)}.")
+            self._fail(f"I can't find a {_name(item)}.", NO_TARGET, what=item)
             return False
         self.target = got
         self._station_aim(snap)
         if self.station_pt is not None:
             return True
         if self.walked_to_station >= 2:
-            self._fail(f"I can't get to where I can reach the {_name(item)} at {_at(got[2])}: something's in the way.")
+            self._fail(f"I can't get to where I can reach the {_name(item)} at {_at(got[2])}: something's in the "
+                       f"way.", UNREACHABLE, what=item, at=tuple(got[2]), frm=self.pos)
             return False
         self.walked_to_station += 1
         if self.walked_to_station == 2:
@@ -611,7 +766,7 @@ class TaskRunner:
                 if n:
                     got = _put_clicks(slots, target, kinds, n)
                     if got is None:
-                        self._fail(f"I don't have the {_name(what)} for the {name}.")
+                        self._fail(f"I don't have the {_name(what)} for the {name}.", MISSING, item=what, count=n)
                         return Intent(taps=('escape',))
                     clicks += got
             self.clicks = clicks
@@ -656,13 +811,14 @@ class TaskRunner:
                 return Intent(frozenset({'sneak'}))
             if self.t - self.since > times * max(1, rec.time) / 20.0 + COOK_SPARE:
                 self._fail(f"The {name} didn't finish: {have - self.base} {_name(rec.result)} out of "
-                           f"{self.want - self.base}.")
+                           f"{self.want - self.base}.", TIMEOUT, what=rec.result)
                 return Intent(taps=('escape',))
             # out, with something still to cook: out of fuel
             out = screen.get('lit') is False and inp is not None and inp[3]
             self.out_since = (self.out_since or self.t) if out else None
             if self.out_since is not None and self.t - self.out_since > NO_FUEL_S:
-                self._fail(f"The {name} ran out of fuel with {inp[4]} {_name(inp[3])} still to cook.")
+                self._fail(f"The {name} ran out of fuel with {inp[4]} {_name(inp[3])} still to cook.", MISSING,
+                           item=fuel, count=1, fuel=True)
                 return Intent(taps=('escape',))
             return Intent(frozenset({'sneak'}))
         if self.phase == 'close':
@@ -751,7 +907,7 @@ class TaskRunner:
                 return Intent()
             self.clicks = _fill_clicks(screen, rec, times)
             if self.clicks is None:
-                self._fail(f"I don't have what the {_name(rec.result)} takes.")
+                self._fail(f"I don't have what the {_name(rec.result)} takes.", MISSING, item=rec.result, takes=True)
                 return Intent(taps=('escape',))
             self._set('fill', json_short({'clicks': self.clicks, 'screen': _grid_view(screen)}))
             return Intent()

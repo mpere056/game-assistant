@@ -430,3 +430,16 @@ class PutDownTests(unittest.TestCase):
         self.assertEqual(r.handle('put the crafting table down', use_model=False).kind, 'task')
         a.held = {}
         self.assertEqual(r.handle('place a crafting table', use_model=False).kind, 'none')
+
+
+class MineAtTests(unittest.TestCase):
+    def test_mine_the_block_at_coordinates(self):
+        # (the doer's "mine the iron ore at 12 56 -5" wasn't understood, 2026-10-15)
+        class A(FakeAdapter):
+            def coords_point(self, x, y, z):
+                return (-x - 0.5, float(y), z + 0.5)
+        r = CommandResolver(A([]))
+        got = r.handle('mine the iron ore at 12 56 -5', use_model=False)
+        self.assertEqual(got.kind, 'task')
+        self.assertEqual(got.steps, [('dig', (12, 56, -5), (-12.5, 56.0, -4.5), 'iron ore')])
+        self.assertEqual(r.handle('break the block at 3 70 -2', use_model=False).steps[0][1], (3, 70, -2))

@@ -57,6 +57,7 @@ CORNER_REACH = 1.0    # don't steer past the next corner of the route until this
                       # passages: steering 3.5 m ahead cut corners into the rock)
 ACTION_AT = 1.5       # metres from a ladder/lift/jump start to act on it
 WORK_AT = 0.45        # blocks from where a block is broken or placed to start on it (Minecraft)
+STEP_JUMP_AT = 1.0    # precise walking: a step up jumped this near the next cell's middle (up against it: 0.8)
 STEP_AT = 0.4         # precise walking: this near a cell's middle is on it...
 STEP_LOOK = 6         # ...looking this many cells ahead for the one the player is on
 STEP_OFF = 1.4        # this far from the line to the next cell: off the route, re-plan
@@ -162,6 +163,7 @@ class AutoWalk:
     # again while digging still had the blocks just dug, and each was aimed at for 1.5 s before being given up
     # (digging stopped after every block or two, 2026-10-13). None: not known (aim and see).
     probe: object = None
+    dug: list = None        # blocks broken on the way since last read (the app moves them into its memory)
     aimer: object = None    # (block key, eye) -> (a point on it the crosshair reaches it at, or None; the block in
                             # the way when none does): set by the app (adapter.aim_point)
     active: bool = False
@@ -334,13 +336,18 @@ class AutoWalk:
         rise = target[1] - p[1]
         keys = set()
         turn = 0.0
+        facing = True
         if flat > 0.12:
             err = _wrap(_yaw((target[0] - p[0], 0.0, target[2] - p[2])) - _yaw(cam.forward))
             turn = max(-STEP_TURN_RATE * dt, min(STEP_TURN_RATE * dt, err * STEP_TURN_GAIN * dt))
-            if abs(err) < STEP_FACING:
+            facing = abs(err) < STEP_FACING
+            if facing:
                 keys.add('forward')
-        if rise > 0.4 and flat < 1.4:
-            keys.add('jump')                  # a step up (held: the game jumps as soon as it can), a ladder, water
+        # a step up: jumped only once up against it and facing it (Baritone's way: a roof low over a staircase dug
+        # up cuts the jump short, and a jump from further back came down short of the step, again and again,
+        # 2026-10-15); a ladder (straight up) as soon as it's there
+        if rise > 0.4 and (flat < STEP_JUMP_AT and facing or flat < 0.3):
+            keys.add('jump')                  # (held: the game jumps as soon as it can)
         elif p[1] < here[1] - 0.15:
             keys.add('jump')                  # sinking below the route (in water): swim up, keep the head out
         if i >= len(pts) - 1 or (i == len(pts) - 2 and flat < STEP_AT and abs(rise) < 0.8):
@@ -742,6 +749,8 @@ class AutoWalk:
                 keys.add('attack')
                 act.held = act.held or self.t
             elif act.held is not None and err < 10.0:
+                if self.dug is not None:
+                    self.dug.append(tuple(act.blocker or key))
                 if act.blocker is None:
                     return None                           # it was on the crosshair and is gone: broken
                 act.blocker, act.held, act.aim, act.seen = None, None, None, False   # what was in front: now it

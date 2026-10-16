@@ -33,6 +33,9 @@ from .core.agent import Agent
 from .core.autowalk import AutoWalk
 from .core.combat import Fighter
 from .core.tasks import TaskRunner
+from .core.memory import WorldMemory
+from .core.goals import GoalRunner
+from .core.skills import route_reason
 from .core.plan import PlanRunner, steps_from
 from .core.walk_commands import CommandResolver, WalkAction
 from .core.companion import Companion
@@ -41,7 +44,25 @@ from .core.spend import SpendCapReached
 from .games import adapter_for
 
 ROOT = Path(__file__).resolve().parents[1]
+ONCE_LINE = 30.0     # seconds before the same passing line (no way here, it's above us) is said again
+ERROR_AGAIN = 30.0   # seconds before the same error in a frame loop is shown again (it's logged once)
 FPS = 60
+
+
+def _work_now(walk):
+    """For the walk log: what the walk is at (a block broken or put down: its key; a step up: to where)."""
+    sp = getattr(walk, '_special', None)
+    act = sp[0] if sp else None
+    if act is None:
+        return None
+    return {'what': act.what, 'key': act.info.get('key') or act.info.get('into'), 'blocker': getattr(act, 'blocker', None),
+            'phase': getattr(act, 'phase', '')}
+
+
+def _game_pos(adapter, p):
+    """A snapshot position in the game's own coordinates (as the memory keeps them)."""
+    fn = getattr(adapter, 'game_coords', None)
+    return fn(p) if fn is not None else tuple(p)
 
 
 def _own_window_in_front() -> bool:
@@ -77,6 +98,7 @@ CHAINS_FILE = '.local/{game}/chains.json'   # learned enemy combos (and the rest
 ALL_RANGE = 60.0                    # 'kill all of them': the next one within this many metres                      # a target that ran off this often: hand back
 WALK_SPEED_MPS = 4.3   # a walk's pace, for the doer's estimates (Minecraft: blocks a second)
 BLOCK_SOURCES = ['minecraft:dirt', 'minecraft:cobblestone', 'minecraft:netherrack']   # blocks to build with, got
+STUCK_REACH = 6.0   # blocks: stuck, what's got to get out is got from this near (or made from what's held)
 BLOCKS_SPARE = 4      # blocks got beyond what the way takes
 NO_PROGRESS_S = 20.0  # seconds a walk may go without getting nearer its goal (or digging or building) before it gives up
 THREAT_NEAR = 6.0   # blocks: a hostile one after the player this near during an order is fought off first
@@ -137,6 +159,10 @@ class App:
         self.companion.plan_close = True  # the character walks by itself: a route even to close goals
         self.plan = PlanRunner(self)      # orders of several parts (core/plan.py)
         self.task = TaskRunner(self)      # getting items: gather and craft (core/tasks.py)
+        self.memory = WorldMemory()        # what was done and learned this session (core/memory.py)
+        self.adapter.memory = self.memory
+        self.goal = GoalRunner(self._plan_goal, self._step_cost)   # item orders, planned again (core/goals.py)
+        self.walk.dug = []
         self._task_cmd = None
         self._plan_cmd = None
         self._los: tuple = (None, None)    # (target, a clear line to it) from _ledge_loop
@@ -322,7 +348,8 @@ class App:
     # ---- thinking orders through (core/doer.py) ----
 
     def _doer_order(self, text: str) -> None:
-        self._navi_line('Okay! Let me think...')
+        # (no "Okay! Let me think..." first: the doer's first line comes in a moment, or "Working out how to do
+        # that..." if it takes a while)
         self._doer_busy = True
         record = {'t': datetime.now().isoformat(timespec='seconds'), 'order': text, 'action': 'doer'}
         try:
@@ -356,6 +383,9 @@ class App:
                 bits.append('where: ' + ', '.join(f'{k} {v}' for k, v in w.items() if v not in (None, '')))
             except Exception:
                 pass
+        mem = getattr(self, 'memory', None)
+        if mem is not None and snap.player:
+            bits.append('done this session: ' + mem.summary(_game_pos(self.adapter, snap.player.pos)))
         inv = (snap.extra or {}).get('inventory')
         if inv is not None:
             bits.append('holding: ' + (', '.join(f'{n} {k.split(":")[-1]}' for k, n in inv.items()) or 'nothing'))
@@ -381,6 +411,14 @@ class App:
     def doer_busy(self) -> bool:
         return bool(self.walk.active or self.fighter.active or getattr(self, 'task', None) and self.task.active
                     or getattr(self, '_walk_cmd', None) or getattr(self, '_task_cmd', None))
+
+    def doer_outcome(self, since: float):
+        """How the task the doer's last act ran ended, as data: {'ok', 'why': {kind, ...}}; None: no task ended."""
+        task = getattr(self, 'task', None)
+        o = getattr(task, 'outcome', None)
+        if o is None or getattr(task, 'ended_at', 0.0) < since:
+            return None
+        return {'ok': o.ok, 'why': ({'kind': o.reason.kind, **o.reason.data} if o.reason else None)}
 
     def doer_said_since(self, t: float) -> list:
         return [line for at, line in getattr(self, '_said', []) if at >= t]
@@ -471,13 +509,15 @@ class App:
             pass
 
     def doer_say(self, line: str) -> None:
-        self._navi_line(line)
+        self._navi_line(line, urgent=True)
 
     def doer_stop(self) -> None:
         self._walk_request('stop', 'stop')
         self._task_cmd = 'stop'
 
     def _start_action(self, action, text: str) -> None:
+        if action.kind in ('walk', 'stop', 'task') and getattr(self, 'goal', None) is not None:
+            self.goal.stop()                             # (a new order: the last one's goal is over)
         if action.kind in ('walk', 'stop', 'task'):
             self._plan_cmd = 'stop'                    # a new order replaces a plan
             self._task_cmd = 'stop' if action.kind != 'task' else (action.steps, action.name, action.count)
@@ -492,6 +532,7 @@ class App:
             self._last_order = None if getattr(self, '_doer_busy', False) else text   # (to think on if no way)
         elif action.kind == 'task':
             self._walk_request('stop', 'task')
+            self._task_order = None if getattr(self, '_doer_busy', False) else text   # (to think on if it fails)
         elif action.kind == 'stop':
             self._walk_request('stop', 'stop')
 
@@ -566,19 +607,24 @@ class App:
             got = self.adapter.locate_blocks(blocks, to_mine=True)
         except TypeError:
             got = self.adapter.locate_blocks(blocks)
+        mem = getattr(self, 'memory', None)
+        me = getattr(self, '_last_player_pos', None)
+        me = _game_pos(self.adapter, me) if me is not None else None
         for r in got.get('results', []):
             c = r['coordinates']
             key = (c['x'], c['y'], c['z'])
-            if key not in exclude:
+            if key not in exclude and not (mem is not None and mem.is_unreachable(key, me)):
                 return (r['position'], r['name'], key)
         return None
 
     def task_items(self, items: tuple, radius: float) -> list:
         return self.adapter.items_near(items, radius)
 
-    def task_walk(self, point, name: str, beside=None) -> None:
+    def task_walk(self, point, name: str, beside=None, back=False) -> None:
         if beside is not None and hasattr(self.adapter, 'goal_beside'):
             self.adapter.goal_beside(point, beside)
+        if back and hasattr(self.adapter, 'goal_back'):
+            self.adapter.goal_back(point)
         self._walk_request('start', point, name, None, False)
 
     def task_stop(self) -> None:
@@ -601,6 +647,18 @@ class App:
         from .ui import win_input
         win_input.press(button)
 
+    def task_note(self, event: str, **data) -> None:
+        """What a task did or learned, into the world memory."""
+        mem = getattr(self, 'memory', None)
+        if mem is None:
+            return
+        if event == 'put_down':
+            mem.put_down(data['item'], data['at'])
+        elif event == 'dug':
+            mem.dug_at(data['at'])
+        elif event == 'unreachable':
+            mem.couldnt_reach(data.get('what', ''), data.get('at'), data.get('frm'), data.get('reason', ''))
+
     def task_aim(self, key, eye):
         fn = getattr(self.adapter, 'aim_point', None)
         return fn(key, eye) if fn is not None else (None, None)
@@ -616,33 +674,67 @@ class App:
         held = [i for i in have if have[i] > 0 and book.tool_ok(need, {i: 1})]
         return min(held, key=len) if held else None
 
-    def _blocks_first(self, need: int) -> bool:
-        """The way there needs blocks to build with that aren't held: get them first (the quickest of what the
-        game can give: dirt dug near, planks from logs held, cobblestone...), a few over, then the walk again
-        (like a tool first). True when it switched."""
-        if need <= 0 or need > 64 or not hasattr(self.adapter, 'book') or getattr(self, 'task', None) is None \
-                or self.task.active or getattr(self, '_blocks_tried', None) == self.walk.goal:
-            return False
+    def task_recover(self, reason=None):
+        if getattr(getattr(self, 'goal', None), 'active', False):
+            return None                                  # (the goal runner plans what's lacking itself)
+        """A task's walk gave up: what it lacked, as steps to get it first, and a line for the player; or None.
+        From why it gave up (the Reason's route note: blocks to build the way with, more than are spare)."""
+        note = (reason.get('route') if reason is not None else None) or getattr(self.adapter, 'route_note', None) \
+            or {}
+        if note.get('found') != 'needs blocks':
+            return None
+        need = int(note.get('blocks_it_would_take') or 0) - int(note.get('blocks_to_build_with') or 0)
+        # stuck: what's got for the way out can't itself need the way out (planks from logs up on the surface,
+        # 14 up, were "cheapest": walks to them failed one after another; the stone round it was right there,
+        # 2026-10-15): only what's in reach from here, or made from what's held
+        got = self._blocks_plan(need, within=STUCK_REACH)
+        if got is None:
+            return None
+        _secs, item, steps = got
+        return steps, (f"No way up from here without about {need} more blocks: getting "
+                       f"{item.split(':')[-1].replace('_', ' ')} first!")
+
+    def _blocks_plan(self, need: int, within: float | None = None):
+        """(about how long, the item, the steps) to get `need` blocks to build with, a few over: the quickest of what
+        the game can give (dirt dug near, planks from logs held, cobblestone...), over what's held (and kept for
+        what's to come). None: no way, or too many."""
+        if need <= 0 or need > 64 or not hasattr(self.adapter, 'book'):
+            return None
         from .core.crafting import CantMake, plan
         try:
             snap = self.adapter.snapshot()
             have = dict(((snap.extra or {}).get('inventory') or {}))
             book = self.adapter.book()
         except Exception:
-            return False
+            return None
         n = need + BLOCKS_SPARE
         best = None
-        for item in BLOCK_SOURCES + [i for i in have if i.endswith('_planks')] \
-                + [i.replace('_log', '_planks') for i in have if i.endswith('_log')]:
-            try:
-                steps = plan(book, item, have.get(item, 0) + n, have)
-            except CantMake:
-                continue
-            secs = sum(15.0 + 5.0 * s[2] if s[0] == 'gather' else 4.0 for s in steps)
-            if best is None or secs < best[0]:
-                best = (secs, item, steps)
+        book.within = within
+        try:
+            for item in BLOCK_SOURCES + [i for i in have if i.endswith('_planks')] \
+                    + [i.replace('_log', '_planks') for i in have if i.endswith('_log')]:
+                try:
+                    steps = plan(book, item, have.get(item, 0) + n, have)
+                except CantMake:
+                    continue
+                secs = sum(15.0 + 5.0 * s[2] if s[0] == 'gather' else 4.0 for s in steps)
+                if best is None or secs < best[0]:
+                    best = (secs, item, steps)
+        finally:
+            book.within = None
+        return best
+
+    def _blocks_first(self, need: int) -> bool:
+        """The way there needs blocks to build with that aren't held: get them first (the quickest of what the
+        game can give: dirt dug near, planks from logs held, cobblestone...), a few over, then the walk again
+        (like a tool first). True when it switched."""
+        if getattr(self, 'task', None) is None or self.task.active \
+                or getattr(self, '_blocks_tried', None) == self.walk.goal:
+            return False
+        best = self._blocks_plan(need)
         if best is None:
             return False
+        n = need + BLOCKS_SPARE
         self._blocks_tried = self.walk.goal                      # (once per goal: no loop)
         self._resume_walk = (self.walk.goal, self.walk.name, getattr(self, '_walk_entity', None),
                              'fight' if self._fight_after is not None else False)
@@ -713,7 +805,7 @@ class App:
         self.keys.release_all()
         self.fighter.start(threat.id, threat.name)
         self._navi_line(f"{'An' if (threat.name or 'x')[0].lower() in 'aeiou' else 'A'} {threat.name or 'monster'} "
-                        f"coming at us! Dealing with it first.")
+                        f"coming at us! Dealing with it first.", urgent=True)
         return True
 
     def _threat(self, snap):
@@ -733,6 +825,111 @@ class App:
                 if best is None or d < best[0]:
                     best = (d, e)
         return best[1] if best else None
+
+    # ---- goals (core/goals.py): an item order planned from where things are, and again when they aren't so ----
+
+    def _goal_for(self, steps, item, count) -> None:
+        """An order for an item (gathered, crafted, smelted) runs under the goal runner; others (eat, put down,
+        one block) don't."""
+        goal = getattr(self, 'goal', None)
+        if goal is None:
+            return
+        goal.stop()
+        kinds = {s[0] for s in steps}
+        if not steps or not kinds <= {'gather', 'craft', 'smelt', 'station'} or kinds == {'station'}:
+            return
+        have = self._held().get(item, 0)
+        goal.start(item, have + count if have else count, steps)
+        self._goal_count = count
+
+    def _held(self) -> dict:
+        try:
+            return dict(((self.adapter.snapshot().extra or {}).get('inventory') or {}))
+        except Exception:
+            return {}
+
+    def _plan_goal(self, item: str, total: int, after=None) -> list:
+        """The goal runner's planner: from what's held now ([] when it's held). A way that needs blocks to build
+        with that aren't spare: blocks first, from what's in reach (stuck, what's got for the way out can't
+        need the way out); stuck: only what's in reach."""
+        from .core.crafting import plan
+        have = self._held()
+        if have.get(item, 0) >= total:
+            return []
+        reason = getattr(after, 'reason', None)
+        route = (reason.get('route') or {}) if reason is not None else {}
+        if isinstance(route, str):
+            route = {}
+        if route.get('found') == 'needs blocks':
+            need = int(route.get('blocks_it_would_take') or 0) - int(route.get('blocks_to_build_with') or 0)
+            got = self._blocks_plan(need, within=STUCK_REACH)
+            if got is not None:
+                return got[2]
+        book = self.adapter.book()
+        book.within = STUCK_REACH if reason is not None and reason.kind == 'stuck' else None
+        try:
+            return plan(book, item, total, have)
+        finally:
+            book.within = None
+
+    def _step_cost(self, step) -> float:
+        from .core.crafting import step_cost
+        try:
+            return step_cost(self.adapter.book(), step)
+        except Exception:
+            return 0.0
+
+    def task_step_done(self, i: int, took: float) -> bool:
+        """A task's step is done: the goal runner may plan on from here (a milestone that ran long, or the plan's
+        end short of the goal). True: the task's started again with the new plan."""
+        goal = getattr(self, 'goal', None)
+        if goal is None or not goal.active:
+            return False
+        new = goal.step_done(i, took)
+        if not new:
+            return False
+        self._replan_start(new, 'Change of plan')
+        return True
+
+    def _replan_start(self, steps, why: str) -> None:
+        self.task.start(steps, self.goal.item, getattr(self, '_goal_count', 1))
+        self._navi_line(f'{why}: {self.task.describe()}.')
+
+    def _goal_failed(self) -> bool:
+        """A task under the goal runner failed: planned again from here with what was learned (its Reason).
+        True: under way again."""
+        goal = getattr(self, 'goal', None)
+        if goal is None or not goal.active or self.task.active or str(self.task.result) == 'done':
+            return False
+        o = getattr(self.task, 'outcome', None)
+        if o is None or o.ok:
+            return False
+        new = goal.failed(o)
+        if new is None:
+            return False                                 # (no plan from here: thought through, above)
+        if not new:
+            self.task.result = 'done'                    # (it's held after all)
+            return True
+        self._replan_start(new, 'New plan')
+        return True
+
+    def _task_failed_think(self) -> None:
+        """A task an order started (the rules', not the doer's) has failed: the doer thinks it through from there,
+        told what stopped it (what's held counts), instead of the order ending (the iron pickaxe's ingredients
+        all got, then no way up out of the hole, and over, 2026-10-15). Once per order."""
+        if self._goal_failed():
+            return                                       # (planned again: on from here)
+        order = getattr(self, '_task_order', None)
+        if not order or self.task.active or not str(self.task.result).startswith('failed'):
+            return
+        self._task_order = None
+        if getattr(self, 'doer', None) is None or getattr(self, '_doer_busy', False):
+            return
+        why = str(self.task.result)[len('failed: '):]
+        threading.Thread(target=self._doer_order, args=(
+            f"{order}\n(The task doing it stopped: \"{why}\" (step {self.task.i + 1} of {len(self.task.steps)}: "
+            f"{self.task.describe()}). What's held now counts: work out what's in the way and how to get past it, "
+            f"then carry the order on.)",), daemon=True).start()
 
     def _task_trace(self) -> None:
         """runtime/task-<date>.jsonl: each step and phase of a task (getting items), as it changes."""
@@ -805,11 +1002,49 @@ class App:
         """The player pressed a movement key themselves (keyboard hook thread): they take over."""
         self._took_over = time.monotonic()
 
-    def _navi_line(self, line: str) -> None:
+    def _error(self, where: str, e: Exception) -> None:
+        """An error in a loop that runs every frame: shown once (again only after ERROR_AGAIN s), its traceback
+        kept in runtime/errors-<date>.log (one every frame flooded the window, with no way to see where it was,
+        2026-10-15)."""
+        import traceback
+        key = f'{where}: {type(e).__name__}: {e}'
+        seen = getattr(self, '_errors_seen', None)
+        if seen is None:
+            seen = self._errors_seen = {}
+        now = time.monotonic()
+        if now - seen.get(key, -1e9) < ERROR_AGAIN:
+            return
+        seen[key] = now
+        self.q.put(('meta', f'\n{where} error: {type(e).__name__}: {e}\n'))
+        try:
+            with (ROOT / 'runtime' / f'errors-{datetime.now():%Y%m%d}.log').open('a', encoding='utf-8') as f:
+                f.write(f'{datetime.now().isoformat(timespec="seconds")} {key}\n{traceback.format_exc()}\n')
+        except OSError:
+            pass
+
+    def _once_line(self, line: str) -> None:
+        """A line not said again within ONCE_LINE s (\"It's right above us...\" and \"I can't find a way...\" over
+        and over, every plan, 2026-10-15)."""
+        said = getattr(self, '_once_said', None)
+        if said is None:
+            said = self._once_said = {}
+        now = time.monotonic()
+        if now - said.get(line, -1e9) < ONCE_LINE:
+            return
+        said[line] = now
+        self._navi_line(line)
+
+    def _navi_line(self, line: str, urgent: bool = False) -> None:
+        """A line from Navi: shown and spoken, and kept (the doer reads what came of its actions). While the doer
+        runs an order, only its own lines (doer_say) and urgent ones (danger, health, the game out of focus) are
+        shown: each action's own "Let's go to...", "Here we are..." on top of the doer's made eight lines of one
+        "get me down from here", 2026-10-15."""
         if not line:
             return
         self._said = [x for x in getattr(self, '_said', []) if time.monotonic() - x[0] < 600] \
             + [(time.monotonic(), line)]
+        if getattr(self, '_doer_busy', False) and not urgent:
+            return
         self.q.put(('meta', '\n' + line + '\n'))
         if self.bubble:
             self.bubble.bubble_say(line)
@@ -861,14 +1096,23 @@ class App:
             self.task.stop()
         elif cmd_task:
             self.task.start(*cmd_task)
+            self._goal_for(*cmd_task)
             if cmd_task[0] and cmd_task[0][0][0] != 'eat':
                 self._navi_line(f'First: {self.task.describe()}.')
+        adapter = getattr(self, 'adapter', None)
+        if adapter is not None:              # what the task's steps to come use up: not built with on the way
+            adapter.reserve = self.task.reserved() if self.task.active else {}
+        if getattr(self, 'memory', None) is not None and self.walk.dug:   # blocks the walk broke: remembered
+            for cell in self.walk.dug:
+                self.memory.dug_at(cell)
+            self.walk.dug = []
         if self.task.active and time.monotonic() - self._took_over < 0.5:   # the player took over
             self.task.stop()
             self.keys.release_all()
             self._navi_line("Okay, you've got it!")
         if self.task.trace:
             self._task_trace()
+        self._task_failed_think()
         if self.task.active and self.fighter.active:      # fighting off what came at us: then the task again
             self._fight_step(snap, dt)
             if not self.fighter.active:
@@ -1077,7 +1321,7 @@ class App:
                'entity': getattr(self, '_walk_entity', None),
                'planning': getattr(self.companion, '_planning', None), 'clear_line': self.walk.clear_line,
                'route_note': getattr(getattr(self, 'adapter', None), 'route_note', None),
-               'companion': getattr(self.companion, 'mode', None)}
+               'companion': getattr(self.companion, 'mode', None), 'work': _work_now(self.walk)}
         if new_route:
             self._logged_route = route
             pts = getattr(route, 'waypoints', route)
@@ -1170,7 +1414,7 @@ class App:
         while self.fighter.events:
             ev = self.fighter.events.pop(0)
             if ev == 'not_focused':
-                self._navi_line("Click back into the game and I'll keep fighting!")
+                self._navi_line("Click back into the game and I'll keep fighting!", urgent=True)
                 continue
             line = {'won': "Got it! It's down!", 'low_health': "You're hurt! Over to you: heal up!",
                     'target_gone': "It's gone!", 'timeout': "That's taking a while. Over to you!",
@@ -1240,7 +1484,7 @@ class App:
                     line = "It keeps running away! Over to you."
             if line:
                 self.companion.follow()
-                self._navi_line(line)
+                self._navi_line(line, urgent=ev in ('low_health', 'escape', 'surrounded', 'timeout', 'unreachable'))
         self._walk_events()
 
     def _ledge_loop(self) -> None:
@@ -1528,7 +1772,10 @@ class App:
                 if self.plan.active and self.plan.on_event(ev):
                     continue
                 if getattr(self, 'task', None) is not None and self.task.active:
-                    self.task.on_event(ev)
+                    note = getattr(getattr(self, 'adapter', None), 'route_note', None)
+                    me = getattr(self, '_last_player_pos', None)
+                    self.task.on_event(ev, route_reason(self.walk.name or 'there', None, note,
+                                                        tuple(me) if me else None))
                     continue
                 self.companion.follow()
                 need = (getattr(self.adapter, 'route_note', None) or {}).get('blocks_it_would_take')
@@ -1549,7 +1796,7 @@ class App:
                     self.plan.on_event(ev)
                 self._navi_line("Okay, you've got it!")
             elif ev == 'paused:not_focused':
-                self._navi_line("Click back into the game and I'll keep going.")
+                self._navi_line("Click back into the game and I'll keep going.", urgent=True)
 
     def ask(self, question: str, source: str) -> None:
         if self.busy:
@@ -1649,15 +1896,13 @@ class App:
             while self.companion.events:  # e.g. arrived somewhere it was guiding to
                 event = self.companion.events.pop(0)
                 if event.startswith('level:'):
+                    if self.walk.precise:   # (a walk that plans its own way up or down: the guess is noise)
+                        continue
                     _, name, dy = event.split(':', 2)
                     dy = int(dy)
                     line = (f"It's right below us, about {abs(dy)} metres down! There must be a way down nearby." if dy < 0
                             else f"It's right above us, about {dy} metres up! There must be a way up nearby.")
-                    self.q.put(('meta', '\n' + line + '\n'))
-                    if self.bubble:
-                        self.bubble.bubble_say(line)
-                    if self.speaker:
-                        self.speaker.say(line)
+                    self._once_line(line)
                     continue
                 if event.startswith('action:'):  # a ladder, lift, jump or drop just ahead on the route
                     line = ACTION_LINES.get(event.split(':', 1)[1])
@@ -1677,11 +1922,7 @@ class App:
                         self.walk.events.append('gave_up')        # (no way at all: over at once)
                         self.walk.stop('no way')
                     line = f"Hmm, I can't find a way to walk toward {event.split(':', 1)[1]} from here. Let's try another way!"
-                    self.q.put(('meta', '\n' + line + '\n'))
-                    if self.bubble:
-                        self.bubble.bubble_say(line)
-                    if self.speaker:
-                        self.speaker.say(line)
+                    self._once_line(line)
                     continue
                 if event.startswith('arrived:'):
                     if self.walk.active or self.fighter.active:  # walking there (it says so), or fighting
@@ -1699,7 +1940,7 @@ class App:
                 if self.keys:
                     self.keys.release_all()
                 self.walk.stop()
-                self.q.put(('meta', f'\nAuto-walk error: {type(e).__name__}: {e}\n'))
+                self._error('Auto-walk', e)
             in_front = snap.screen is not None and (snap.screen.focused or _own_window_in_front())
             if view.visible and snap.screen and hasattr(self.speaker, 'pan'):  # the voice comes from the fairy
                 self.speaker.pan = ((view.screen_x - snap.screen.x) / max(1, snap.screen.width)) * 2 - 1

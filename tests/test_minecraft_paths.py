@@ -351,7 +351,13 @@ class MineReachTests(unittest.TestCase):
             put(d, s, 9, y, 5, B.SOLID)                                  # a wall between
         put(d, s, 10, 2, 5, B.SOLID)
         put(d, s, 10, 1, 5, B.SOLID)
-        self.assertFalse(B._there(grid(d, s), (8, 1, 5, 0), (10, 2, 5), 'mine'))
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(2 if k == B.SOLID else 0 for k in d))
+        self.assertFalse(B.sees(g, (8, 1, 5), (10, 2, 5), blockers=0))
+        self.assertTrue(B._there(g, (8, 1, 5, 0), (10, 2, 5), 'mine'))   # (one block in the way: mined first)
+        for y in (1, 2, 3):
+            put(d, s, 8, y, 5, B.SOLID)                                  # two thick
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(2 if k == B.SOLID else 0 for k in d))
+        self.assertFalse(B._there(g, (7, 1, 5, 0), (10, 2, 5), 'mine'))
 
     def test_a_table_up_on_the_surface_from_the_bottom_of_a_pit(self):
         # (dug 4 down for stone, the crafting table up beside the pit: "near", but behind the pit's wall, and
@@ -475,7 +481,18 @@ class DigToTests(unittest.TestCase):
         put(d, s, 8, 4, 5, B.AIR)                                       # the hole (stand at y 3)
         put(d, s, 6, 5, 5, B.SOLID)                                     # the table, on the ground
         g = B.Grid((0, 0, 0), s, bytes(d), bytes(2 if k == B.SOLID else 0 for k in d))
-        self.assertFalse(B._there(g, (8, 3, 5, 0), (6, 5, 5), 'mine'))
-        p = B.find(g, (8, 3, 5), (6, 5, 5), can_break=True, kind='mine')
-        self.assertTrue(p.reaches_goal)
-        self.assertGreater(int(p.cells[-1][1]), 3)                      # up out of the hole first
+        self.assertFalse(B.sees(g, (8, 3, 5), (6, 5, 5), blockers=0))    # (not past the corner, as the game sees)
+        self.assertTrue(B._there(g, (8, 3, 5, 0), (6, 5, 5), 'mine'))   # (the block in front mined first: then)
+
+    def test_a_way_down_to_be_come_back_along_is_one_that_can_be_walked_back_up(self):
+        # (dug straight down 14 for stone, then no way up: 2026-10-15): with the climb back counted, a staircase
+        d, s = self.solid_world(10)
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(4 if k == B.SOLID else 0 for k in d))
+        shaft = B.find(g, (8, 11, 8), (8, 5, 8), can_break=True, kind='mine', budget_s=2.0)
+        g = B.Grid((0, 0, 0), s, bytes(d), bytes(4 if k == B.SOLID else 0 for k in d))
+        stair = B.find(g, (8, 11, 8), (8, 5, 8), can_break=True, kind='mine', budget_s=3.0, back=True)
+        self.assertTrue(stair.reaches_goal)
+        cols = lambda p: len({(int(c[0]), int(c[2])) for c in p.cells})
+        self.assertGreater(cols(stair), cols(shaft))                    # across as it goes down, not a shaft
+        ys = [c[1] for c in stair.cells]
+        self.assertTrue(all(a - b <= 1 for a, b in zip(ys, ys[1:])), ys)   # a step at a time: walked back up
