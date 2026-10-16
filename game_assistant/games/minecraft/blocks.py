@@ -55,6 +55,10 @@ COST_SPRINT_JUMP = 0.5              # a sprinting jump: a little dearer than a w
 PARKOUR_RISK = 2.0                  # per block of gap, when missing it would hurt (a deep drop, lava)
 COST_PLACE = 20.0 / TICKS_PER_BLOCK  # a block placed (bridging): turning round and placing, about a second
 COST_PILLAR = COST_PLACE + COST_JUMP  # a jump and a block placed under the feet
+# climbing back up a block from a hole dug straight down: a step dug up out of it (two blocks broken, a jump), the
+# blocks about as hard as stone with a wooden pickaxe (24 ticks): reckoned for a way that's come back along
+CLIMB_BACK = 1.0 + COST_JUMP + 2 * (COST_BREAK + 24.0 / TICKS_PER_BLOCK)
+BURIED_WEIGHT = 4.0                 # the estimate's weight toward a block in the ground (dug to)
 DIG_WEIGHT = 9.0                    # (squared: 3 blocks' walk for each block up or down to a block in the ground)
 H_WEIGHT = 1.5                      # weighted A*: a good route fast rather than the best one slowly
 UNBREAKABLE = 127                   # (the bridge's hardness byte: bedrock, obsidian, lava, unloaded)
@@ -103,6 +107,7 @@ class Path:
     # (from, to: feet positions; cell, against: block cells)
     actions: list = field(default_factory=list)
     cells: list = field(default_factory=list)         # every step's feet position (points: only the turns)
+    cost: float = 0.0                                 # what it costs in all (blocks walked)
 
 
 def stand_height(g: Grid, x: int, y: int, z: int) -> float | None:
@@ -125,7 +130,8 @@ def stand_height(g: Grid, x: int, y: int, z: int) -> float | None:
 
 def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budget_s: float = 1.0,
          max_nodes: int = 200_000, can_break: bool = False, blocks: int = 0, kind: str = 'near',
-         box=None, no_place=frozenset(), sky=None, parkour: bool = True, ground=None) -> Path | None:
+         box=None, no_place=frozenset(), sky=None, parkour: bool = True, ground=None,
+         back: bool = False) -> Path | None:
     """A route from the stand nearest start toward goal (cells). None: nowhere to stand near the start.
     can_break: mine through blocks; blocks: how many blocks there are to build with (bridging, pillaring).
     kind, what counts as there (Baritone's goals): 'near' within NEAR_GOAL across and 2 up or down; 'block'
@@ -133,7 +139,10 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
     feet, its top open); 'column' within NEAR_GOAL across at any height (a village, a biome). box ((min x, y,
     z), (max x, y, z), the max outside it): anywhere inside it across counts as there too (a village's area).
     sky / ground ((x, z) -> a height, or None): standing at the open sky / on the land itself (not up a tree)
-    anywhere counts as there too (kind 'ground': only that)."""
+    anywhere counts as there too (kind 'ground': only that). back: the way will be come back along (what's
+    gathered there is taken somewhere): each way down that can't be walked back up (a hole dug straight down, a
+    drop of more than a block) costs the climb back too (dug straight down 14 for stone, then no way up: the
+    cobblestone was for the furnace, 2026-10-15)."""
     # stood in powder snow already (sunk in it): its cells round the body are taken as open, and the way out
     # planned from there (else no stand near: no route, and the player froze, 2026-10-13)
     sx, sy, sz = start
@@ -147,15 +156,19 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
     # each block up or down toward a block to mine (it's in the ground) is most likely dug through: a few blocks'
     # walk each, not one (counted as one, a stone 7 down was searched for across the whole surface first, and not
     # found in 1.5 s, 2026-10-13)
-    vw = DIG_WEIGHT if kind == 'mine' and g.at(gx, gy, gz) not in PASS else 0.5
+    buried = kind == 'mine' and g.at(gx, gy, gz) not in PASS
+    vw = DIG_WEIGHT if buried else 0.5
+    # (toward a block in the ground the way is mostly dug, many blocks' walk a block: reckoned as one, an ore 13
+    # off through stone wasn't reached in 3 s, 15,872 tried; four times it, half the time, the same way)
+    hw = H_WEIGHT * (BURIED_WEIGHT if buried else 1.0)
 
     def h(c):
-        return H_WEIGHT * math.sqrt((c[0] - gx) ** 2 + (c[1] - gy) ** 2 * vw + (c[2] - gz) ** 2)
+        return hw * math.sqrt((c[0] - gx) ** 2 + (c[1] - gy) ** 2 * vw + (c[2] - gz) ** 2)
 
     # the block to mine or use is never broken on the way (a route that ran out of time ended in the stone it was
     # sent to mine, dug through it, and stood there waiting, 2026-10-13)
     g.keep = frozenset({tuple(goal)}) if kind in ('mine', 'block') else frozenset()
-    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks, frozenset(no_place), parkour)
+    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks, frozenset(no_place), parkour, back)
     open_ = [(h(s), 0.0, s)]
     came: dict = {s: None}
     cost = {s: 0.0}
@@ -217,6 +230,7 @@ def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budge
     path = Path(_simplify(pts, jumps, keep), reached, timed_out, jumps, expanded)
     path.actions = actions
     path.cells = pts
+    path.cost = cost.get(end, 0.0)
     path.length = sum(math.dist(a, b) for a, b in zip(path.points, path.points[1:]))
     return path
 
@@ -229,6 +243,7 @@ class _Ctx:
     blocks: int
     no_place: frozenset = frozenset()   # cells where placing failed lately (not planned there again)
     parkour: bool = True                 # jumps over gaps
+    back: bool = False                   # the way down is come back up: what can't be walked back costs the climb
 
 
 def _breakable(g: Grid, x: int, y: int, z: int) -> float | None:
@@ -315,6 +330,8 @@ def _all_moves(ctx: _Ctx, c):
     plain = set()
     for n, step in _moves(g, (x, y, z), ctx.falls):
         plain.add(n)
+        if ctx.back and n[1] < y - 1 and g.at(*n) != WATER:
+            step += CLIMB_BACK * (y - n[1] - 1)          # (a drop of more than a block: dug back up)
         yield (*n, 0), step, ()
     if ctx.parkour and not placed:
         yield from _parkour(ctx, x, y, z, plain)
@@ -357,7 +374,7 @@ def _all_moves(ctx: _Ctx, c):
             and g.at(x, y - 1, z) not in PASS:
         b = _breakable(g, x, y - 1, z)
         if b is not None:
-            yield (x, y - 1, z, 0), b + 0.5, (('break', (x, y - 1, z)),)
+            yield (x, y - 1, z, 0), b + 0.5 + (CLIMB_BACK if ctx.back else 0.0), (('break', (x, y - 1, z)),)
     # pillar up: jump and place a block under the feet (a jump needs two blocks of room above the head: with
     # one, the head hit the ceiling and the block never fitted under the feet, 2026-10-13)
     if ctx.blocks > 0 and here not in (WATER, CLIMB) and (placed or g.at(x, y - 1, z) in FLOOR) \
@@ -415,13 +432,20 @@ def _there(g: Grid, c, goal, kind: str) -> bool:
 
 
 EYE = 1.62              # the eye above the feet (standing)
-REACH = 4.5             # blocks from the eye a block can be mined or used at (the game's)
+REACH = 4.5             # blocks from the eye a block can be mined or used at (the game's)...
+PLAN_REACH = 4.1        # ...and where a walk to mine or use one ends: a little nearer (the aim's own reach, the
+                        # game's, was 4.4 while routes ended at 4.5: two ores beside the player "could not be
+                        # mined", skipped, and "no more iron ore near here", 2026-10-15)
 # points on a face looked at: its middle and four 0.3 in from the edges (not nearer them: a line grazing a corner
 # was "in sight" from the middle of the cell, and blocked from where the player really stood, 2026-10-13)
 FACE_POINTS = ((0.5, 0.5), (0.3, 0.3), (0.7, 0.3), (0.3, 0.7), (0.7, 0.7))
 
 
-def sees(g: Grid, c, key, eye: float = EYE, reach: float = REACH) -> bool:
+MAX_BLOCKERS = 1        # blocks in the way of a line of sight that are mined first (a leaf before a log in the canopy:
+                        # the log was "no way" from the ground, 2026-10-15)
+
+
+def sees(g: Grid, c, key, eye: float = EYE, reach: float = PLAN_REACH, blockers: int = MAX_BLOCKERS) -> bool:
     """Whether a player standing in cell c reaches block key and can see some of it: a point on a face of
     it turned toward the eye (its middle or near a corner), within reach, with nothing but what the body can
     be in between (air, water, a ladder) (as the game's crosshair works)."""
@@ -429,17 +453,18 @@ def sees(g: Grid, c, key, eye: float = EYE, reach: float = REACH) -> bool:
     kx, ky, kz = key
     if math.dist((ex, ey, ez), (kx + 0.5, ky + 0.5, kz + 0.5)) > reach + 0.9:
         return False
-    memo = (c[0], c[1], c[2], kx, ky, kz)
+    memo = (c[0], c[1], c[2], kx, ky, kz, blockers)
     if memo in g.seen:
         return g.seen[memo]
     # (the cells the body is in are open, whatever the grid read before the way there dug them: from the bottom of
     # a shaft planned down to a stone, the eye "in" the dirt never saw it, 2026-10-13)
     own = {(c[0], c[1], c[2]), (c[0], c[1] + 1, c[2])}
-    g.seen[memo] = got = _sees(g, (ex, ey, ez), key, reach, own)
+    g.seen[memo] = got = _sees(g, (ex, ey, ez), key, reach, own, blockers, c[1])
     return got
 
 
-def _sees(g: Grid, e, key, reach: float, own=frozenset()) -> bool:
+def _sees(g: Grid, e, key, reach: float, own=frozenset(), blockers: int = 0, feet: int | None = None) -> bool:
+    best = False
     for axis in range(3):
         for side in (0.0, 1.0):
             face = key[axis] + side
@@ -451,14 +476,15 @@ def _sees(g: Grid, e, key, reach: float, own=frozenset()) -> bool:
                 q[axis], q[a], q[b] = face, key[a] + u, key[b] + v
                 if math.dist(e, q) > reach:
                     continue
-                if _clear_line(g, e, q, key, own):
+                if _clear_line(g, e, q, key, own, blockers, feet):
                     return True
-    return False
+    return best
 
 
-def _clear_line(g: Grid, e, q, key, own=frozenset()) -> bool:
+def _clear_line(g: Grid, e, q, key, own=frozenset(), blockers: int = 0, feet: int | None = None) -> bool:
     """Nothing in the way from e to q (a point on block key's face): every cell the line passes through on the
-    way (each once, in order: a voxel walk) is one the body can be in, till key's own."""
+    way (each once, in order: a voxel walk) is one the body can be in, till key's own; but for up to `blockers`
+    that can be mined first (not below the feet: never the floor stood on)."""
     cell = [math.floor(e[0]), math.floor(e[1]), math.floor(e[2])]
     d = [q[i] - e[i] for i in range(3)]
     step, t_max, t_delta = [0, 0, 0], [math.inf] * 3, [math.inf] * 3
@@ -472,7 +498,9 @@ def _clear_line(g: Grid, e, q, key, own=frozenset()) -> bool:
         if tuple(cell) == key:
             return True
         if g.at(*cell) not in PASS and tuple(cell) not in own:
-            return False
+            if blockers <= 0 or (feet is not None and cell[1] < feet) or _breakable(g, *cell) is None:
+                return False
+            blockers -= 1
         i = min(range(3), key=lambda j: t_max[j])
         if t_max[i] > 1.0:
             return True                                   # (at the point: on the face)
@@ -483,6 +511,37 @@ def _clear_line(g: Grid, e, q, key, own=frozenset()) -> bool:
 def _at_edge(g: Grid, c) -> bool:
     lx, lz = c[0] - g.min[0], c[2] - g.min[2]
     return lx <= 2 or lz <= 2 or lx >= g.size[0] - 3 or lz >= g.size[2] - 3
+
+
+BLOCK_GET_COST = 6.0      # what one more block to build with costs to get (mined beside: blocks walked)
+
+
+def plan_route(g: Grid, start, goal, have: int, **kw) -> tuple[Path | None, dict]:
+    """A route with what's spare to build with (have blocks): (the path, a note). The cheapest way building with
+    more than are spare isn't taken blind: the way that digs instead (a staircase up, through what's there) is
+    planned too, and taken unless getting the blocks first (BLOCK_GET_COST each) and building is cheaper; then
+    no path, and the note says how many it would take (14 down with 7 spare, a pillar of 13 the only way
+    planned: stuck, 2026-10-15). The note: {'found': 'there' | 'part' | 'no way' | 'needs blocks', ...}.
+    The same for the game and the test world."""
+    path = find(g, start, goal, blocks=have, **kw)
+    note = {'found': None if path is None else ('there' if path.reaches_goal else
+                                                'part' if path.timed_out else 'no way'),
+            'expanded': path.expanded if path else 0, 'cells': len(path.cells) if path else 0,
+            'blocks_to_build_with': have}
+    placing = sum(1 for a in path.actions if a[0] == 'place') if path is not None else 0
+    if path is None or placing <= have:
+        return path, note
+    try:
+        dug = find(g, start, goal, blocks=0, **kw)
+    except Exception:
+        dug = None
+    if dug is not None and (dug.reaches_goal or dug.timed_out) \
+            and dug.cost <= path.cost + (placing - have) * BLOCK_GET_COST:
+        note.update(found='there' if dug.reaches_goal else 'part', dug_instead_of_building=placing,
+                    expanded=dug.expanded, cells=len(dug.cells))
+        return dug, note
+    note.update(found='needs blocks', blocks_it_would_take=placing)
+    return None, note
 
 
 def _opened(g: Grid, cells) -> Grid:

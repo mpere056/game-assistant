@@ -27,7 +27,7 @@ from .spend import SpendGuard
 MODEL = 'claude-haiku-5-5'
 MAX_TOKENS = 2048
 MAX_ACTIONS = 30
-THINK_SAY = 5.0         # seconds of thinking before a word to the player that it's still working it out
+THINK_SAY = 3.0         # seconds of thinking before a word to the player that it's still working it out
 OUTCOME_GRACE = 0.8     # seconds after a step ends for what's said about it to come in
 PROGRESS_EVERY = 25.0   # seconds between progress lines while an action runs
 START_WAIT = 2.0        # seconds for an order to get going (the frame thread picks it up)
@@ -65,7 +65,9 @@ why it couldn't be used (out of reach, in the way). Ask the player first (finish
 only when doing it would bring a risk or a cost they may not expect (a long way at night with enemies about,
 a fight when weak, using up something rare); otherwise just do it. Keep the player told: each act's `say` says what you're
 doing and why, in a few words. When the order is done, or can't be done, call finish
-with one or two short sentences for the player. Never act beyond what the order asks. Keep the player alive
+with one short sentence for the player: what's done, or why not (a danger only if it's near and matters).
+Each act's say is spoken as it starts: give one only when it tells the player something new (why this way,
+what's needed first), not for every step; the player hears nothing else of the actions while you work. Never act beyond what the order asks. Keep the player alive
 before all else: never start or go on with a fight on low health or when outnumbered; get away first ('run
 away'), eat ('eat something') when food is held, keep clear of creepers, and only then carry on. The recent
 conversation (if given) says what earlier orders were: a follow-up ("no, a zombie specifically") changes or
@@ -232,5 +234,9 @@ class Doer:
         time.sleep(OUTCOME_GRACE)                         # (what's said as it ends: "I can't get through here")
         said = self.world.doer_said_since(t0)
         state = self.world.doer_state()
-        return json.dumps({'outcome': said or ['(nothing was said)'], 'seconds': round(time.monotonic() - t0)}) \
-            + f'\n<state>{state}</state>'
+        out = {'outcome': said or ['(nothing was said)'], 'seconds': round(time.monotonic() - t0)}
+        # how it ended, as data (docs/AGENT.md): done, or why not (what's missing, what couldn't be got at...)
+        ended = getattr(self.world, 'doer_outcome', lambda since: None)(t0)
+        if ended:
+            out['result'] = ended
+        return json.dumps(out, default=str) + f'\n<state>{state}</state>'

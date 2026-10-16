@@ -1923,3 +1923,133 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
 - Tests: an iron pickaxe plan (smelting, fuel held first); a furnace worked by the game's rules (exactly 3 in, 2 logs,
   3 ingots out); never into powder snow (a jump over it), out of it when sunk in it. Tests pass. The bridge is built
   and installed (restart Minecraft). Not tried in the game.
+
+## 2026-10-15: "repeating things too much, way too many responses" (user): eight lines for "get me down from here"
+- "Okay! Let me think...", the doer's say for its first act, the walk's own "Let's go to the surface!" and "Here we
+  are: the surface!", the doer's say for its second act, "On my way!", "Here we are: 2 68 -5!", and a two-sentence
+  finish. And the doer had sent it to the surface (the open sky: a tree top is on it) for "get me down", so a second
+  walk was needed.
+- While the doer runs an order, only its own lines are shown and spoken (its says, progress, the finish) and urgent
+  ones (an enemy coming, low health, the game out of focus); each action's own lines are kept for the doer to read,
+  not shown. No "Okay! Let me think...": the doer's first line comes in a moment, or "Working out how to do that..."
+  after 3 s. The doer is told: a say only when it's news, the finish one short sentence (a danger only if near and it
+  matters); and the orders: the ground (down from a tree, a roof: "get me down") and the surface (up out of a cave).
+- Test: while the doer runs, an action's line is kept but not shown, the doer's and an urgent one are. Tests pass.
+
+## 2026-10-15: an iron pickaxe made (user), with a lot of time lost on the way
+- "I don't have what the furnace takes" after 8 cobblestone were mined: dug 8 straight down for them, then back up to
+  the crafting table the walk pillared out of the hole with the cobblestone (6 placed). The doer had them mined again
+  (the pillar: "Cobblestone at (19, 65, -5)"...).
+- Raw iron: 47 s for 2, then "I can't find any more iron ore near here": two ores beside the one just mined were left
+  as "could not mine it" (walks ended in the planner's reach, 4.5 from the eye; the aim's was 4.4: no point found,
+  the crosshair never on them, skipped after 2 s). The doer's "mine the iron ore at 12 56 -5" wasn't an order; its
+  "go to 12 56 -5" (the ore's own cell, an 'exact' goal: stood in, dug toward) went 54 s and failed.
+- What the task's steps to come use up (ingredients, the fuel, a station to put down) is reserved: the walk builds only
+  with what's over (the adapter now picks the block to build with, from the hotbar, past the reserve).
+- Reach: the game's 4.5 for aiming; walks to mine or use a block end at 4.1 (a little nearer: the aim has room).
+- Mining: a block not to be reached from where the walk ended (no point in reach and in sight, or never on the
+  crosshair) is walked right up beside first, once, before it's left for another.
+- Orders: "mine the iron ore at x y z" (one block, by where it is: walked to in reach, mined, picked up); "go to x y
+  z" where a block is (an ore): to where it can be reached, not into it.
+- Tests: what's reserved; built with what's over only; a block walked up beside before it's left; the order. Tests
+  pass. Not yet tried in the game.
+
+## 2026-10-15: "Auto-walk error: TypeError: 'NoneType' object is not subscriptable" at start-up, every frame (user)
+- The last round's reserve line went in between starting a task and saying its plan ("First: ..."), so that line
+  ran every frame, with no task order: None[0]. The tests' app had no adapter, so the new line never ran there.
+- Put back; a test runs frames with an adapter and no task. Errors in the frame loop are shown once (again after
+  30 s) and each one's traceback is kept in runtime/errors-<date>.log. Tests pass.
+
+## 2026-10-15: "it mined down and got all its materials but now doesn't know how to get up" (user)
+- An iron pickaxe from nothing: all its ingredients got, 14 down in a shaft dug straight down; back up to the crafting
+  table: the only way planned was a pillar of 13, with 7 blocks spare (the cobblestone kept for the furnace and the
+  stone pickaxe): "needs blocks", then "I can't get to where I can reach the crafting table", and the order over.
+  The planner doesn't count blocks (it knows only whether there are any), there was no way that dug instead, the task
+  had no way to get what it lacked, and a task an order started never went to the doer when it failed.
+- The user's ask: not hardcoded; better ways of going about things, for tasks never met before. In layers:
+  1. The planner weighs ways by what they cost: the cheapest way building with more blocks than are spare isn't
+     taken blind: the way that digs (a staircase up) is planned too, and the cheaper of it and "get the blocks
+     (6 walked each), then build" is taken. A route's cost is given (Path.cost). Live, 14 down: building 64 + 6
+     blocks to get 36 = 100 against digging 215: the blocks (mined in the hole), then the pillar.
+  2. A task's stuck step is got going: the walk says what it lacked (the route note); the world turns it into steps
+     to get it (blocks: the quickest of dirt, cobblestone, planks; over what's kept for what's to come), they go in
+     before the step, and the step again (twice at most a task).
+  3. Forethought: a gathering walk with more steps after it is a round trip; ways down that can't be walked back up
+     (a hole dug straight down, a drop of more than a block) cost the climb back too, so a staircase down wins when
+     it's cheaper in all (a stone 6 down: a staircase, not a shaft).
+  4. Reasoning: a task an order started that fails (after all that) is thought through by the doer, told what
+     stopped it and where, instead of the order ending. The doer is where what was never met before goes.
+- Tests: a staircase when the way is come back along; a stuck step gets what it lacks first, then goes on (twice at
+  most); a failed task is thought through, once. Tests pass. Not yet tried in the game.
+
+## 2026-10-15: "stuck in a loop and really not reasoning properly" (user): the way out needed the way out
+- At the bottom of the hole (14 down): the walk to the crafting table needed 6 more blocks; the task's fix was "getting
+  oak planks first" (3 logs, cheaper than 10 stone by the count), and the logs were up on the surface: walks to one log
+  after another, each "no way", from the same spot; the fix again (twice); "It's right above us... There must be a
+  way up nearby" and "I can't find a way..." every plan.
+- Stuck, what's got to get out can't itself need the way out: the fix's gathering counts only what's within 6 blocks
+  (or made from what's held): live, dirt or the stone round it, not planks (no logs that near). Walks given up from the
+  same spot twice: the spot's the trouble, not the target: what it lacks first if the world can say, else the step
+  fails (and the doer thinks it through), not the next target and the next. The guide's "it's right above us" isn't
+  said where the walk plans its own way, and passing lines (no way here) aren't said again within 30 s; through
+  _navi_line, so quiet while the doer works.
+- Test: walks given up from the same spot twice: the step stops. Tests pass. Not yet tried in the game.
+
+## 2026-10-15: stepping back: how it goes about things (docs/AGENT.md), stage 1
+- The user: rethink how the assistant breaks orders down and reasons, for all situations, not patched case by case.
+  The play-tests' failures all sat between parts that each saw a slice (crafting planner: items; route planner:
+  blocks; task runner: a list made once; doer: text), with a plan never looked at again, failures as sentences, and no
+  memory. docs/AGENT.md: skills (each game many, with estimates and typed Outcomes), a world memory, a goal planner
+  over the skills costed in seconds from where the player is, plans in milestones planned again on failure, at a
+  milestone when the world has moved from what was expected, or on an interruption (not after every step: the user),
+  the doer above it with typed tools, and a test world playing whole orders. Stages 1-5; PLAN.md phase 6 points to it.
+- Stage 1, typed outcomes and the world memory: core/skills.py (Outcome, Reason kinds: missing, needs_tool, no_target,
+  unreachable, stuck, no_spot, danger, interrupted, timeout, ui); every task failure ends with an Outcome and its Reason
+  (the line for the player kept); done is an Outcome too. core/memory.py: stations put down, blocks dug (by tasks and
+  the walk), what couldn't be got at (from where, for a while), what was seen; its summary is in the doer's state
+  ("crafting table put down at -12 67 -38 (14 above you)"). The walk's give-up reaches the task as a Reason (its route
+  note), and the task's recovery works from that. The doer's act results carry the task's Outcome as data. The state
+  says when the player is at the bottom of a hole (the land round the column far above): it said "on the ground" 14
+  down a shaft.
+- Tests: the memory (stations told with how far up, mined away; what couldn't be got at, left out for a while, from
+  where), give-ups as Reasons, a task's Outcome failed (no_target) and done, a station put down noted. Tests pass.
+
+## 2026-10-15: docs/AGENT.md stages 2 and 3: goals planned again, and the test world
+- Costs in seconds from where the player is: core/crafting.py's book can give gather_cost(source, n) (the way to the
+  nearest that can be got at, and the mining) and station_cost(item) (to one that's there); then a station is chosen
+  by cost: one there (getting to it) or one made and put down here. The game's book (adapter): the nearest few of a
+  block (asked again after 8 s), less those the memory says couldn't be got at from here, reckoned across and up
+  (1 s a block) or down. plan_cost() and step_cost() give what a plan and a step cost.
+- core/goals.py: GoalRunner over a planner (plans from what's held now; [] when it's held). Milestones: the tools, the
+  stations and the cooked things on the way, and the goal. Planned again when a step fails (its Reason: the memory
+  has what couldn't be got at; "needs blocks": blocks first, from what's in reach; stuck: only what's in reach), at a
+  milestone that took more than twice its reckoning and 20 s over, and at the plan's end short of the goal (a plan
+  for what was lacking): never into the same failure again (the same first step, unless what failed was one thing at
+  one place), four times at most; no plan: over to the doer. In the app: item orders (gather, craft, smelt) run under
+  it; the task says when each step's done and how long it took; a new order stops the old goal; the task's own
+  recovery stands aside for it; targets the memory has as out of reach from here aren't walked to again.
+- The route planner: "short of blocks: dig or get them" is one function for the game and the test world
+  (blocks.plan_route); a line of sight may have one block in the way that's mined first (not below the feet: a log in
+  the canopy behind a leaf was "no way"); toward a block in the ground the search's estimate is weighted 4 times (an
+  ore 13 off through stone wasn't reached in 3 s).
+- The test world (tests/sim/world.py): blocks, an inventory, the real planners; moving follows the planned route
+  (what it breaks is picked up, what it puts down comes from the inventory), long ways a part at a time; mining,
+  crafting, smelting, putting down with their stations and tools; each failure the same Outcome as in the game.
+  Cases (tests/test_sim_orders.py): an iron pickaxe from nothing (13 steps, one milestone planned again), 14 down a
+  hole with 5 planks (a table made and put down there: 10 s), out of a hole with only a pickaxe (dug out, the
+  stone dug for the stone pickaxe). Tests pass (368). Not yet tried in the game (it was closed).
+
+## 2026-10-15: the iron pickaxe made with the new goal runner (user: "worked well"); jumping for nothing; the surface
+- Under the goal runner the iron pickaxe from a hole went through ("Change of plan: craft 1 iron pickaxe" at the end).
+  But "multiple times it jumped doing nothing": the walk log has, digging a staircase up to the ores, a level every 6-7
+  s with forward and jump held 1.5-2 s at the same spot, then "replan" and more breaking. A step up was jumped from up
+  to 1.4 off the next cell's middle; under the low roof of a staircase dug up the jump is cut short, and from that far
+  back it came down short of the step. Now a step up is jumped only up against it (within 1.0 of the next cell's
+  middle: up against it is 0.8) and facing it, as Baritone does with a roof over the head; a ladder (straight up) as
+  before. The walk log has what the walk is at (the block broken or put down, the blocker), for the next time.
+- "Take me to the surface": "Here we are: the surface!" at once, at the bottom of a shaft open to the sky (the
+  surface was the open sky over the column). The surface is now the land's level round the column (low in the 5 x 5
+  round it, from the land's own heights under the trees): a shaft's floor and a cave are under it, a cliff's foot isn't.
+  Live, 13 down the shaft: the surface 13 up.
+- A line joined by the shell (two strings run together) put right; the test for joined lines catches those too.
+  Tests pass.

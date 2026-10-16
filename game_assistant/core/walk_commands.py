@@ -98,6 +98,10 @@ _EXPLORE = re.compile(r"^(?:please\s+)?(?:explore|wander|scout|go|walk|head|move
 # Coordinates: 'go to 12 64 -30', 'take me to x 12 y 64 z -30' (the game's own, as it shows them).
 _COORDS = re.compile(r"\b(?:go|walk|take me|head|move|travel|run|get)\b.*?\bto\s+(?:x\s*)?(?P<x>-?\d+(?:\.\d+)?)[\s,]+"
                      r"(?:y\s*)?(?P<y>-?\d+(?:\.\d+)?)[\s,]+(?:z\s*)?(?P<z>-?\d+(?:\.\d+)?)\W*$", re.I)
+# One block by where it is: 'mine the iron ore at 12 56 -5', 'break the block at 3 70 -2' (the doer's, from where_is).
+_MINE_AT = re.compile(r"^(?:please\s+)?(?:mine|break|dig(?:\s+out|\s+up)?|chop|get)\s+(?:the\s+|that\s+|this\s+|a\s+)?"
+                      r"(?P<what>[a-z _]+?)?\s*(?:block\s+)?at\s+(?:x\s*)?(?P<x>-?\d+)[\s,]+(?:y\s*)?(?P<y>-?\d+)"
+                      r"[\s,]+(?:z\s*)?(?P<z>-?\d+)\W*$", re.I)
 # Getting away: 'run away', 'get away from them', 'retreat' (from the hostile ones near, the way away from them).
 _FLEE = re.compile(r"\b(run away|run off|flee|retreat|get away|escape|back off|get out of here)\b", re.I)
 _EAT = re.compile(r"^(?:please\s+)?(?:eat|have something to eat|heal up|eat something|have a snack)\b", re.I)
@@ -228,6 +232,13 @@ class CommandResolver:
                 return got
         if _EAT.match(rest or t) and hasattr(self.adapter, 'food_slot'):
             return WalkAction('task', 'Eating!', name='food', count=1, steps=[('eat', None)])
+        m = _MINE_AT.match(rest or t)
+        if m and hasattr(self.adapter, 'coords_point'):
+            x, y, z = (int(m.group(k)) for k in ('x', 'y', 'z'))
+            point = self.adapter.coords_point(x, y, z)
+            what = (m.group('what') or 'block').strip().replace('_', ' ') or 'block'
+            return WalkAction('task', f'Mining the {what} at {x} {y} {z}!', name=what, count=1,
+                              steps=[('dig', (x, y, z), tuple(point), what)])
         m = _COORDS.search(rest or t)
         if m and hasattr(self.adapter, 'coords_point'):
             x, y, z = (float(m.group(k)) for k in ('x', 'y', 'z'))
