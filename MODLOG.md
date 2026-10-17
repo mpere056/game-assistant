@@ -2053,3 +2053,795 @@ Every change and test, newest at the bottom. Numbers come with the `runtime/` fi
   Live, 13 down the shaft: the surface 13 up.
 - A line joined by the shell (two strings run together) put right; the test for joined lines catches those too.
   Tests pass.
+
+## 2026-10-16: stage 4 (docs/AGENT.md): the doer's typed tools and the situation
+- The doer gave every order in words, read by the rules meant for the player's speech ("place a crafting table" not
+  understood, 2026-10-13; "mine the iron ore at ..." the same, 2026-10-15). Now it has typed tools, each one thing the
+  character does given as data: get (item, count: the goal planner, planning again on the way), how_to_get (the plan
+  and its seconds, nothing done), go_to (x y z, or a place by name), mine_at, put_down, fight (target, count, all),
+  flee, eat, explore, situation. A game offers the ones it has (DoerWorld.doer_tools); `act` stays for orders in
+  words the typed ones don't cover. The resolver builds the same actions from the data (CommandResolver.typed).
+- Each comes back as data: ok, why not (the Reason: missing, unreachable with the route's note, danger...), what
+  changed in what's held, what was said, the seconds. Walks and fights now end with one too (arrived; gave up with
+  the route's Reason; taken over by the player: interrupted; a fight won, or low health / surrounded: danger, gone:
+  no_target, timeout, unreachable), not only tasks.
+- An order planned again mid way (a step failed, the goal planned on from there) is waited for: for a moment nothing
+  runs, and that was read as the end.
+- situation: health, food (now in the snapshot), where, what's held, the world memory as data (stations put down
+  near with how far up or down, what couldn't be got to, blocks dug), the order under way and its plan, what's around.
+- The doer's prompt rewritten for the typed tools; its Minecraft know-how (blocks to pillar with, a pickaxe for stone,
+  creepers, the dark, several points in one order) moved to the adapter (doer_notes): core/doer.py is any game's.
+- Tests pass (379). Not yet tried in the game (it was closed).
+
+## 2026-10-16: the iron pickaxe's waste, beds, houses, the game's own data
+- The iron pickaxe got made, slowly, with idle stretches (task and walk logs of 01:31-01:37):
+  - The first try gave up after a minute, "stuck" on oak logs. Logs up a trunk had a leaf in the way. The route
+    planner counts one block in the way of what's mined as no hindrance (it's mined first), but the mining
+    walked "right up beside it" round the tree instead (33 cells for a log 4 off, a missed jump), then gave up.
+    Now the block in the way is mined first (the aim already said which it was).
+  - The two give-ups were read as "every way out needs something": a way that only needs blocks to build is now
+    unreachable with the route's note, and the goal gets the blocks first, not the doer.
+  - Cobblestone: each stone was the nearest, so it dug straight down 16 blocks from the crafting table, the last
+    6 a fall into a cave, then climbed back up (34 s) for the furnace. Now the block gathered is the quickest
+    there and back to where the step began (climbing reckoned), and one under the feet only where the fall after
+    it is safe.
+  - The furnace was put down by the table before the iron was dug, 23 blocks below, then climbed back to (36 s).
+    Now each station is put down just before its first use.
+- "Make me a bed": no answer. Working out a plan asked the game for each ingredient's blocks one kind at a time,
+  every wool and dye for six colours of bed, each a search of a million blocks on the game's thread: the game
+  froze. Now:
+  - Bridge v18: one search finds the nearest of every kind (find_each), and chunk sections that can't hold the
+    kinds are passed over whole. Entities carry a sheep's colour and whether it's shorn.
+  - Planning has a time limit (4 s). "A bed" plans each colour and takes the quickest.
+  - Wool comes only from sheep. The game's own data is now extracted (`Get-GameData.bat minecraft`, 9,885
+    files, 10 MB, into .local/minecraft/26.3/): from its loot tables, what every creature drops (83 items), so a
+    plan can hunt (a white sheep for white wool, a spider for string). Creatures that may be someone's (cats,
+    dogs, horses, villagers) are never hunted. The task hunts with the fighter, then picks up the drops.
+- "Make me a house, 5 by 5, 3 high": "my building tools only lay one block at a time". Now there's building
+  (core/build.py): the doer gives a structure as parts (fill, walls, hollow, clear, laid in order), which become
+  the blocks, put down from the bottom up, each against one already there. A build gets its blocks first (the
+  planner), mines what's in the way, walks to where each block is in reach and sight (not standing in it), and
+  never digs through what it has built. The doer has a `build` tool and is told nothing asked to be built is
+  beyond it.
+- Tests pass (393). The bridge needs Minecraft restarted to load v18. None of this tried in the game yet.
+- (later, the user: "if it has all the game's data, it should know about shearing; we can't be hardcoding every
+  single thing") Hunting was a special case of something general: the game's loot tables name every way the
+  world gives things besides mining, by their type and folder (entities: killed; shearing; brush; carve; harvest;
+  till). Now all of them are read the same way (what it gives, from which creature or block, which kind of it, how
+  many on average, the chance: conditions inside all_of/any_of, one entry picked of several; a creature's special
+  cases, riding a horse, count as never). A source says how it's got: mined, killed, or an item used on it. The one
+  use skill walks up to the creature (or the block), holds the item, right-clicks once, picks up what came of it.
+  The adapter knows only the game's five verbs' items (shearing and carve: shears, brush: a brush, till: a hoe,
+  harvest: the hand). What isn't in the data (in the game's code: milk is a bucket used on a cow) the doer looks
+  up on the wiki and records with a `learn` tool (.local/minecraft/learned.json); the planner reads it from then on.
+  Tests pass (395).
+
+## 2026-10-16: "way too slow, it should always respond within a second"; killed backed into a corner
+- "Make me a bed" (chat and doer logs, 02:14-02:20): every plan for a bed ran into the 4 s limit ("took too long").
+  Profiled live: 553,321 ways tried in 20 s (all the wool, dye, string and flower ways a bed can take, each worked
+  out in full). Now a guide first: about what one of each item costs from here, each from the others' costs round
+  and round till none gets cheaper (the recipes go in circles: a bed from a dyed bed; a guide worked out down one
+  path said "no way" for white wool where it came round); then only the cheapest two ways of each item, and three
+  of the items that fit an ingredient, are worked out in full. A white bed: 0.11 s (2 logs, a crafting table, 12
+  string from spiders, 3 wool); an iron pickaxe, shears: under 0.05 s. Fuel by what it costs for what it takes (a
+  coal block, nine coal, had been chosen to smelt two ingots).
+- The first "make me a bed" and "hello, can you hear me?" were thought through at once and shared one step log:
+  the bed order died of an IndexError, and its "Sorry" was kept back (other lines are, while the doer works).
+  Now a newer order ends the older (each with its own log); errors are always said.
+- Something is said within a second of every order: the doer's "Working out how to do that..." after 1 s (was 3)
+  if the model hasn't spoken yet; with the planner quick, item orders are answered by the rules at once.
+- The fights (combat log 02:21-02:25): backing off a zombie, "back" held while it closed from 2.1 to 0.5 (backed
+  into something: only the 8 cells beside the player were known); hurt to 3 of 20, the next zombie of "kill the
+  zombies" was taken on, and the player died. Then, fetching the dropped things, "you're hurt, over to you" and the
+  walk went on among the zombies: dead again. Now:
+  - The fighter sees the ground 4 blocks round (adapter terrain(): where it can stand, and how much room there is
+    from a spot, 3 steps out). A way is only taken over ground to stand on (1 block on; 2 barred sliding along
+    walls), and a spot with little room (a corner, a dead end) counts against it. Keys held one way with the
+    player not moving: that way's blocked for 1.5 s. In a test arena (a wall behind and to one side, 1 to 3
+    zombies): 18 hits taken in all against 36.
+  - No new fight (nor the next of several) below half health: away first. Hurt: everything stops (the walk
+    isn't taken up again, the order's other parts dropped), and food held is eaten.
+- Tests pass (400). Not yet tried in the game.
+
+## 2026-10-16: killed again, going back for the dropped things
+- Combat log 02:37: just after dying (empty-handed), "go to those coordinates" (where the things lay) at night; four
+  zombies there, 17 health to none in 4 s, swinging a fist (1 a hit, a zombie has 20). The player: the zombies
+  were where the things were, so they couldn't be gone round; they have to be fought, without being hit. Now:
+  - The fighter weighs the odds (every second): the time to bring down every one coming at the player, by the
+    damage a second of the best weapon held, against what they'd do meanwhile. One that can't be won on the
+    ground, with blocks held and only fighters that must get up close (not skeletons, not creepers): up a
+    2-block pillar (looking down, a block under the feet at the top of each jump), crouched, and each one that
+    comes in reach hit from above; they can't reach the player up there. Else away if they can be outrun
+    ('outmatched': everything stops, as when hurt); else fought. In the test arena: four zombies, bare hands,
+    up two blocks, all down, not one hit taken.
+  - Walks go round hostile creatures (cells within 4 blocks of one cost more, as Baritone's do), but one at the
+    goal (what's walked to).
+  - Where the player last died (bridge v19: the game keeps it, the recovery compass's): "where I died" is a
+    place to ask about and go to; the doer's state has it, and what the player is armed with ('nothing, fists
+    only'), and the doer gets a weapon first before going among enemies (and blocks to stand on: the notes).
+- Tests pass (404). Minecraft must be restarted for bridge v19.
+- Killed a third time, going back again (02:47; "I was still backed into a corner"). The live world round where it
+  happened: the player's things lay at the bottom of a pit, a pocket of about 10 open cells at y 65, reached by
+  steps from the north-west. The walk went down into it, four zombies there; 4.8 s fought off at full health, then
+  (bare-handed, nothing to build a pillar with) "outmatched", and 6 s "retreating" with the zombies within 1.5 the
+  whole time: boxed in, every way blocked, the keys changing each quarter second, and not one swing back. Now:
+  - A retreat that hasn't got within RETREAT_GAIN of clear in RETREAT_TRY s is given up: hit back (a test: boxed in
+    3 by 3, two zombies: 4 swings in 4 s, against none before).
+  - The odds weigh the room there is: on open ground hit and back off takes few hits (three or four zombies held
+    off 26 s without one, earlier today); in a corner every one counts in full.
+  - On a walk, hostile ones where it's going (or between) are met on open ground: held there if there's room round
+    the player, else from the last open ground passed (tracked as it walks); the fighter holds ground (fights what
+    comes near, never in after them into less room); if none comes in 10 s ('held_off') the walk isn't taken on
+    into them: the player is told, and asked whether to get a weapon and blocks first, or wait for daylight.
+  - The fight's log has where the player was and the room round them.
+- Tests pass (407).
+- A fourth time (02:55, "get my items where I died"): the doer rightly made a wooden sword first (empty-handed, two
+  skeletons near), but:
+  - Two skeletons 6 and 9 blocks off, not after the player, held the walk 10 s ("There's 2 Skeletons ahead! I'll
+    take them on here"), three times. The user: "the character was just doing nothing because of caution for
+    those skeletons." Now ground is held only for fighters that must come up close (not ones that shoot or blow
+    up), and only those after the player or where it's going.
+  - The oak log taken was the tree at the pit's edge, by the zombies. Now each hostile creature near a block to
+    gather counts against it (30 s), for every gather.
+  - On the way, a sprinting jump on the pit's rim was missed: 13 blocks down, among the zombies, hurt; boxed in on
+    the slope (room 8, then 5), bare-handed, dead. The jumps' risk was judged by the least fall in the gap (one
+    shallow cell made a deep gap "safe"); now by the worst, and over a fall that would hurt only a walking jump
+    over one block, level, is taken (never a sprinting one): the way round, or a block across.
+  - Boxed in (a retreat that gets nowhere): the way back to the open ground passed is planned, round them, and the
+    fight held there; else hit back. Holding ground is in the fight's log too.
+- Tests pass (410).
+
+## 2026-10-16: "it should've been able to kill the skeleton, it was within reach"; shields
+- Combat log 03:0x: a skeleton up on a ledge, 2.8 across: "waiting" (out of reach), then jumping (out of reach
+  4 s: jump), then "I can't reach that one!", shot meanwhile from 10 health to 2; then dead. Reach was measured
+  from the eye to the middle of its body less its width: for one up a ledge, its middle 1.5 over the eye was out of
+  reach while its feet were in it. Now to the nearest point of its body (its box, as the game measures a swing),
+  aimed at the part of it nearest when it's well up or down, and stepped in nearer across the higher it is
+  (2.7 across was right only level with it). A test arena with the game's crosshair (a ray through the body's
+  box): one up a ledge, hit from below.
+- The user: a shield before a fight with a skeleton; one shooting while doing other things: hidden from or fought,
+  depending. Now:
+  - A fight order against one that shoots (the adapter's fight_gear: a shield in the off hand): the shield got
+    first when it's quick enough (the planner's reckoning, 3 minutes at most), put in the off hand (a task step:
+    picked in the hotbar, the swap-hands key), then the fight (the fighter already holds it up against arrows).
+  - On a walk, one that shoots set on the player within 16 blocks: fought if within 10, alone, the player over
+    half health and the odds good; else into cover: the nearest spot within 6 where a block stands between its
+    eye and the player's head (the game's own rays), kept still there till it's given up 3 s (or 10 s), then on.
+- Tests pass (414). Not yet tried in the game.
+
+## 2026-10-16: "significantly more fixing": a gear errand among skeletons, jumps, one picture of the danger
+- "Kill any nearby skeletons" (10:19): a shield first, from nothing (logs, a pickaxe, stone, iron, smelting): on the
+  way, the old crafting table at the pit's edge was gone back to; a zombie fought with bare hands while a skeleton 5
+  to 10 blocks off shot the player from 12 to dead. The fighter saw only the zombie.
+- Jumps over gaps: 6 of 14 "missed" (walk logs). Traced frame by frame, 4 of them were made: the player landed,
+  and the walk held forward on (landed was "within 0.6 of the landing's middle at its height", which a jump goes past
+  in the air), over the landing and off the next edge (once the pit's rim: 13 down among the zombies) or into a
+  wall. Now landed is down on the ground again after the jump, on or near the landing (a block lower too), and
+  forward is let go over the landing; a sprinting jump runs from the back of its block, for speed. (Sprinting
+  jumps were briefly turned off; the user: they're an important mechanic, improve them: on, with the fix.) A test:
+  a 2-block gap onto a 1.8-deep landing with a drop past it: landed, not off it.
+- A crafting table or furnace that's there, and blocks to gather, count as dearer for hostile creatures near them.
+- One picture of the danger (core/threat.py): every hostile one near (up close, shooting, blowing up; set on the
+  player; for those shooting, whether they can see the player: the game's rays, every 0.5 s), weighed at once:
+  cover from those shooting when it isn't a fight for the open (others up close, hurt, unarmed, more than one,
+  the odds); else the nearest up close fought; else one shooting near and alone fought; else held for, where the
+  walk's going. The same on a walk and on a task (the task's own check saw only ones within 6 up close). Replaces
+  the walk's defence, the check for what's ahead, and the shooter rules.
+- The fighter, fighting one up close, keeps out of the sight of those shooting (each way scored by how many of them
+  would see the player there: one batch of the game's rays every 0.3 s); its odds count those shooting in full
+  (backing off is no help against arrows). Covers are out of the sight of every one shooting.
+- Tests pass (421). Not yet tried in the game.
+- 10:37: "Skeleton's shooting at us: into cover!", then nothing: the player stood in its sight. The hiding check ran
+  before the walk's own update each frame and returned while the walk to cover was under way: the walk never took
+  a step (a bug of the last change). Now the walk to cover goes on; in cover the task (and the walk it was on) wait;
+  one up close that followed into cover is fought there. A test runs the frames: the walk to cover goes.
+- Tests pass (422).
+- 10:38-10:44 (killed by a zombie; "multiple failed jumps, didn't notice a zombie until it was too close, inefficient
+  pathing"):
+  - The jump that "failed": into cover was ordered mid-jump; the walk started over in the air, a fall of 10 (20 to
+    10 health). The weighing of the danger now waits while the player's in the air (a jump under way, or not on the
+    ground).
+  - At 10 health and bare-handed, gathering logs, a zombie was let come to 6 blocks before anything was done; then
+    away (boxed in), fought in a corner: 10 to dead in 4 s. Now ones that must come up close are weighed from 16
+    blocks: when it's no fight to win (and there's nothing to build up out of their reach with), away from them at
+    once, while they're slower than a walk; on with the order when they've lost the player or fallen 18 behind (or
+    fought, if one catches up). And a zombie up close is reckoned at 3 a second (its hit, once a second), not 1.5:
+    a corner with bare hands at half health is no fight to win.
+- Tests pass (424).
+
+## 2026-10-16: one conductor (docs/CONDUCT.md)
+- The run at 10:5x: the shield errand back to the pit; hold ground; "held off", "I won't walk in among them"; the
+  errand on, into the pit; a fall on the way to cover (18.9 to 10.9); hold ground again in the pit; and again. Each
+  part did what its rule said; eight parts moved the character on their own triggers, with hand-offs between them.
+  The user: step back, maybe a better architecture. Written up in docs/CONDUCT.md; the user agreed to the conductor,
+  and not to remembered danger zones (the character must be free to go into new places and back to old ones).
+- Built: core/conduct.py, one place that decides each frame whether the order or one survival behaviour (fight,
+  cover, away, hold, regroup) has the character, from the danger weighed as one (core/threat.py). A behaviour runs
+  till it ends (commitment), a higher one cuts in only after 1.5 s and never mid-jump; one that got nowhere (held
+  off) isn't started again against the same creature for a minute: its outcome goes to the order instead (the
+  task's step fails with a danger Reason at that target, left out a while: that tree, not the place; the plan goes
+  round it; a walk with nothing else to it is over, and the player asked). The order is paused and taken up again
+  only by the conductor (the task's step from its start; the walk planned again from here). Gone: `_safety`,
+  `_hiding`/`_hidden`, `_hold_after`, the cover/away/hold walks' own hand-offs, the fight events' own walks. A
+  survival walk's arrival is its own (the paused task took it for its own). Behaviours wait by the frames' time.
+  Every change of who has the character is logged with why: runtime/conduct-<date>.jsonl.
+- Tests pass (429). Not yet tried in the game.
+- 11:42 (killed; the conductor's first play-test). The decision log (and the task log) showed:
+  - Cover couldn't be had (no spot near) after the order had been paused: the order stopped, then started again
+    the next frame; with two skeletons each the nearest in turn, every frame: the task "resumed" over and over, its
+    walk never under way (none logged since). Now the order's paused only once a survival behaviour is under way,
+    and one that can't start (no cover) isn't tried again for 5 s against any.
+  - After the order's own fight ("kill the skeletons": outmatched, "over to you"), nothing guarded the player: a
+    zombie killed them where they stood. Now the conductor also deals with danger for the player whenever they've
+    not been at the controls for 3 s (no order needed).
+  - A pickup guarded by hostile ones failed the whole step (a dropped log has no block to leave out): now that
+    drop is left, the step goes on.
+  - The tests wrote into the real decision log (runtime/conduct-...): no more.
+- Tests pass (432).
+- 12:11 (killed in the pit; "still big problems, reason more deeply"). The logs put together, one link at a time:
+  1. "Kill the skeletons around here", bare-handed. The fight's gear asked only for a shield (never a weapon), so
+     the errand went for oak logs, with the last order's "kill all of them" still set.
+  2. The tree it chose stood on the rim of the pit, with six hostile ones 8-12 blocks off below. Only ones within 6
+     blocks of a tree counted against it.
+  3. The way there ended with a sprinting jump up onto the rim. It came down 0.44 past the landing's middle, nothing
+     held, slid 0.37 on and off the far edge: 11 blocks down (walk log 97040.2-97041.6).
+  4. At the bottom, in a 1-by-1 hole with one step up out of it, the walk got out once and went back in (a spider sat
+     on the step). A zombie came: the conductor's fight ("after the player, up close").
+  5. 15 full-strength hits, all on the zombie; it never went down: fists (1 a hit). The fighter knew it couldn't
+     win, but both ways out were barred: the pillar by two skeletons 8 off (not after anyone, in the dark), getting
+     away by the spider (not after anyone, by day). At low health it "stood". A second zombie came; 17 to 0 in 5 s.
+     The conductor logged the death as "won".
+  6. Also: two parts still started fights. The old "an enemy on the way" check ran beside the conductor. It went
+     by the facing direction, not by being set on the player. It ran on the gear errand because of the stale
+     "kill all" order. Each of its fights ended with the task "resumed". A pause left over from a held-off
+     behaviour "resumed" the next task.
+- Changed (each with a test made from the run):
+  - Jumps land crouched: from letting go of forward in the air to the touch-down and its settling (up to 0.35 s,
+    back held when past the middle). Minecraft's sneak never goes over an edge. (A test world with momentum: the
+    same landing without it slides off.)
+  - The planner makes no sprinting jump onto a rim with a fall that would hurt past it (it comes down near the far
+    edge, at speed); a walking jump, or the way round.
+  - A block to gather counts hostile ones up to 16 blocks off against it, less the farther (one set on the player
+    half as much again).
+  - A fight order bare-handed gets the quickest weapon first (the planner's reckoning: a wooden or a stone sword),
+    then the shield against one that shoots; each one is skipped if it can't be had in time. The order's own state
+    is set before its gear errand starts.
+  - Minecraft: the conductor guards fight orders' walks too (another one up close, after the player, is fought;
+    then on to the one the order's for, as a fight). The old on-the-way check is for games without a conductor
+    (Elden Ring).
+  - The fighter: ones that shoot or blow up bar the pillar only when they're set on the player; a fast one
+    (a spider) bars getting away only when it's set on the player. The pillar goes 2 over the highest ground next
+    to the player (in that hole: 3). At low health with no way away: up the pillar if it can, before standing.
+  - A death ends a survival behaviour as "died", not "won". A held-off behaviour, a new order or a new task clears
+    the paused order.
+  - The fight log gains what's in hand and the target's health (whether hits land, and with what).
+- Tests pass (443). Not yet tried in the game.
+
+## 2026-10-16: walking rebuilt the Baritone way (docs/MOVEMENT.md)
+- The run at 12:30 ("kill all the skeletons nearby"):
+  - **The far tree.** It walked 34 blocks to a tree, past two trees 5-7 blocks off; its route passed within 3
+    blocks of them. My danger rule from the round before (hostile mobs up to 16 blocks off count against a tree)
+    counted skeletons 13 blocks off and 10 down in the pit.
+  - **The jumps.** Its planned jumps were walking ones, and the rule against running jumps onto rims cut others.
+  - **The climb.** Back to the crafting table it dug a staircase up through the hill instead of walking back up
+    the slope it had come down. Jumping in place at each step, re-planning; then the pause.
+- The user: "look into https://github.com/cabaletta/baritone, and please do things the way they do. You can use
+  their code too." Baritone is LGPL-3.0 and this repo is MIT and public, so its design, the game's physics numbers
+  and its default penalties are used; the code is our own (docs/MOVEMENT.md, Licence).
+- New:
+  - `games/minecraft/pathing.py`: Baritone's moves (traverse, bridge, ascend with a step put down, descend, fall,
+    diagonal round corners, pillar, ladder, swim up, downward, parkour), costs in ticks. A* with its estimate,
+    the best part of the way out of time, and several goals at once.
+  - `games/minecraft/moving.py`: each move done frame by frame by its own rules (Baritone's PathExecutor and
+    movements). Our changes for keys sent from outside the game:
+    - jumps pressed ahead by the speed, short ones timed to land in the middle;
+    - the jump key held until airborne;
+    - a run dropped before walking jumps and falls;
+    - crouched landings with nothing past them;
+    - falls steered by the keys alone;
+    - pillars open the block two over the head.
+  - `tests/sim/physics.py`: the game's movement, tick by tick; `tests/test_moving.py`: 18 routes done end to end
+    in it. Along the way it found:
+    - a jump key held a frame missed by the game's tick;
+    - a walking jump at a run overshooting a one-block rim by three;
+    - a walking jump flying 2.4, past a one-block island into the next gap;
+    - a fall carried past a one-wide ledge while turning round;
+    - a bridge "at the edge" while still turning to it.
+  - Bridge v20: the blocks round the feet every frame (7×8×7), and the player's speed across, whether they're up
+    against something, crouching or running. With an older bridge, the mover asks about its own blocks.
+  - Choosing a block to gather: one search toward the nearest 16, the first one reached taken (Baritone's
+    mining). The danger rule from the round before is gone.
+  - Hostile mobs on routes: Baritone's avoidance (a move within 8 of one costs 1.5 times, compounding).
+- Gone: the old search in blocks.py (blocks.py keeps the grid, the kinds, standing, sight and the goals); the
+  rules not Baritone's: walking jumps only over harmful falls, no running jumps onto rims, the cost of standing
+  by a cliff edge, refusing drops onto narrow ledges (the fall's now steered onto them). The walk's old
+  step-by-step doing of routes stays only as a fallback where no mover is set.
+- A long way planned further while walked is handed to the mover whole again: it finds where the feet are along all of it (it looked only 8 moves ahead, and would have planned again).
+- Tests pass (458). Not yet tried in the game: restart Minecraft (bridge v20) and the assistant.
+
+## 2026-10-16: the first play-test of the Baritone-way walk (14:30)
+- The order: "gather four wood, make a stone sword and a stone pickaxe, then two more wood from a different tree".
+  The nearest tree was taken (the new choice). Then the stone and a skeleton:
+  - **The stone.** The first stone "in reach" needed a block of dirt mined out of the line of sight. The goal
+    counted that block as free, so a stone behind dirt looked as cheap as one in plain sight. Then a 3-block fall
+    into a hole for the next one. That's a move Baritone takes too; health was still 20 after it, so the damage
+    was the skeleton's.
+  - **The cover.** A skeleton shot; "into cover". The walk there stopped a block short and stood 10 s, then
+    hid at a spot the skeleton could still see. Health went from 20 to 3.8 in 22 s.
+    - At the end of the route the mover had finished, but the walk's old end-of-route code waited for the
+      route's own action list (steps, breaks), done by the mover but never marked done. That stall hit any walk
+      whose last move had work in it.
+    - The spot was tested for sight at the player's own height, not the height of the ground there; with the
+      head only; and "there" was the loose near-it goal (a block short counted).
+    - In cover, nothing looked again whether the skeleton still saw the player, or noticed the hits.
+- Changed:
+  - When the mover's done, the route's own work is marked done (only looking at what was come for is left).
+  - Cover: the spot tested at the height the feet would be there, head and body both out of sight; the walk ends
+    on that very block (a new 'cell' goal). In cover, seen by the shooter for 0.6 s or hit: that cover's given
+    up (not taken again for a minute) and the next is looked for at once.
+  - To mine a block: the block in the way of the line to it is broken first, and now counts in the cost (its
+    break time). The estimate for a block to mine runs to within reach of it, not to the block itself, and is
+    weighted more only for one shut in on every side. (The double weight for any solid target let a dearer
+    buried stone finish first.)
+- Baritone itself never fights; for mobs it only has avoidance in its routes (here since the last round).
+  Keeping the player safe is the conductor's (docs/CONDUCT.md).
+- Tests pass (461). Not yet tried in the game.
+
+## 2026-10-16: the long play-test (15:46-15:58): items back, a shield, iron armor, down a mine
+- The user: "mining upwards especially works perfectly now". What the logs showed went wrong:
+  - **Out of the hole.** "Take me to the surface" from 36 down, and a walk to a tree from there: plans found
+    ("there", 48 cells), then a re-plan every 3 s for a minute, "I can't find a way". A way with a pillar in it
+    put the pillar's block down against nothing; turning the route into the walk's actions raised. The companion
+    swallowed the error, so it looked like no way at all.
+  - **The pickaxe wore out down the mine.** The gather step checked for its tool only as it started. With the
+    stone pickaxe gone it went on "mining" iron with the wooden one, nothing dropping, the same ore walked to again
+    and again, until the player said so.
+  - **Orders cut short.** "While you're doing this, can you also make me full iron armor?" stopped the shield
+    under way, and it was never taken up again. After "the pickaxe broke, get another" it made the pickaxe, then
+    told the player to leave, instead of going on with the armor. "No, finish what you're doing" was needed.
+  - **Mine at.** "Done! You have your iron ore" four times, nothing got; the raw iron lay there until asked again.
+  - **Dropped items** were "creature in sight" to the doer, with no coordinates: its go_to there couldn't start.
+  - **Tunnelling.** Down the mine a new route came every 1.6 s, and each started the move under way over. The
+    companion re-planned whenever a partial route had less than 50 m left: made for open ground, it's always so
+    digging through stone.
+- Changed:
+  - A pillar's block is put down on the one under it. A route plan that raises is logged (runtime/errors-...),
+    not hidden.
+  - The gather step checks its tool each time it looks for the next block. With the tool gone it fails with
+    needs_tool, and the goal runner plans again from what's held, a new tool in it.
+  - Orders cut short by a newer one are kept, shown to the doer in the state ("unfinished earlier orders").
+    One that adds to them ("also", "while you're doing this") has them done too; one that fixes something in
+    their way is done and then they're carried on with; one that replaces them leaves them. finish says which
+    (earlier: done, dropped, open).
+  - A dug block whose drop didn't come is walked onto, once.
+  - where_is: a dropped item is "item lying on the ground", with its coordinates.
+  - Walking block by block, the next part's planned when 8 blocks are left, not 50 m. A new route that has the
+    move under way in it goes on with that move as it is (Baritone splices). A stopped walk leaves nothing to the
+    next.
+- Tests pass (465). Not yet tried in the game.
+
+## 2026-10-16: the inventory skill (16:40)
+- "There's iron in my inventory but not in my hotbar, can you move it there, and sort things as well": "my orders
+  don't reach the inventory slots, and the game kept rejecting the request". The doer had no tool for the
+  inventory. Its `act` went to the words-only orders, which took it for a walk ("I didn't catch where to go"), and
+  it told the player the game wouldn't let it. Crafting uses that very screen, and a step already moved tools
+  into the hotbar inside tasks, but no order could reach it.
+- New skill: lay out the hotbar (core/tasks.py, the 'arrange' step). The inventory screen is opened, one move at a
+  time: the wanted stack picked up and put on its slot, what was there put back where the stack came from, the
+  screen read again after each; what's left on the cursor put down; closed. The layout is the game's
+  (adapter.hotbar_layout): items to have in the hotbar; sort, the usual way players keep it (the best weapon,
+  pickaxe, axe, shovel, food, blocks to build with, a torch, then what was asked for, then what else was there);
+  or slot by slot.
+- The doer has it as a typed tool (`inventory`: items, slots, sort). Words-only orders ("put the cobblestone in
+  my hotbar", "sort my inventory") go to it too.
+- The doer's told: what the game lets a player do, the character can do too; with no tool for it, it's a skill
+  not had yet, never "the game won't let me".
+- Tests pass (468). Not yet tried in the game.
+
+## 2026-10-16: understanding orders about how to move (16:51-16:57)
+- "Without placing any blocks, could you jump from here onto that crafting table?" (asked by voice): "Yes! Walk
+  about two blocks closer, then sprint-jump", then "probably not: a standing start clears about one block".
+  Guessed, the ground never looked at; the planner would have known.
+- "Jump on top of that crafting table without placing any blocks": the doer tried "back up as far as you can,
+  then sprint-jump onto the crafting table" through act three times. Each was "I didn't catch where to go":
+  act takes only simple orders, and the walk plans its own jumps. Then go_to, which put down 2 cobblestone: no
+  walk could be told not to.
+- New:
+  - check_way (the doer's and the voice agent's): whether the player could get to a spot and how, by the planner
+    on the real ground, nothing done. To what's looked at (onto its top) or x y z, with or without putting blocks
+    down or digging. Can or not; each jump (the gap, at a run or not, up a block); drops; blocks put down and dug;
+    seconds.
+  - go_to's place_blocks and dig: a walk that never puts a block down, or never digs (the planner plans without).
+    Set on every walk, so a later one there doesn't keep them.
+  - The doer's told: moving is go_to, jumps and climbs and how included; check before saying a way can or can't
+    be made, never guess. An act it can't follow says so, and what to use instead.
+- Tests pass (469). Not yet tried in the game.
+
+## 2026-10-16: the navigation skills, as Baritone's commands
+- The user: "there should be skills to do most things Baritone can do, like all the navigation stuff". Laid side by
+  side (docs/MOVEMENT.md, Skills): most were here already (go_to, get and mine_at, explore, the surface, build,
+  where_is, flee). New:
+  - Goals: go_to x z (GoalXZ: that spot at any height), y (GoalYLevel: down or up to that height), within r
+    (GoalNear). The planner's goal tests and estimate have them.
+  - follow (Baritone's follow): a creature walked after again whenever it's farther than the distance asked, till
+    another order, the player taking over, or it's gone.
+  - pickup (Baritone's pickup): the dropped items within a radius (or of some kinds), each walked onto.
+  - tunnel (Baritone's tunnel): straight on from the player (a direction, or the way the camera faces), its
+    length, width and height: a cleared box, built by the build skill.
+  - waypoint (Baritone's waypoints): named places kept between sessions (.local/<game>/waypoints.json); set, get,
+    list (with the last death), delete; gone to with go_to.
+- Not yet: farm, elytra, axis, invert, backfill, exploring to unseen ground.
+- Tests pass (476). Not yet tried in the game.
+
+## 2026-10-16: a question answered in words was never heard
+- Play-test: "Can you jump onto that crafting table without placing any blocks?" sat at "Working out how to do
+  that...". The doer had checked (check_way: yes, 8.4 s, one running jump up over a gap) and answered in plain
+  words instead of calling finish; words without a tool call were returned, never said. Now they're said too.
+- Then "okay, please do the jump" walked to beside the table, not onto it: the doer's go_to asked for the
+  "crafting table" by name (a block's goal: stood beside it), not the top check_way had found. Now:
+  - go_to has onto (with a kind of block or "that"): the cell over the block, stood on. "onto ...", "on top of
+    ...", "up on ..." in the place's words do the same.
+  - check_way gives the go_to that does the very way it found.
+  - The doer keeps the last way checked (5 min) and gives it to the next order, for "okay, do it".
+- Tests pass (479). Not yet tried in the game.
+
+## 2026-10-16: jumps any way (the leap), and the fewest jumps
+- Play-test: "Can you do it with just one jump?" got "I can't: two jumps, 17 steps". The way to the crafting
+  table went down through the ravine and back up. The player: "I can even jump back to the block from the
+  crafting table with one sprinting jump... It can even do it without a sprinting jump". The table is two across
+  and three along, one lower. Every jump the planner knew went straight along x or z (Baritone's parkour), and
+  never down.
+- New move, the leap (pathing._leaps, moving.Mover._leap): docs/MOVEMENT.md has the details.
+  - Any way over a gap, onto a block up one, level or down one. Walking where a walking jump carries far enough
+    (0.85 of the game's own jump counted on), else at a run.
+  - The body's room is checked along the whole flight, all worked out once (LEAP_TABLE).
+  - It costs a little more than a straight jump. The executor eases off if too fast, lands crouched, and walks
+    back on if it slid off.
+  - On the real terrain (read from the game): down onto the table, one walking jump (1.2 s, was 7 s and 17
+    moves); back up, one jump at a run. Both are as the player found by hand.
+  - Planner speed: a step was 7 times as long at first; worked out ahead and indexed straight into the grid's
+    bytes, it's now 1.45 times as long.
+- check_way most_jumps: the quickest way if it's within that many jumps, else the way with the fewest
+  (FEWEST_JUMPS a jump), and can or not. go_to fewest_jumps does that way.
+- The doer is told not to answer such a question from an earlier check.
+- Tests: in the movement sim, the hill-and-table jump down at a walk and back up at a run, a slanted gap level,
+  and fewest jumps walking round. All 483 pass. Not yet tried in the game.
+
+## 2026-10-16: the doer's lines kept to what was asked
+- Play-test: the jumps worked, but every reply was padded with the state: "Made it! ... I'm standing on top of
+  it at 334, 82, -420. Health is 10 of 20, and a spider and skeletons are about 15 to 20 blocks off, so stay
+  alert." The player: "too verbose ... nothing to do with what I asked". Each step's result carries the state,
+  and the doer read it out.
+- The doer's instructions and its finish tool now say:
+  - only what the order was about: no coordinates, health, food, time or creatures around unless asked;
+  - the state is for thinking, not for reading out;
+  - enemies are watched and warned of apart from the doer;
+  - an answer is its gist.
+- Asking first is for a risk the order itself brings, not for enemies merely about.
+- Replayed both orders against the real model with a stand-in world, twice (in the scratchpad, not the
+  repository). For example: "Yes: one slanted jump at a run, up one block, and no blocks need placing or
+  digging." and "Made it! I jumped onto that block without placing any blocks." Tests pass (483).
+
+## 2026-10-16: "make a bed": a missed jump, a stuck walk, a purple bed from spiders
+Play-test, from the logs:
+- **The jump that fell short.** A running jump over three (parkour), just after a step up, went up 0.3 before
+  its block's middle. The early take-off is meant for short walking jumps; here it ran on a speed read too high
+  just after the step. It came down 0.3 short, hit the landing's side and fell 5. Now a running jump always goes
+  up at the edge, as Baritone's does; a running leap goes up no earlier than 0.3 before the edge.
+- **The jump off the pillar, and 40 s standing still.** The escape from the spiders ("up out of their reach")
+  pillared up looking straight down, and the view stayed so. Straight down, the camera's forward has no level
+  part (the game sends (0, -1, 0) exactly), so the heading read from it was 0 or 180 whatever the turn. A leap
+  off the pillar's top went off its side (the fall), and the walk after turned and turned, never seeing itself
+  turn, then gave up: "every way out needs something I haven't got".
+  - core/autowalk.py: level_forward and cam_yaw read the heading from the camera's right side when its forward
+    is near straight up or down. Every heading read (walk, moves, combat, melee, the app) uses them.
+  - The Mover brings the view back level (15 degrees down) when walking with it tilted over 50 degrees.
+  - On a jump's block, the Mover turns in place, crouched, till facing within 12 degrees; never walks on
+    sideways off the block.
+- **The purple bed.** "A bed" matches 16 colours, and only the first 6 in the book were planned; white wasn't
+  among them, so every plan needed dye. Now, among items matched equally well, the white (undyed) one comes
+  first. "A red bed" is still the red one.
+- **12 string from one spider.** A creature's drops were costed as the walk to the nearest one plus n kills,
+  however many there were about.
+  - Now: the walk out to the farthest of the ones it takes, and 60 s for each one more than are about.
+  - Creatures beyond the snapshot's 62 m (the game's whole-world search, as where_is) are counted and hunted
+    too. Their kind (a sheep's colour) isn't known from there: 20 s more each, looked at again when near.
+  - A white bed from here: shears from the raw iron held and 3 shorn sheep, about 2 minutes (it was "12 string,
+    111 s"; with one spider about it's really ~13 minutes).
+- **Planning speed.** With sheep found, planning weighed every smelting fuel (for the shears' iron), and each
+  fuel's block was searched on its own: 56 searches, 5.7 s. The one search done up front now covers the
+  stations and the fuels, and the far creature search is cached for 2 s: under 1 s.
+- Tests: in the sim, straight down off a pillar and a walk; a running jump over three after a step (its
+  take-off point; the sim records them now, and its camera rounds as the game's does). Each fails on the old
+  code. Also the bed's colour, creatures counted, and ones beyond sight found. All 488 pass.
+
+## 2026-10-17: the bed: sheep out of sight, and a wooden sword burnt
+- **Stuck on the wool.** The sheep the plan now finds beyond sight (the game's search, past the snapshot's
+  62 m) were hunted by their id. The walk, not seeing them, said "target gone" at once: 16 sheep, twice each,
+  3 s apiece.
+  - A creature beyond sight is now walked toward as a place (the task's 'seek'). Once it's in view
+    (TaskWorld.task_seen: in the snapshot), the walk stops and the step picks it again: hunted, or used on
+    (shears), from there.
+- **A wooden sword in the furnace.** Shears' two iron ingots were smelted with "2 wooden swords": the player's
+  own, and one crafted to burn. Fuels held were tried first, and a sword is a fuel in the game's data. A sword
+  burns for one item; the two planks it's made of, for three.
+  - Tools and weapons (swords, pickaxes, axes, shovels, hoes, bows, crossbows, fishing rods, shields, spears)
+    are no longer fuel (_Book.fuels). Shears from here now: 2 logs gathered and burnt.
+- Tests: seeking a creature out of sight, then hunting it once in view; tools never burnt. All 490 pass.
+
+## 2026-10-17: swimming, one rule for every move
+- Play-test: crossing a lake for the sheep, the character went under and nearly ran out of air ("it seems to
+  have forgotten how to navigate through water").
+  - From the walk log: the way across was mostly diagonal moves. Only the straight move held jump in water,
+    which keeps the head up; the diagonal ones didn't, so they sank. They were also made at a run, and a run in
+    water is the dive-swim, the way the view looks (a little down).
+  - Off the route, planned again, sank again.
+- Now the Mover has one water rule after every move's own keys (Mover._water), as Baritone's movement update
+  does it:
+  - in water, never at a run;
+  - jump held, unless the way goes down into the water;
+  - the view level while swimming on;
+  - head under and air below 120 (of 300): straight up first.
+- The adapter passes the player's air on (the bridge already sent it).
+- The movement sim now has the dive-swim (a run in water swims the way the view looks, down too) and air
+  (less a tick with the eyes under, drowning at the end).
+- Tests: across a deep lake slantwise (fails without the rule: sank); up from the lake's bottom with little
+  air (never drowns). All 492 pass.
+
+## 2026-10-17: swimming, part two: bobbing, sinking between routes, and up to the way
+- Play-test (after the water rule): "still makes me sink". The walk log: on the lake, the diagonal moves now
+  held jump. But:
+  - With jump held at the top, the body bobs a little out of the water, and the diagonal move gave up "off the
+    diagonal" (its feet block one over its own).
+  - Planning again, the walk held no keys at all, so the player sank.
+  - Each new route began at the top, 2 blocks over the sunk feet; its first move, a diagonal, gave up at once
+    again. Planned again every half second for 14 s; the air at 37 of 300 when the player paused.
+- Now:
+  - **Bobbing.** The feet a little over a water block's top (under BOB, 0.6) count as in it (Mover.update): a
+    move's blocks, and the water rule.
+  - **Afloat between routes.** The walk itself (core/autowalk.py, AutoWalk._afloat), while active and not on a
+    move of the mover's: in water (the snapshot says), jump held and never at a run, whatever it's doing
+    (planning again, waiting for the way, chasing). The adapter sets in_water and head_under from the blocks
+    round the feet the bridge sends each frame.
+  - **Up to the way.** In water, below one of the move's own blocks in the same column (up to 6), it swims up
+    to it first, not "off the route".
+  - **A hop isn't off.** A diagonal move in the air one block over its own blocks isn't off it (out of water
+    onto the bank, jump still held a frame).
+- Tests: sunk 3 under the way's start, its first move diagonal, the air low: up, then across, never drowning
+  (fails without swimming up). Kept afloat between routes. All 493 pass.
+
+## 2026-10-17: killed by spiders on the bed errand
+- Play-test: across the lake fine this time (the swimming fixes held). Then, at night, at 7 of 20 health, no sword
+  (a pickaxe the best to hit with), two spiders came:
+  - The fighter went up a pillar "out of their reach", but spiders climb walls.
+  - At the top it called the fight "won" (none within 6), with a spider after the player 9 off. The walk
+    stepped off the pillar to "open ground", started up again, and was bitten from 7.4 to 0.
+  - "Make me a bed" had gone straight to the task (the quick path, not the doer), so nothing weighed setting
+    out unarmed among enemies at night.
+- Now:
+  - **No pillar against climbers or fliers.** The combat profile has climbs (spiders, cave spiders) and flies
+    (phantoms, vexes, bees, ghasts, blazes, breezes). One of them after the player bars the pillar (melee
+    _can_perch); one by, not after anyone, doesn't.
+  - **Up there till it's really over.** None within 6 and none after the player within 16 (PERCH_WATCH); while
+    one's after the player farther off, it's watched, crouched.
+  - **Armed means a sword or better.** fight_gear wants a weapon below a wooden sword's 4 (SWORD_DAMAGE): a
+    pickaxe isn't armed, an axe is.
+  - **Errands among enemies.** An errand (a task) set about with a hostile one within 24 (ERRAND_FOES) first gets
+    what a fight with the nearest wants, when it's quick (the same as a fight order's gear: _gear_for), and, under
+    half health with food to hand, a bite (App._errand_gear). "Enemies about: a stone sword first!"
+- Tests: climbers barring the pillar and keeping it up (and a crash this found: none near, one after the player
+  farther off); a pickaxe isn't armed, an axe is; an errand among enemies gets a sword first, none about as it
+  was; hurt with food, a bite first. All 496 pass.
+- Not yet: food when there's none to hand (killing a sheep for the wool gives mutton too; the doer's prompt
+  covers eating, the quick task path doesn't fetch food).
+
+## 2026-10-17: an equip skill (armour on, a shield in the off hand)
+- Play-test: the bed was made. Then "Can you equip any armor or whatever equipment?" only sorted the hotbar, and
+  asked again: "I couldn't equip the iron chestplate or the shield: my tools can only sort the hotbar". The doer
+  had tried "equip the iron chestplate" as an order in words (not understood), then the hotbar tool.
+- There was no skill for it. Now:
+  - **Tool:** equip (typed, the doer's; items: only these), offered where the game has equipment.
+  - **What to put on:** the adapter's equipment() picks the best piece held for each of the head, chest, legs
+    and feet (by tier), and a shield into an empty off hand (the existing 'offhand' step).
+  - **The task step 'equip':** the piece into the hotbar if it's not there, picked, the view tilted up (used on
+    a block in front, it would open that instead), then used: the game puts it on, swapping it for what's worn
+    there.
+  - **Checked by:** the armour points (the bridge sent them; now in the snapshot) and the count carried (worn
+    pieces aren't counted). Fewer points after: worse than what was worn, used again to swap it back. Nothing
+    changed twice with armour on: one as good is worn.
+- Live: from what's held now, the plan is the iron chestplate on, the shield into the off hand.
+- Tests: put on looking up; a worse one swapped back; the best of each part and a shield. All 499 pass. Not yet
+  tried in the game.
+
+## 2026-10-17: a use skill (right-click a block or a creature)
+- Play-test: the armour went on. Then "sleep in the bed for me first, then get me a saddle": the doer walked to
+  the bed, tried "sleep in the bed" and "sleep" as orders in words (not understood), and said "I can't lie down
+  in it myself, so you'll need to right-click the bed". There was no skill for right-clicking.
+- Now, one general skill (not one per thing):
+  - **Tool:** use (typed, the doer's). A block or a creature right-clicked as a player does: sleep in a bed,
+    open a door, gate, chest or trapdoor, flip a lever, press a button, put a saddle on a horse, mount it, feed,
+    tame or breed.
+  - **Targets:** "that" (the crosshair's: a block or a creature), x y z, a creature by name, or the nearest block
+    of a kind.
+  - **item:** what to hold; none means an empty hand (holding food, a horse is fed, not ridden).
+  - **The task step 'use':** held first, walked to right beside a block (not into a bed) or up to a creature
+    (following it), aimed at, right-clicked once, never crouched (crouched, a held block would be put down
+    instead).
+  - **Block names:** a kind of block matched equally by several ids is searched for as all of them ("the bed" was
+    a black bed only; the player's white bed wasn't found).
+- The doer's instructions name `use` among what a player can do.
+- Live: "use bed" goes to the white bed at 187 67 -408; "use horse" to the horse; "use that" to the crosshair's
+  block; "saddle on the horse" says there's no saddle held.
+- Tests: a bed walked to, beside it, right-clicked once with an empty hand, not crouched; a saddle used on a
+  horse in reach. All 501 pass. Not yet tried in the game.
+
+## 2026-10-17: shorter answers by default
+- The player: "can you make the text less? ... if I want more details then I can ask it for more, but by
+  default it should be less text". "How do I ride these?" got every step: right-click, the bucking, the hearts,
+  the saddle in the inventory, the keys, the jump (4 sentences).
+- The voice assistant's instructions (core/agent.py) now say:
+  - one short sentence, under 15 words; a second only when one can't answer at all;
+  - the player asks for more ("tell me more", "how?"); never added before then;
+  - "How do I": the first step or the gist; "Why": the reason in a few words; no "or" alternatives unless
+    asked.
+- The doer's finish line: one short sentence, under 15 words, more only if asked.
+- Replayed against the real model (in the scratchpad, not the repository; the running game for context):
+  - Before the last tightening: 13 to 31 words.
+  - After, on questions not in the instructions: 8 to 16 words, one sentence each ("How do I tame a wolf?":
+    "Right-click a wild wolf with bones; each bone has about a one-in-three chance to tame it.").
+- Tests pass (501).
+
+## 2026-10-17: jumps at a run that weren't, a ravine, and digging from the water
+- Play-test: the bed slept in, the saddle made. Then "go back to those horses": dead, "fell from a high place".
+- From the walk log:
+  - Five jumps at a run fell short on the way, four into water: from a turn made crouched in place, after a
+    step down, never running at the jump. The last, over three, straight after a step down, into a ravine 35
+    deep.
+  - The game's physics: the run's boost at the jump is most of the reach. From a standstill at a run a jump
+    flies 3 blocks; at a walk's start, 1.1.
+  - Climbing out of the water, it dug into the bank's block for 15 to 30 s, bobbing (the crosshair off the
+    block), where mining takes 25 times as long. The planner had costed the dig as on dry ground.
+- Now:
+  - **The executor (Mover._at_a_run, both jump moves).** A jump at a run goes up only when the game says the
+    player's running. Not running at the edge: stopped crouched, backed off into the block (to 0.3 short of its
+    middle), run at again. After two runs it gives up from back there (giving up at the edge, the run carried
+    on over it, keys let go while planning again), and the jump's left out of plans for 2 minutes
+    (note_failed_work 'jump', the planner's no_jump). The old "out over the gap already: up" branch jumped
+    without that check: it has it too.
+  - **The planner.** No jumps at a run planned with food at 6 or less (the game won't run). A jump over a gap a
+    fall into would hurt (dry ground more than 2 down, lava, nothing; water is fine) costs 100 ticks more, so a
+    way round is taken where there is one. Digging from in water costs 5 times as much, 25 not standing on
+    anything (the game's).
+  - Tried and dropped: a run-up block behind every jump at a run. It ruled out the player's own jump from the
+    crafting table back to the hill; standing starts are fine when the run's really on.
+- The movement sim can refuse to run (can_run), to test it.
+- Tests: never up at a run not running (stops at the edge, backs off, gives up, the jump left out); a gap that
+  would hurt gone round, one with water jumped; out of the water where nothing need be dug. All 504 pass. The
+  planner's step time on the live terrain is unchanged.
+- The user: "it should be determining the most efficient, and most efficient is probably to bridge". Bridging
+  was already a move (a block put against a side, or crouched backwards at the edge), weighed with the jump,
+  the way round and digging; the test above had no blocks held. Checked: over a gap a fall would hurt, three
+  wide, with 16 blocks held the plan bridges it (3 put down, about 6 s: cheaper than the jump with its risk);
+  with none, it jumps (cheaper than 30 blocks round); over water it jumps either way. Test: bridged in the sim
+  with blocks held (done, never below the start), jumped with none. On the fatal run the player held 64
+  cobblestone: with the risk costed, that ravine would have been bridged. All 505 pass.
+
+## 2026-10-17: lag and getting stuck: plans one after another
+- Play-test: the things fetched from the death spot, then "go ride one of the horses": "major lag issues, and it
+  getting stuck". From the walk log, two things kept the computer busy planning:
+  - **Planned 10 times a second for 15 s, standing still on the bed.** Each new way's first move, a diagonal,
+    gave up at once ("off the diagonal": the feet beside its start, on the bed, not in its blocks). Planned
+    again at once, the same way, the same again. Each plan also read the box of blocks from the game, which the
+    bridge does on the game's own thread: the game hitched with each.
+  - **Out of a ravine 38 up, each plan searched 3 s and came back with 1 to 6 blocks of way**, planned again
+    and again. Live, on that ravine: a 1.5 s plan took 3.1 s (a second whole search, "would blocks help?", ran
+    each time the first ran out of time), and found no way at all; weighted more, 13 moves, 14 up.
+- Now:
+  - **Planning paced** (companion._start_plan). Planned again from the same spot (within 0.75) for the same goal:
+    0.25 s after the last, then twice as long each time, up to 4 s; moved on, at once.
+  - **A diagonal begun from beside its start** (within 1.5 across, on its level) walks onto it first, not given
+    up.
+  - **The box of blocks reused** for the same box within 1 s (adapter.route), not read from the game again.
+  - **"Would blocks help?"** searched only when there's no way at all, not on a long way out of time.
+  - **A long way up** (8 or more blocks to the goal) is searched weighted 2.5 at least (greedier: a way found,
+    if not the cheapest).
+  - Live, on the same ravine: the plan now 1.6 s (was 3.1), 13 moves up to 44 (was none); the companion plans
+    on from its end.
+- Tests: plans from one spot paced (under 12 in 10 s, not 100), at once when moved on; a slant way begun from
+  beside its start (fails without). All 507 pass. The planner's step time elsewhere is unchanged.
+
+## 2026-10-17: stuck in the ravine: blocks in the pack, plans on the frame loop's time
+- Play-test: "ride the horse", from the ravine 38 down: "it might have gotten stuck"; the status bar showed
+  115 ms a frame (about 1 normally).
+- From the walk log and the game:
+  - It dug a staircase up out of stone, 6 to 7 s a block: 35 to 44 in a minute. The player held 70 cobblestone
+    and 47 diorite, all in the pack, none in the hotbar; only the hotbar's are built with and planned with, so
+    the planner had nothing to pillar with.
+  - It planned all the while (9,000 positions, about 1.5 s each, again near each short way's end). The search
+    ran on a thread in the assistant's own process and held Python's lock: the frame loop slowed to 115 ms,
+    and with it the aiming and the digging.
+  - Then plan after plan ran out of time with one block of way, from the same spot: stuck.
+- Now:
+  - **Planning in a process of its own** (pathing.run, pathing.use_worker; the app turns it on through the
+    adapter's plan_in_worker). The frame loop is never held up by it. If the worker fails, it plans here as
+    before. Checked: a separate process, started in 0.24 s, the same ways.
+  - **Blocks to hand** (adapter.blocks_to_hand, App._blocks_to_hand). A walk or an errand set about with no
+    blocks to build with in the hotbar, and 8 or more held, puts the most plentiful into the hotbar first (the
+    hotbar skill), then goes. Not for a fight or a follow. Live: cobblestone into the empty slot 9.
+  - **A longer plan after next to none.** Planned again from about the same spot after the last plan ran out of
+    time with 3 blocks of way or fewer: twice the time, up to 8 s (adapter.route; the worker means the game
+    doesn't feel it). Live, the ravine's plan needed 9,000 positions, right at 1.5 s: inline it just made it,
+    in the worker (8% slower) it didn't, and got no way.
+- Tests: blocks put in the hotbar when only in the pack (none when some are there already); the hotbar step
+  before a walk and in front of an errand, not before a fight; a plan in the worker the same as here. All 510
+  pass.
+
+## 2026-10-17: blown up by a creeper; the shield left in the pack
+- Play-test: "overall way better than before". Out of the ravine, a zombie, a skeleton and more zombies fought on
+  the way to sleep; then "blown up by Creeper". "I don't know if it used a shield or not when fighting the
+  skeleton."
+- From the combat log:
+  - **The shield:** not used. The wooden sword the whole fight, nothing in the off hand. The shield came back
+    with the things picked up where the player had died, into the pack, not the off hand. That skeleton fight
+    was the conductor's (defending on the way), not a fight order, so "gear first" never ran. (The fighter
+    holds a shield up against a drawing bow when it's in the off hand; it wasn't.)
+  - **The creeper:** it backed off one creeper as it lit (it went out), then fought a zombie with the creeper 3
+    to 5 off. The creeper came on and lit (0.07 to 1.0); for those 2.5 s the fighter held 'back' and the player
+    didn't move (a step behind, the map not showing it; "spacing (blocked)" just before): blown up, 12.8 to 0.
+- Now:
+  - **Ready first** (App._blocks_to_hand, which also puts blocks in the hotbar). A walk or an errand set about
+    with armour or a shield held but not worn puts them on first (the equip skill), then goes.
+  - **A creeper near comes first.** Within 4.5 (CREEPER_FIRST) it's the target, nearer than the one fought or
+    not.
+  - **Out of a blast**, a way that's blocked is found at once. On the way taken, under 0.35 of a walk's worth in
+    0.15 s (stopped, or sliding along a wall) means blocked, with the diagonals either side of it; then
+    another way. Before, the creeper getaway didn't look at blocked ways at all, and the watch over every move
+    takes 0.4 s windows against a 1.5 s fuse. Jump is held while getting away (up any step).
+- Tests: a creeper lit 2.6 off with a wall behind that the map doesn't show; a creeper near fought before a
+  spider. In the creeper sim: 14.7 health lost before (backed into the wall the whole fuse), 3.6 now (about 3
+  is the least, sideways at once). Ready first with a shield in the pack. All 512 pass.
+
+## 2026-10-17: "go get my stuff" made a sword and a shield instead
+- Play-test: "it started doing all this other stuff after the nearby enemies were dead ... instead of finishing
+  my command of picking up my stuff". Shot dead by a skeleton.
+- From the doer and task logs:
+  - The doer went to the death spot ("Here we are: 198 64 -411"), then pickup with items ["all"]. "all"
+    matched no item's name, so the step looked for none of them: done at once, the things still lying there.
+  - The errand gear rule (added the round before) then set a wooden sword and a shield first, among the
+    skeletons. The shield's iron meant logs, planks, mining and smelting: 17 steps, walked out among them. The
+    player's own sword and shield lay at the spot all the while.
+- Now:
+  - **pickup:** words that mean any ("all", "everything", "my stuff"...), or names that match no item, mean any
+    item (walk_commands _ANY_ITEM).
+  - **Errand gear:** only a weapon, only when it's quick (ERRAND_GEAR_S, 40 s by the planner's reckoning), never
+    a shield (that waits for a fight order, where getting it's worth the time), and never before picking things
+    up.
+- Tests: "all", "everything", "my stuff" and unknown names pick up anything, "dirt" only dirt; no gear before a
+  pickup errand, a sword (no shield) before another. All 514 pass.
+- Seen, not changed this round: the cover it went to from the second skeleton kept turning out exposed (cover,
+  "exposed", again, while the health ran down from 8 to 0).
+
+## 2026-10-17: no taking over without an order
+- The user: "It keeps taking over control of me before I gave it any commands. It shouldn't take over control
+  unless I've given it a command it's trying to finish up." (Cover from drowned, a spider, a zombie, with no
+  order given.)
+- The conductor dealt with danger on an order or when the player had been away from the controls 3 s
+  (IDLE_GUARD), added 2026-10-16 after a zombie killed the player standing after "over to you".
+- Now that second case is the player's choice, off by default: setting guard_when_idle (.local/settings.json).
+  With no order under way, it never takes the controls. The other place that acts by itself, eating when
+  hurt, runs only when an order is stopped for being hurt.
+- Test: no order, the player away from the controls: not taken over; with guard_when_idle, guarded. All 514
+  pass.
+
+## 2026-10-17: mining on with a broken pickaxe
+- Play-test: "mine 10 iron ore": "it's trying to break stone and stuff without a pickaxe".
+- From the logs and the game: the plan was right (the stone pickaxe picked up where the player died was held:
+  "get 10 raw iron"). It mined 8 (raw iron 8 now). Then the stone pickaxe broke, on the walk to the next ore,
+  digging the way there through stone. The task looked at the tool only when picking the next ore ('find'),
+  so the walk dug on by hand and the ore was punched: 18 s and more on one block, nothing dropping. (The
+  bridge reckons each block's break time with the hotbar's best tool: by hand, stone 7.5 s, iron ore 15 s:
+  slow, not impossible, so the walk dug on.)
+- Now the gather step looks at the tool all the while it walks to a block and mines it, not only when it picks
+  the next: gone, the walk's stopped and the step fails "My stone pickaxe broke: making another" (NEEDS_TOOL).
+  The plan's made again from what's held, a new pickaxe in it, as when it was found gone before the next ore.
+- Test: the pickaxe broken on the way: the walk stopped, the step failed NEEDS_TOOL. All 515 pass.

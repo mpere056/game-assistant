@@ -32,6 +32,8 @@ DEFAULTS = {
     'command_key': 'F10',             # hold to give your character an order ("go to the nearest grace")
     'auto_walk': True,                # orders make the character walk by itself (F10)
     'auto_walk_sprint': True,         # run on long straight stretches while walking by itself
+    'guard_when_idle': False,         # with no order under way, deal with danger (fight, take cover) when you've
+                                      # left the controls a few seconds; off: it only ever acts on an order
     'walk_keys': {'forward': 'W', 'back': 'S', 'left': 'A', 'right': 'D', 'sprint': 'SPACE',
                   'interact': 'E', 'jump': 'F', 'lock': 'Q', 'attack': 'LMB', 'roll': 'SPACE',
                   'item': 'R'},  # bindings (item: the quick item, the flask, when healing)

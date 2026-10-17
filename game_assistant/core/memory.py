@@ -87,6 +87,25 @@ class WorldMemory:
                 return True
         return False
 
+    def as_data(self, me=None) -> dict:
+        """For the doer's situation: stations put down near (where, how far up or down), what lately couldn't be
+        got to (what, where, why), how many blocks were dug."""
+        now = self.clock()
+        stations = []
+        for p in self.placed:
+            if me is not None and math.dist(p.at, me) > SUMMARY_NEAR:
+                continue
+            row = {'item': p.item.split(':')[-1], 'at': list(p.at)}
+            if me is not None:
+                row['blocks_away'] = round(math.dist(p.at, me))
+                row['up'] = p.at[1] - math.floor(me[1])
+            stations.append(row)
+        out = {'put_down': stations,
+               'couldnt_get_to': [{'what': u.what, 'at': list(u.at) if u.at else None, 'why': u.reason or None}
+                                  for u in self.unreachable[-5:] if now - u.t < UNREACHABLE_FOR],
+               'blocks_dug': len(self.dug)}
+        return {k: v for k, v in out.items() if v}
+
     def summary(self, me=None) -> str:
         """For the doer: the stations put down near (and how far up or down), and what lately couldn't be got at."""
         bits = []

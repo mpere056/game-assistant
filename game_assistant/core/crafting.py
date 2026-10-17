@@ -30,10 +30,12 @@ iron into ingots). Tools are kept, not used up; everything else a craft or a sme
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
 MAX_DEPTH = 10
+PLAN_S = 4.0            # seconds a plan may take to work out at most (a bed's every wool and dye: minutes)
 GATHER_COST = 3.0       # per item gathered, plus the distance to the nearest source / 10
 CRAFT_COST = 1.0        # per craft
 SMELT_COST = 2.0        # per item cooked (it takes a while), on top of the craft
@@ -72,9 +74,18 @@ class Recipe:
 
 @dataclass(frozen=True)
 class Source:
-    block: str
+    block: str                # what gives it: the block, or the creature (on 'creature')
     drops: tuple
-    tool: str | None = None   # the least tool it needs to drop anything (None: by hand)
+    tool: str | None = None   # the least tool it needs (None: by hand); used on it, the item that's used
+    on: str = 'block'         # 'block' or 'creature'
+    how: str = 'mine'         # 'mine' (a block broken), 'kill' (a creature's drops), 'use' (the tool used on it,
+                              # right-clicked: a sheep shorn, a berry bush picked)
+    per: float = 1.0          # how many each one gives, on average
+    variant: tuple = ()       # which kind of it: ((property, value), ...) (a white sheep, not shorn)
+
+    @property
+    def creature(self) -> bool:
+        return self.on == 'creature'
 
 
 class Book(Protocol):
@@ -96,13 +107,20 @@ def plan(book: Book, item: str, count: int, have: dict) -> list[tuple]:
     return plan_cost(book, item, count, have)[1]
 
 
-def plan_cost(book: Book, item: str, count: int, have: dict) -> tuple[float, list]:
-    """(what the cheapest plan costs, its steps): seconds with a book that knows the world, else a count."""
+def plan_cost(book: Book, item: str, count: int, have: dict, deadline: float | None = None) -> tuple[float, list]:
+    """(what the cheapest plan costs, its steps): seconds with a book that knows the world, else a count. Worked
+    out in PLAN_S at most (or by deadline, time.monotonic()): what isn't found by then isn't a way."""
+    prefetch = getattr(book, 'prefetch', None)
+    if prefetch is not None:                           # (where everything it may need is: asked once)
+        prefetch(item)
     st = _State(dict(have), {})
+    st.deadline = deadline if deadline is not None else time.monotonic() + PLAN_S
     cost = _need(book, st, item, count, 0, frozenset(), keep=True)
     if cost is None:
+        if time.monotonic() > st.deadline:
+            raise CantMake(f'working out how to get {_name(item)} took too long')
         raise CantMake(st.why or f"I don't know a way to get {item}")
-    return cost, _merge(book, st.steps, have)
+    return cost, _late_stations(book, _merge(book, st.steps, have), have)
 
 
 def step_cost(book, step) -> float:
@@ -165,23 +183,71 @@ def _merge(book, steps: list, have: dict) -> list:
     return out
 
 
+def _late_stations(book, steps: list, have: dict) -> list:
+    """Each station put down just before it's first used, where the work is (a furnace put down by the crafting
+    table before the iron was dug, 23 blocks below: climbed back up to it to smelt, 2026-10-16)."""
+    out = list(steps)
+    for item in [s[1] for s in steps if s[0] == 'station']:
+        i = next(k for k, s in enumerate(out) if s[0] == 'station' and s[1] == item)
+        j = next((k for k in range(i + 1, len(out)) if _uses(book, out[k], item)), None)
+        if j is None or j == i + 1:
+            continue
+        trial = out[:i] + out[i + 1:j] + [out[i]] + out[j:]
+        if _replays(book, trial, have):
+            out = trial
+    return out
+
+
+def _uses(book, step, station: str) -> bool:
+    if step[0] == 'smelt':
+        return step[1].station == station
+    if step[0] == 'craft':
+        rec = step[1]
+        return (rec.station or (book.station if rec.grid > book.hand_grid else None)) == station
+    return False
+
+
+def plan_all(book, need: dict, have: dict, deadline: float | None = None) -> list:
+    """The steps to end up holding need ({item: how many}) all at once (a building's blocks of several kinds):
+    each planned in turn from what the ones before leave, never using up what they got."""
+    inv, steps = dict(have), []
+    kept: dict = {}
+    for item, n in need.items():
+        if n <= 0:
+            continue
+        free = {k: v - kept.get(k, 0) for k, v in inv.items()}
+        got = plan(book, item, n, free) if deadline is None else plan_cost(book, item, n, free, deadline)[1]
+        after = _after(book, got, free)
+        if after is None:
+            raise CantMake(f"I can't work out how to get {_name(item)} as well")
+        steps += got
+        inv = {k: v + kept.get(k, 0) for k, v in after.items()}
+        kept[item] = kept.get(item, 0) + n
+    return steps
+
+
 def _replays(book, steps: list, have: dict) -> bool:
+    return _after(book, steps, have) is not None
+
+
+def _after(book, steps: list, have: dict) -> dict | None:
+    """What's held after the steps (None: one of them can't be done with what's there by then)."""
     inv = dict(have)
     for s in steps:
         if s[0] == 'gather':
             if s[3].tool and not book.tool_ok(s[3].tool, inv):
-                return False
+                return None
             inv[s[1]] = inv.get(s[1], 0) + s[2]
         elif s[0] == 'station':
             inv[s[1]] = inv.get(s[1], 0) - 1
             if inv[s[1]] < 0:
-                return False
+                return None
         elif s[0] in ('craft', 'smelt'):
             rec, times = s[1], s[2]
             if s[0] == 'smelt':
                 inv[s[3]] = inv.get(s[3], 0) - s[4]
                 if inv[s[3]] < 0:
-                    return False
+                    return None
             for fits, cells in rec.needs():
                 n = cells * times
                 for it in fits:
@@ -189,9 +255,9 @@ def _replays(book, steps: list, have: dict) -> bool:
                     inv[it] = inv.get(it, 0) - take
                     n -= take
                 if n > 0:
-                    return False
+                    return None
             inv[rec.result] = inv.get(rec.result, 0) + times * rec.count
-    return True
+    return inv
 
 
 @dataclass
@@ -205,8 +271,100 @@ class _State:
     def __post_init__(self):
         self.steps = self.steps or []
 
+    deadline: float = math.inf
+    unit: dict = None              # item -> about what one more costs (the guide), shared by every copy
+    gathers: dict = None           # (source, how many) -> what gathering them costs, asked once, shared
+
     def copy(self) -> '_State':
-        return _State(dict(self.have), dict(self.stations), list(self.steps), self.why)
+        return _State(dict(self.have), dict(self.stations), list(self.steps), self.why, self.deadline, self.unit,
+                      self.gathers)
+
+
+def _gather(book, st: _State, src, k: int) -> float | None:
+    """_gather_cost, asked once a plan (the world isn't asked again for each way tried)."""
+    if st.gathers is None:
+        st.gathers = {}
+    key = (src, k)
+    if key not in st.gathers:
+        st.gathers[key] = _gather_cost(book, src, k)
+    return st.gathers[key]
+
+
+def _unit(book, st: _State, item: str) -> float:
+    """About what one more of item costs from here, the cheapest way, each ingredient at its own cheapest (what's
+    held: nothing): only a guide to which ways are worked out in full (all of them, for a bed's every wool and dye
+    and what makes them: half a million tried in 20 s, 2026-10-16). math.inf: no way known."""
+    if st.unit is None:
+        st.unit = {}
+    if item not in st.unit:
+        _guide(book, st, item)
+    return 0.0 if st.have.get(item, 0) > 0 else st.unit.get(item, math.inf)
+
+
+def _guide(book, st: _State, root: str) -> None:
+    """The guide for root and all it may take (its recipes' ingredients, tools, stations, all the way down):
+    each item's cost from the others', again till none gets cheaper (the recipes go round in circles: a bed from a
+    dyed bed, dye from flowers, wool from dyed wool; a cost worked out down one path, cut where it came round,
+    said "no way" for white wool, 2026-10-16)."""
+    items, todo, seen = [], [root], set()
+    while todo and len(seen) < GUIDE_ITEMS:
+        it = todo.pop()
+        if it in seen or it in st.unit:
+            continue
+        seen.add(it)
+        items.append(it)
+        for src in book.sources(it):
+            if src.tool:
+                todo.append(src.tool)
+        for rec in book.recipes(it):
+            need = rec.station or (book.station if rec.grid > book.hand_grid else None)
+            if need:
+                todo.append(need)
+            todo.extend(f for fits, _n in rec.needs() for f in fits)
+    unit = {it: math.inf for it in items}
+
+    def look(x):
+        if st.have.get(x, 0) > 0:
+            return 0.0
+        return unit[x] if x in unit else st.unit.get(x, math.inf)
+    for _round in range(GUIDE_ROUNDS):
+        changed = False
+        for it in items:
+            best = unit[it]
+            makeable = bool(book.recipes(it))
+            for src in book.sources(it):
+                if not (makeable and src.block == it):
+                    best = min(best, _source_guess(book, st, src, 1, look))
+            for rec in book.recipes(it):
+                best = min(best, _recipe_guess(book, st, rec, 1, look) / max(1, rec.count))
+            if best < unit[it] - 1e-9:
+                unit[it], changed = best, True
+        if not changed:
+            break
+    st.unit.update(unit)
+
+
+def _source_guess(book, st: _State, src, k: int, look) -> float:
+    g = _gather(book, st, src, k)
+    if g is None:
+        return math.inf
+    if src.tool and not book.tool_ok(src.tool, st.have):
+        g += look(src.tool)
+    return g
+
+
+def _recipe_guess(book, st: _State, rec, k: int, look) -> float:
+    times = math.ceil(k / max(1, rec.count))
+    c = _craft_cost(book) if not rec.station else _smelt_cost(book, rec, times)
+    need = rec.station or (book.station if rec.grid > book.hand_grid else None)
+    if need:
+        use = _station_use(book, st, need)
+        c += use if use is not None else look(need) + _place_cost(book)
+    for fits, cells in rec.needs():
+        c += cells * times * min((0.0 if st.have.get(f, 0) >= cells * times else look(f)) for f in fits)
+        if c == math.inf:
+            break
+    return c
 
 
 def _station_use(book, st: _State, item: str) -> float | None:
@@ -242,7 +400,10 @@ def _fuel(book, st: _State, ticks: int, depth: int, seen: frozenset):
     cands = [it for it in burn if it in held or book.sources(it)
              or any(all(any(x in held for x in fits) for fits, _n in r.needs()) for r in book.recipes(it))]
     best = None
-    for it in sorted(cands, key=lambda i: (i not in held, -burn[i]))[:MAX_TRIES]:
+    # (the cheapest for what it takes, by the guide: by what burns longest, a block of coal, nine coal, was taken
+    # over the one coal enough for two ingots, 2026-10-16)
+    for it in sorted(cands, key=lambda i: (i not in held, _unit(book, st, i) * math.ceil(ticks / burn[i]),
+                                           -burn[i]))[:MAX_TRIES]:
         n = math.ceil(ticks / burn[it])
         trial = st.copy()
         c = _need(book, trial, it, n, depth, seen)
@@ -273,16 +434,23 @@ def _produce(book, st: _State, item: str, k: int, depth: int, seen: frozenset) -
     """Gather or craft k more of item: the cheapest way; st updated with it. None: no way."""
     if depth > MAX_DEPTH or item in seen:
         return None
+    if time.monotonic() > st.deadline:
+        st.why = st.why or f'working out how to get {_name(item)} took too long'
+        return None
     seen = seen | {item}
     best = None
     makeable = bool(book.recipes(item))
-    for src in book.sources(item):
-        # a thing that's made is made, not taken off what's built (the block is the thing itself, and it has a
-        # recipe: a crafting table, planks, a furnace): "get a crafting table" mined the one the player had put
-        # down, then put it back, 2026-10-13. What the land gives (logs, stone, ores) is gathered.
-        if makeable and src.block == item:
-            continue
-        g = _gather_cost(book, src, k)
+    # a thing that's made is made, not taken off what's built (the block is the thing itself, and it has a recipe:
+    # a crafting table, planks, a furnace): "get a crafting table" mined the one the player had put down, then put
+    # it back, 2026-10-13. What the land gives (logs, stone, ores) is gathered.
+    srcs = [src for src in book.sources(item) if not (makeable and src.block == item)]
+    # the ways worked out in full: the cheapest few by the guide (each ingredient at its cheapest), not all of them
+    look = lambda x: _unit(book, st, x)  # noqa: E731
+    ways = sorted([(_source_guess(book, st, src, k, look), 0, i) for i, src in enumerate(srcs)] +
+                  [(_recipe_guess(book, st, rec, k, look), 1, i) for i, rec in enumerate(book.recipes(item))])
+    ways = [w for w in ways if w[0] < math.inf][:WAYS]
+    for src in [srcs[i] for _g, kind, i in ways if kind == 0]:
+        g = _gather(book, st, src, k)
         if g is None:
             continue
         trial = st.copy()
@@ -298,7 +466,7 @@ def _produce(book, st: _State, item: str, k: int, depth: int, seen: frozenset) -
         trial.have[item] = trial.have.get(item, 0) + k
         if best is None or cost < best[0]:
             best = (cost, trial)
-    for rec in book.recipes(item):
+    for rec in [book.recipes(item)[i] for _g, kind, i in ways if kind == 1]:
         trial = st.copy()
         times = math.ceil(k / max(1, rec.count))
         cost = _craft_cost(book)
@@ -352,9 +520,10 @@ def _ingredient(book, st: _State, fits: tuple, n: int, depth: int, seen: frozens
             st.have[it] -= n
             return 0.0
     best = None
-    # the held ones first, then those made from something held ('oak' planks from oak logs)
+    # the held ones first, then those made from something held ('oak' planks from oak logs), then the cheapest
     stems = {h.split(':')[-1].split('_')[0] for h, n in st.have.items() if n > 0}
-    order = sorted(fits, key=lambda it: (-st.have.get(it, 0), it.split(':')[-1].split('_')[0] not in stems))
+    order = sorted(fits, key=lambda it: (-st.have.get(it, 0), it.split(':')[-1].split('_')[0] not in stems,
+                                         _unit(book, st, it)))
     for it in order[:MAX_TRIES]:
         trial = st.copy()
         c = _need(book, trial, it, n, depth, seen)
@@ -366,7 +535,11 @@ def _ingredient(book, st: _State, fits: tuple, n: int, depth: int, seen: frozens
     return best[0]
 
 
-MAX_TRIES = 16          # of the items that fit an ingredient, this many are tried (the held ones first)
+MAX_TRIES = 3           # of the items that fit an ingredient, this many are tried (the held ones first, then
+                        # the cheapest by the guide)
+GUIDE_ITEMS = 800       # items the guide looks through at most (all a plan may take)
+GUIDE_ROUNDS = 12       # times round them at most (each cost from the others', till none gets cheaper)
+WAYS = 2                # of the ways to get an item (sources, recipes), this many are worked out in full
 
 
 def _name(item: str) -> str:

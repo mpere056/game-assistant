@@ -30,9 +30,13 @@ SYSTEM = """You are a game assistant that the player talks to while playing {gam
 spoken aloud.{persona}
 
 How to answer:
-- Be brief. Most answers are one short sentence, often under 12 words. Answer only what was asked:
-  "can you see that?" gets what it is and about how far, not its stats. Give weaknesses, stats, drops
-  or lore only when asked for them. No filler, no repeating the question, no explaining how you know.
+- Be brief: one short sentence, under 15 words. A second only when one can't answer it at all. The
+  player asks when they want more ("tell me more", "how?"); never add it before then. Answer only what
+  was asked: "can you see that?" gets what it is and about how far, not its stats. Give weaknesses,
+  stats, drops or lore only when asked for them. No filler, no repeating the question, no explaining
+  how you know, no "or" alternatives unless asked.
+- "How do I ...?": the first step or the gist, not every step ("How do I ride these?": "Right-click
+  with an empty hand till hearts show, then saddle it."). "Why ...?": the reason in a few words.
 - Each message starts with <game_view_now>: exact facts about what is at the centre of the screen
   when the player asked (the same as the look_at tool). Use it for "what is that" questions. For
   anything else about the game state (who is nearby, another enemy's data), call a tool. Use only
@@ -183,6 +187,20 @@ TOOLS = [
         'description': 'A picture of the game screen right now, for questions about something visible that the '
                        'game facts do not cover (scenery, structures, effects like gusts or glows, items, signs).',
         'input_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+    },
+    {
+        'name': 'check_way',
+        'description': 'Whether the player could get to a spot, and how, worked out by the route planner on the '
+                       'real ground (nothing is done): to what they look at (target "that": onto its top) or to x y '
+                       'z. place_blocks / dig false: without putting blocks down / digging. Says can or not, the '
+                       'jumps (each gap, at a run or not, up a block), drops, blocks put down and dug, seconds. Use '
+                       'it for "could I / could you jump onto, get over, get across, reach ..."; never guess.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {'target': {'type': 'string'}, 'x': {'type': 'number'}, 'y': {'type': 'number'},
+                           'z': {'type': 'number'}, 'place_blocks': {'type': 'boolean'}, 'dig': {'type': 'boolean'}},
+            'additionalProperties': False,
+        },
     },
     {
         'name': 'character_info',
@@ -381,7 +399,8 @@ class Agent:
                       and (t['name'] != 'nearest_places' or getattr(adapter, 'place_kinds', None) != ())
                       and (t['name'] != 'items_near_me' or hasattr(adapter, 'items_near_me'))
                       and (t['name'] != 'wiki' or getattr(adapter, 'wiki', None) is not None)
-                      and (t['name'] != 'look_at_screen' or CAP_SCREEN in adapter.capabilities)]
+                      and (t['name'] != 'look_at_screen' or CAP_SCREEN in adapter.capabilities)
+                      and (t['name'] != 'check_way' or hasattr(adapter, 'way_check'))]
         self.tools = [_worded(t, self.words, adapter) for t in self.tools]
         self.command_tools = [_worded(t, self.words, adapter) for t in COMMAND_TOOLS
                               if (t['name'] != 'walk_to_nearest' or getattr(adapter, 'place_kinds', None) != ())
@@ -474,6 +493,14 @@ class Agent:
             return self.adapter.knowledge(type_id)
         except (TimeoutError, RuntimeError) as e:
             return {'data_error': f'the game data could not be read: {e}'}
+
+    def tool_check_way(self, inp: dict) -> dict:
+        """Whether the player could get there and how: the route planner on the real ground ("could you jump onto
+        that crafting table from here?" was answered "yes, walk two blocks closer", then "probably not":
+        guessed, 2026-10-16)."""
+        xyz = [inp.get(k) for k in ('x', 'y', 'z')]
+        target = tuple(float(v) for v in xyz) if None not in xyz else (inp.get('target') or 'that')
+        return self.adapter.way_check(target, inp.get('place_blocks') is not False, inp.get('dig') is not False)
 
     def tool_look_at(self, _input: dict) -> dict:
         snap = self.adapter.snapshot()
@@ -677,7 +704,8 @@ class Agent:
               'character_info': self.tool_character_info, 'search_game_data': self.tool_search_game_data,
               'fairy': self.tool_fairy, 'guide_to': self.tool_guide_to, 'wiki': self.tool_wiki,
               'where_am_i': self.tool_where_am_i, 'where_is': self.tool_where_is,
-              'items_near_me': self.tool_items_near_me, 'look_at_screen': self.tool_look_at_screen}.get(name)
+              'items_near_me': self.tool_items_near_me, 'look_at_screen': self.tool_look_at_screen,
+              'check_way': self.tool_check_way}.get(name)
         if fn is None:
             return f'unknown tool {name}', True
         try:

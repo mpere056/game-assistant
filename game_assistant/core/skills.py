@@ -58,6 +58,14 @@ def failed(kind: str, line: str, **data) -> Outcome:
     return Outcome(False, Reason(kind, dict(data)), line)
 
 
+def needs_blocks(note) -> int:
+    """How many more blocks to build with a route's note says the way takes than are spare (0: none, or not
+    known)."""
+    if not isinstance(note, dict):
+        return 0
+    return max(0, int(note.get('blocks_it_would_take') or 0) - int(note.get('blocks_to_build_with') or 0))
+
+
 def route_reason(what: str, at, note: dict | None, frm=None) -> Reason:
     """A walk given up, as a Reason: from the route planner's note (blocks it would take; no way at all)."""
     note = dict(note or {})

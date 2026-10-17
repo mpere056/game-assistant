@@ -25,12 +25,18 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import lookat
+from .autowalk import level_forward
 from .commands import normalize
 from .interface import GameAdapter, GameNotRunning, Vec3
 
 ASK_SECONDS = 10.0
 NEAR_TIE = 1.15     # the second nearest within 15 % of the nearest: ask which
 CHARACTER_RANGE = 150.0  # metres: characters this near can be walked to by name
+FOLLOW_KEEP = 3.0        # blocks a followed character is kept within (Baritone's follow)
+PICKUP_RADIUS = 12.0     # blocks round the player dropped items are picked up from (Baritone's pickup)...
+PICKUP_MAX = 32.0        # ...at most
+TUNNEL_MAX = 64          # blocks a tunnel goes at most in one order
+WAYS = {'north': (0, -1), 'south': (0, 1), 'east': (1, 0), 'west': (-1, 0)}
 NAME_MATCH = 0.72   # how alike a heard word and a name word must be (difflib ratio)
 
 _STOP = re.compile(r"\b(stop|halt|cancel|never ?mind|wait)\b", re.I)  # in a short order (STOP_WORDS words)
@@ -48,6 +54,9 @@ _ATTACK = re.compile(r"\b(attack|hit|strike|fight|kill|smack|slash|stab|whack|en
 # and hand back only when asked for: "hit it once", "land one hit".
 _ONE_HIT = re.compile(r"\b(once|one hit|a hit|single hit|one blow|one strike|just one)\b", re.I)
 _PRONOUN = re.compile(r"^(it|him|her|them|that|this|that one|this one|that guy|this guy)?$", re.I)
+_ONTO = re.compile(r"^(?:jump\s+)?(?:on\s*to|on\s+top\s+of|up\s+on(?:to)?)(?:\s+|$)(?:the\s+)?", re.I)
+_ANY_ITEM = re.compile(r"^(all|any|everything|anything|stuff|things|items|my (?:stuff|things|items)"
+                       r"|all of (?:it|them))$", re.I)
 _THAT = re.compile(r"^(that|there|it|this|that one|that place|over there|right there|this way)$", re.I)
 _FILLER = re.compile(r"\b(please|in front of me|ahead of me|in front|ahead|near me|nearby|around here|"
                      r"right there|over there|for me|thanks|thank you|i mean|my character|you see|that is|"
@@ -104,6 +113,12 @@ _MINE_AT = re.compile(r"^(?:please\s+)?(?:mine|break|dig(?:\s+out|\s+up)?|chop|g
                       r"[\s,]+(?:z\s*)?(?P<z>-?\d+)\W*$", re.I)
 # Getting away: 'run away', 'get away from them', 'retreat' (from the hostile ones near, the way away from them).
 _FLEE = re.compile(r"\b(run away|run off|flee|retreat|get away|escape|back off|get out of here)\b", re.I)
+_HOTBAR = re.compile(r"\b(?:hot ?bar|sort (?:out )?(?:my |the )?(?:inventory|items|things|stuff)|"
+                     r"(?:organi[sz]e|tidy(?: up)?) (?:my |the )?(?:inventory|items|hot ?bar))\b", re.I)
+_SORT = re.compile(r"\b(?:sort|organi[sz]e|tidy|arrange)\b", re.I)
+_HOTBAR_WORDS = re.compile(r"\b(?:please|can you|could you|move|put|get|bring|the|my|into|in|to|onto|hot ?bar|"
+                           r"inventory|sort|out|organi[sz]e|tidy|up|arrange|things|stuff|items|as well|too|also|"
+                           r"there|it|them|some|a|an|of|from)\b", re.I)
 _EAT = re.compile(r"^(?:please\s+)?(?:eat|have something to eat|heal up|eat something|have a snack)\b", re.I)
 FLEE_FROM = 24.0      # hostile ones this near count, running away
 FLEE_TO = 28.0        # ...and the run goes this far
@@ -138,6 +153,7 @@ class WalkAction:
     then: list = field(default_factory=list)  # 'kill the boar and then the soldiers': the orders after this
     options: list = field(default_factory=list)  # for 'ask': [(name, point)]
     steps: list = field(default_factory=list)    # for 'task': what to gather and craft (core/crafting.py)
+    follow: float | None = None   # walking to a character: kept after it, this far off, till stopped
 
 
 def split_orders(text: str) -> list[str]:
@@ -154,6 +170,11 @@ def split_orders(text: str) -> list[str]:
         elif part:
             out.append(part)
     return out or [text]
+
+
+def _no_namespace(name: str) -> str:
+    """'minecraft:iron_pickaxe' -> 'iron pickaxe' (an id as the game gives it, read as a name)."""
+    return re.sub(r'^[a-z0-9_.-]+:', '', name.strip().lower()).replace('_', ' ')
 
 
 def _clean(text: str) -> str:
@@ -232,6 +253,11 @@ class CommandResolver:
                 return got
         if _EAT.match(rest or t) and hasattr(self.adapter, 'food_slot'):
             return WalkAction('task', 'Eating!', name='food', count=1, steps=[('eat', None)])
+        m = _HOTBAR.search(rest or t)
+        if m and hasattr(self.adapter, 'hotbar_layout'):  # (the inventory skill: the same as the doer's tool)
+            words = _HOTBAR_WORDS.sub(' ', rest or t)
+            items = [w for w in re.split(r'\s*(?:,|\band\b)\s*', words) if w.strip()]
+            return self.typed('inventory', {'items': items, 'sort': bool(_SORT.search(rest or t))})
         m = _MINE_AT.match(rest or t)
         if m and hasattr(self.adapter, 'coords_point'):
             x, y, z = (int(m.group(k)) for k in ('x', 'y', 'z'))
@@ -355,8 +381,8 @@ class CommandResolver:
             if best is None or far < best[3]:
                 best = (d, e, name, far)
             if in_view and snap.camera is not None and d <= VIEW_RANGE and d > 0.1:
-                fx, fz = snap.camera.forward[0], snap.camera.forward[2]
-                n = (fx * fx + fz * fz) ** 0.5 or 1.0
+                fx, fz = level_forward(snap.camera)
+                n = 1.0
                 cos = ((e.pos[0] - p[0]) * fx + (e.pos[2] - p[2]) * fz) / (n * d)
                 if cos >= math.cos(math.radians(VIEW_ANGLE)) and (viewed is None or d < viewed[0]):
                     viewed = (d, e, name)
@@ -556,7 +582,6 @@ class CommandResolver:
 
     def _get_item(self, what: str) -> WalkAction | None:
         """'a stone pickaxe', '10 cobblestone', 'some sticks': a task (gather and craft), or None (not an item)."""
-        from .crafting import CantMake, plan
         what = _FILLER.sub(' ', what.lower()).strip(' .!?')
         n = None
         m = _AMOUNT.match(what + ' ')
@@ -565,6 +590,13 @@ class CommandResolver:
             n = 1 if m.group('one') else int(word) if word.isdigit() else \
                 {'a couple of': 2, 'a few': 3, 'a stack of': 64}.get(word, _NUMBERS.get(word))
             what = what[m.end():].strip() if m.end() <= len(what) else ''
+        return self.get_item(what, n)
+
+    def get_item(self, what: str, n: int | None = None) -> WalkAction | None:
+        """n more of the item called what (a name, or the game's id): a task, 'none' with why not, or None (no
+        such item)."""
+        from .crafting import PLAN_S, CantMake, plan_cost
+        what = _no_namespace(what)
         items = self.adapter.match_item(what)
         if not items:
             return None
@@ -573,12 +605,20 @@ class CommandResolver:
         snap = self.adapter.snapshot()
         have = dict(((snap.extra or {}).get('inventory') or {}))
         why = ''
+        # each that matches ('a bed': any colour) planned, in one time limit: the quickest (the first that could be
+        # made was taken: a white bed, its wool only from white sheep, when a red one was nearer, 2026-10-16)
+        deadline = time.monotonic() + PLAN_S * 1.5
+        plans = []
+        book = self.adapter.book()
         for item in items:
             try:
-                steps = plan(self.adapter.book(), item, have.get(item, 0) + n if have.get(item, 0) else n, have)
+                cost, steps = plan_cost(book, item, have.get(item, 0) + n if have.get(item, 0) else n, have,
+                                        deadline=deadline)
             except CantMake as e:
                 why = why or str(e)
                 continue
+            plans.append((cost, items.index(item), item, steps))
+        for _cost, _i, item, steps in sorted(plans, key=lambda p: (p[0], p[1]))[:1]:
             name = item.split(':')[-1].replace('_', ' ')
             if not steps:
                 return WalkAction('none', f'You already have {name}!')
@@ -593,9 +633,236 @@ class CommandResolver:
             return WalkAction('task', say, name=item, count=n, steps=steps)
         return WalkAction('none', f"{why or 'I do not know how to get that'}.")
 
+    def _tunnel(self, args: dict) -> WalkAction:
+        """A tunnel dug straight on from where the player stands (Baritone's tunnel): direction (north, south,
+        east, west; none: the way the camera faces), length, width and height (1 by 2: walked through); then
+        a build of one cleared box: what's there mined, from the near end on."""
+        if not hasattr(self.adapter, 'game_coords') or not hasattr(self.adapter, 'cells_now'):
+            return WalkAction('none', 'no digging tunnels in this game')
+        snap = self.adapter.snapshot()
+        if snap.player is None or snap.camera is None:
+            return WalkAction('none', "I can't see where you are")
+        feet = [math.floor(v) for v in self.adapter.game_coords(snap.player.pos)]
+        feet[1] = math.floor(self.adapter.game_coords(snap.player.pos)[1] + 0.01)
+        way = str(args.get('direction') or '').strip().lower()
+        if way not in WAYS:
+            f = self.adapter.game_coords(snap.camera.forward)
+            way = ('east' if f[0] > 0 else 'west') if abs(f[0]) > abs(f[2]) else ('south' if f[2] > 0 else 'north')
+        dx, dz = WAYS[way]
+        n = max(1, min(TUNNEL_MAX, int(args.get('length') or 16)))
+        w = max(1, min(5, int(args.get('width') or 1)))
+        h = max(2, min(5, int(args.get('height') or 2)))
+        side = (-dz, dx)
+        lo_off, hi_off = -((w - 1) // 2), w // 2
+        a = (feet[0] + dx + side[0] * lo_off, feet[1], feet[2] + dz + side[1] * lo_off)
+        b = (feet[0] + dx * n + side[0] * hi_off, feet[1] + h - 1, feet[2] + dz * n + side[1] * hi_off)
+        got = self.build([{'shape': 'clear', 'from': list(a), 'to': list(b)}])
+        if got.kind == 'task':
+            got.say = f"Digging a tunnel {way}, {n} long!"
+        return got
+
+    def build(self, parts: list) -> WalkAction:
+        """A structure from parts (core/build.py): a task getting what it takes, mining what's in the way, then
+        putting each block down, from the bottom up; 'none' says why not."""
+        from .build import BadPlan, expand, needs, order
+        from .crafting import PLAN_S, CantMake, plan_all
+        if not hasattr(self.adapter, 'cells_now') or not hasattr(self.adapter, 'match_item'):
+            return WalkAction('none', 'no building in this game')
+        try:
+            targets = expand(parts)
+        except BadPlan as e:
+            return WalkAction('none', str(e))
+        ids = {}
+        for name in {i for i in targets.values() if i}:
+            got = self.adapter.match_item(_no_namespace(name))
+            if not got:
+                return WalkAction('none', f"there's no block called {name!r} in this game")
+            ids[name] = got[0]
+        targets = {c: ids.get(i, '') for c, i in targets.items()}
+        now = self.adapter.cells_now(list(targets), set(ids.values()))
+        if not now:
+            return WalkAction('none', "I can't see the ground there (too far, or not loaded)")
+        try:
+            dig, places = order(targets, now)
+        except BadPlan as e:
+            return WalkAction('none', str(e))
+        if not places and not dig:
+            return WalkAction('none', "It's built already!")
+        snap = self.adapter.snapshot()
+        have = dict(((snap.extra or {}).get('inventory') or {}))
+        try:
+            steps = plan_all(self.adapter.book(), needs(targets, now), have, deadline=time.monotonic() + PLAN_S * 2)
+        except CantMake as e:
+            return WalkAction('none', f"I can't get what it takes: {e}")
+        point = getattr(self.adapter, 'coords_point')
+        steps += [('dig', c, tuple(point(*c)), 'block') for c in dig]
+        steps += [('place', c, item, tuple(point(*c))) for c, item in places]
+        n = len(places)
+        what = ', '.join(f"{sum(1 for _c, i in places if i == item)} {_no_namespace(item)}"
+                         for item in sorted({i for _c, i in places}))
+        first = 'getting what it takes first, then ' if len(steps) > len(dig) + n else ''
+        return WalkAction('task', f"Building it: {first}{n} blocks ({what})!", name='building', count=1, steps=steps)
+
+    def typed(self, tool: str, args: dict) -> WalkAction:
+        """An order given as data (the doer's typed tools, docs/AGENT.md): no words to read into. 'none' says
+        why not; 'ask' has the options to choose from."""
+        def num(k):
+            return float(args[k]) if args.get(k) is not None else None
+
+        def limited(action):
+            # (as the order said: without putting blocks down, without digging)
+            # (set each time, as asked or not: a later walk there doesn't keep an earlier one's)
+            if action is not None and getattr(action, 'point', None) is not None \
+                    and hasattr(self.adapter, 'walk_limits'):
+                self.adapter.walk_limits(action.point, args.get('place_blocks') is not False,
+                                         args.get('dig') is not False,
+                                         **({'fewest_jumps': True} if args.get('fewest_jumps') else {}))
+            return action
+        try:
+            if tool == 'get':
+                got = self.get_item(str(args.get('item') or ''), max(1, int(args.get('count') or 1)))
+                return got or WalkAction('none', f"there's no item called {args.get('item')!r} in this game")
+            if tool == 'build':
+                return self.build(list(args.get('parts') or []))
+            if tool == 'put_down':
+                got = self._put_down(str(args.get('item') or ''))
+                return got or WalkAction('none', f"there's no item called {args.get('item')!r} in this game")
+            xyz = (num('x'), num('y'), num('z'))
+            partial = (None in xyz or args.get('within')) and (
+                xyz[1] is not None or (xyz[0] is not None and xyz[2] is not None))
+            if tool == 'go_to' and partial and hasattr(self.adapter, 'goal_point'):
+                # (Baritone's goals: x z, a height only, within a radius)
+                point = self.adapter.goal_point(*xyz, within=num('within'))
+                if point is not None:
+                    self.last_walk_t = time.monotonic()
+                    label = ' '.join(f'{k} {v:g}' for k, v in zip('xyz', xyz) if v is not None)
+                    return limited(WalkAction('walk', 'On my way!', tuple(point), label))
+            if tool in ('go_to', 'mine_at') and None not in xyz:
+                if not hasattr(self.adapter, 'coords_point'):
+                    return WalkAction('none', 'no coordinates in this game')
+                x, y, z = xyz
+                if tool == 'mine_at':
+                    x, y, z = (math.floor(v) for v in xyz)
+                    what = _no_namespace(str(args.get('what') or 'block'))
+                    return WalkAction('task', f'Mining the {what} at {x} {y} {z}!', name=what, count=1,
+                                      steps=[('dig', (x, y, z), tuple(self.adapter.coords_point(x, y, z)), what)])
+                self.last_walk_t = time.monotonic()
+                return limited(WalkAction('walk', 'On my way!', tuple(self.adapter.coords_point(x, y, z)),
+                                          f'{x:g} {y:g} {z:g}'))
+            if tool == 'mine_at':
+                return WalkAction('none', 'mine_at needs x, y and z')
+            if tool == 'go_to':
+                place = _clean(str(args.get('place') or ''))
+                if not place:
+                    return WalkAction('none', 'go_to needs x, y and z, or a place')
+                onto = _ONTO.match(place)
+                if onto:
+                    place = place[onto.end():].strip() or 'that'
+                if (args.get('onto') or onto) and hasattr(self.adapter, 'top_of'):
+                    # (stood on its top, not beside it: "jump onto that crafting table", 2026-10-16)
+                    that = bool(_THAT.match(place))
+                    cell = self.adapter.top_of(None if that else place)
+                    if cell is None:
+                        return WalkAction('none', "I can't tell which block you mean." if that
+                                          else f"I can't find any {place} near here.")
+                    self.last_walk_t = time.monotonic()
+                    label = 'the top of that' if that else f'the top of the {_no_namespace(place)}'
+                    return limited(WalkAction('walk', 'On my way!', tuple(self.adapter.coords_point(*cell)), label))
+                if _THAT.match(place):
+                    return limited(self._crosshair())
+                return limited(self._place_or_character(place)) or WalkAction('none', f"I can't find any {place} "
+                                                                                     f"near here.")
+            if tool == 'fight':
+                target = _no_namespace(str(args.get('target') or 'enemy'))
+                n = int(args['count']) if args.get('count') else None
+                every = bool(args.get('all')) or (n or 1) > 1
+                words = ('all ' if every and not n else '') + (f'{n} ' if n and n > 1 else '') + target
+                return self._attack(words, 'fight', text=f'kill {words}', ask=False)
+            if tool == 'flee':
+                if not hasattr(self.adapter, 'explore_point'):
+                    return WalkAction('none', 'no running away in this game')
+                return self._flee() or WalkAction('none', 'no way away from them')
+            if tool == 'tunnel':
+                return self._tunnel(args)
+            if tool == 'pickup':
+                radius = max(2.0, min(PICKUP_MAX, num('radius') or PICKUP_RADIUS))
+                names = [str(w) for w in (args.get('items') or []) if str(w).strip()
+                         and not _ANY_ITEM.match(str(w).strip())]
+                ids = None
+                if names and hasattr(self.adapter, 'match_item'):
+                    # (none of them an item's name: any. "all" matched nothing, and nothing was picked up where
+                    # the player died, their things lying there, 2026-10-17)
+                    ids = tuple(i for w in names for i in self.adapter.match_item(w)[:3]) or None
+                return WalkAction('task', 'Picking up what lies about!', name='items', count=1,
+                                  steps=[('pickup', ids, radius)])
+            if tool == 'follow':
+                target = _no_namespace(str(args.get('target') or ''))
+                got = self.character(target) if target else None
+                if got is None or got.entity_id is None:
+                    return WalkAction('none', f"I don't see any {target or 'one'} near here to follow.")
+                keep = max(2.0, min(16.0, num('distance') or FOLLOW_KEEP))
+                return WalkAction('walk', f"Following the {got.name or target}!", got.point, got.name,
+                                  got.entity_id, follow=keep)
+            if tool == 'inventory':
+                if not hasattr(self.adapter, 'hotbar_layout'):
+                    return WalkAction('none', 'no inventory to lay out in this game')
+                snap = self.adapter.snapshot()
+                ex = snap.extra or {}
+                inv = ex.get('inventory') or {}
+
+                def ident(w):
+                    w = str(w or '').strip()
+                    if not w:
+                        return None
+                    if w in inv or f'minecraft:{w}' in inv:
+                        return w if w in inv else f'minecraft:{w}'
+                    names = self.adapter.match_item(w) if hasattr(self.adapter, 'match_item') else []
+                    got = [m for m in names if m in inv]
+                    return got[0] if got else None
+                want = [i for i in (ident(w) for w in (args.get('items') or [])) if i]
+                slots = {k: ident(v) for k, v in (args.get('slots') or {}).items()}
+                missing = [w for w in (args.get('items') or []) if not ident(w)]
+                layout = self.adapter.hotbar_layout(inv, ex.get('hotbar') or [], want, bool(args.get('sort')),
+                                                    {k: v for k, v in slots.items() if v})
+                if missing and not want and not args.get('sort'):
+                    return WalkAction('none', f"I'm not holding any {', '.join(map(str, missing))}.")
+                what = 'Sorting your hotbar' if args.get('sort') else 'Moving that into your hotbar'
+                return WalkAction('task', f'{what}!', name='hotbar', count=1, steps=[('arrange', layout)])
+            if tool == 'use':
+                return self._use(args, num)
+            if tool == 'equip':
+                if not hasattr(self.adapter, 'equipment'):
+                    return WalkAction('none', 'no armour to put on in this game')
+                ex = self.adapter.snapshot().extra or {}
+                inv = ex.get('inventory') or {}
+                names = [str(w) for w in (args.get('items') or []) if str(w).strip()]
+                ids = [m for w in names for m in (self.adapter.match_item(w) if hasattr(self.adapter, 'match_item')
+                                                  else []) if m in inv]
+                steps = self.adapter.equipment(inv, ex.get('offhand'), ids)
+                if not steps:
+                    return WalkAction('none', "There's nothing held to put on (or it's on already).")
+                return WalkAction('task', 'Gearing up!', name='equipment', count=1, steps=steps)
+            if tool == 'eat':
+                if not hasattr(self.adapter, 'food_slot'):
+                    return WalkAction('none', 'no eating in this game')
+                return WalkAction('task', 'Eating!', name='food', count=1, steps=[('eat', None)])
+            if tool == 'explore':
+                if not hasattr(self.adapter, 'explore_point'):
+                    return WalkAction('none', 'no exploring in this game')
+                way = str(args.get('direction') or '').strip().lower() or None
+                far = num('distance')
+                point = self.adapter.explore_point(way, far)
+                if point is None:
+                    return WalkAction('none', f"I can't explore {way or 'that way'} from here.")
+                self.last_walk_t = time.monotonic()
+                return WalkAction('walk', f"Exploring {way or 'ahead'}!", tuple(point), f"{way or 'ahead'} ({far or 64:g})")
+        except GameNotRunning:
+            return WalkAction('none', "I can't see the game right now.")
+        return WalkAction('none', f'unknown order {tool}')
+
     def _put_down(self, what: str) -> WalkAction | None:
         """'a crafting table': a task putting a held one down near the player, or None (not an item)."""
-        items = self.adapter.match_item(_FILLER.sub(' ', what.lower()).strip(' .!?'))
+        items = self.adapter.match_item(_FILLER.sub(' ', _no_namespace(what)).strip(' .!?'))
         if not items:
             return None
         snap = self.adapter.snapshot()
@@ -606,6 +873,54 @@ class CommandResolver:
             return WalkAction('none', f"I don't have a {name} to put down.")
         name = held[0].split(':')[-1].replace('_', ' ')
         return WalkAction('task', f'Putting the {name} down!', name=held[0], count=1, steps=[('station', held[0])])
+
+    def _use(self, args: dict, num) -> WalkAction:
+        """The typed 'use': a block or a creature right-clicked, as a player does (a bed slept in, a door, a lever, a
+        chest, a saddle put on a horse, the horse mounted): target "that" (the crosshair's), x y z (a block), a
+        creature by name, or the nearest block of a kind; item: what to use on it (None: an empty hand). ("Sleep in
+        the bed": "I can't lie down in it myself", 2026-10-17.)"""
+        if not hasattr(self.adapter, 'coords_point'):
+            return WalkAction('none', 'no using things in this game')
+        snap = self.adapter.snapshot()
+        ex = snap.extra or {}
+        inv = ex.get('inventory') or {}
+        item = None
+        if args.get('item'):
+            names = self.adapter.match_item(str(args['item'])) if hasattr(self.adapter, 'match_item') else []
+            held = [m for m in names if inv.get(m)]
+            if not held:
+                return WalkAction('none', f"I don't have any {args['item']}.")
+            item = held[0]
+        target = _clean(str(args.get('target') or ''))
+        xyz = [num(k) for k in ('x', 'y', 'z')]
+        kind = key = point = label = None
+        if None not in xyz:
+            key = tuple(math.floor(v) for v in xyz)
+            kind, label = 'block', target or 'block'
+        elif not target or _THAT.match(target):
+            if snap.target_id is not None:
+                e = next((x for x in snap.entities if x.id == snap.target_id), None)
+                if e is not None:
+                    kind, key, point, label = 'creature', e.id, tuple(e.pos), e.name or 'that'
+            elif ex.get('aim_block') is not None:
+                key = tuple(int(v) for v in ex['aim_block'])
+                kind, label = 'block', _no_namespace(str(ex.get('aim_id') or 'that')).replace('_', ' ')
+        else:
+            got = self.character(target)
+            if got is not None and got.entity_id is not None:
+                kind, key, point, label = 'creature', got.entity_id, tuple(got.point), got.name or target
+            else:
+                found = self.adapter.locate(target) if hasattr(self.adapter, 'locate') else {}
+                res = [r for r in found.get('results') or [] if r.get('kind') == 'block' and r.get('coordinates')]
+                if res:
+                    c = res[0]['coordinates']
+                    key, kind, label = (int(c['x']), int(c['y']), int(c['z'])), 'block', res[0]['name'].lower()
+        if kind is None:
+            return WalkAction('none', f"I can't find {('the ' + target) if target else 'what to use'} near here.")
+        if kind == 'block':
+            point = tuple(self.adapter.coords_point(*key))
+        say = f"Using the {_no_namespace(item).replace('_', ' ')} on the {label}!" if item else f"Using the {label}!"
+        return WalkAction('task', say, name='use', count=1, steps=[('use', kind, key, point, item, label)])
 
     def _place_or_character(self, what: str, avoid: str = '') -> WalkAction | None:
         """A character near the player by that name, or a place (or kind of block) by that name. A character

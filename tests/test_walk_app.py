@@ -53,6 +53,7 @@ def make_app():
     app._fight_log = lambda row: None   # never into the real runtime/combat log
     app._walk_log = lambda row: None    # ...nor the walk log
     app._save_chains = lambda: None     # ...nor the learned combos
+    app._conduct_log = lambda row: None   # ...nor the conductor's decisions
     from game_assistant.core.plan import PlanRunner
     app.plan, app._plan_cmd = PlanRunner(app), None
     app._los = (None, None)
@@ -460,3 +461,401 @@ class GoalReplanAppTests(unittest.TestCase):
             if t is not th.current_thread() and t.daemon:
                 t.join(timeout=1.0)
         self.assertEqual(len(think), 1)
+
+
+class DoerOutcomeAppTests(unittest.TestCase):
+    """How a walk or a fight ended comes back to the doer as data, as a task's does (docs/AGENT.md stage 4)."""
+
+    def test_a_walk_arrived_or_taken_over(self):
+        import time as _t
+        app = make_app()
+        w = World()
+        step(app, w, 0.5)
+        t0 = _t.monotonic()
+        app._walk_request('start', (0.0, 0.0, 8.0), 'the spot')
+        step(app, w, 6)
+        self.assertIn('Here we are: the spot!', app.lines)
+        self.assertEqual(app.doer_outcome(t0), {'ok': True, 'why': None})
+        t1 = _t.monotonic()
+        app._walk_request('start', (0.0, 0.0, 60.0), 'Gatefront')
+        step(app, w, 1)
+        app._player_key(0x57)
+        step(app, w, 0.1)
+        self.assertEqual(app.doer_outcome(t1), {'ok': False, 'why': {'kind': 'interrupted', 'by': 'the player'}})
+        self.assertIsNone(app.doer_outcome(_t.monotonic() + 1))          # (nothing ended since)
+
+    def test_a_fight_given_up_on_low_health(self):
+        import time as _t
+        app = make_app()
+        w = World()
+        step(app, w, 0.5)
+        t0 = _t.monotonic()
+        app.fighter.name = 'Zombie'
+        app.fighter.events.append('low_health')
+        app._fight_step(w.snap(), 1 / 30)                               # (the fighter's events, read each frame)
+        self.assertEqual(app.doer_outcome(t0), {'ok': False, 'why': {'kind': 'danger', 'what': 'Zombie'}})
+
+
+class DoerTypedAppTests(unittest.TestCase):
+    def test_typed_orders_the_plan_and_the_situation(self):
+        import json
+        try:
+            from test_walk_commands import TypedOrderTests
+        except ModuleNotFoundError:
+            from tests.test_walk_commands import TypedOrderTests
+        app = make_app()
+        r, M = TypedOrderTests().resolver(held={'minecraft:oak_log': 2})
+        app.resolver, app.adapter = r, r.adapter
+        self.assertTrue({'get', 'how_to_get', 'put_down', 'mine_at', 'flee', 'explore'} <= app.doer_tools())
+        plan = json.loads(app.doer_how_to_get('iron_pickaxe', 1))
+        self.assertEqual(plan['steps'][-1]['step'], 'craft 1 iron pickaxe')
+        self.assertGreater(plan['seconds'], 30)
+        self.assertEqual(plan['seconds'], sum(s['seconds'] for s in plan['steps']))
+        self.assertIn('error', json.loads(app.doer_how_to_get('moon rock', 1)))
+        self.assertIsNone(app.doer_do('get', {'item': 'iron_pickaxe'}))     # started
+        self.assertEqual(app._task_cmd[1:], (M + 'iron_pickaxe', 1))
+        self.assertEqual(app.doer_do('go_to', {}), 'go_to needs x, y and z, or a place')
+        self.assertEqual(json.loads(app.doer_situation())['holding'], {'oak_log': 2})
+
+
+class AwareAppTests(unittest.TestCase):
+    def test_hostile_ones_where_its_going_are_met_on_open_ground(self):
+        # (four zombies at the bottom of a pit where the player's things lay: walked down among them, dead,
+        # 2026-10-16)
+        from game_assistant.core.interface import Camera, Entity, Player, Snapshot
+        from game_assistant.core.melee import MeleeFighter
+        app = make_app()
+        app.fighter = MeleeFighter()                     # (Minecraft's: it holds ground)
+        lines = []
+        app._navi_line = lambda line, urgent=False: lines.append(line)
+
+        class A:
+            defend_on_walks = True
+            room = 25
+
+            def terrain(self):
+                return {'room': lambda x, z: self.room}
+
+            def combat_profile(self, e):
+                return {}
+        app.adapter = A()
+        app.walk.goal, app.walk.name = (0.0, 0.0, 12.0), 'where you died'
+        app.walk.active = True
+        zombies = tuple(Entity(i, 1, 'minecraft:zombie', (x, -4.0, 12.0), (x, -3.0, 12.0), 0.3, 1.95, True, False,
+                               20.0, 20.0, name='Zombie') for i, x in ((1, -1.0), (2, 1.0)))
+        cam = Camera((0.0, 1.6, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 70, 1.7)
+        snap = Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive', 20.0, 20.0), cam, zombies, None)
+        self.assertTrue(app._conduct(snap, 1 / 30))
+        self.assertEqual(app.conductor.running.kind, 'hold')
+        self.assertTrue(app.fighter.active and app.fighter.hold)          # (held ground, here: room)
+        self.assertEqual(app._paused_order['walk'][1], 'where you died')  # (the order waits)
+        self.assertIn('2 Zombies', lines[-1])
+        # tight here, open ground passed a few blocks back: back there first
+        app2 = make_app()
+        app2.fighter = MeleeFighter()
+        app2._navi_line = lambda line, urgent=False: None
+        app2.adapter = A()
+        app2.adapter.room = 4
+        app2._last_open = (0.0, 0.0, -5.0)
+        app2.walk.goal, app2.walk.name = (0.0, 0.0, 12.0), 'where you died'
+        app2.walk.active = True
+        self.assertTrue(app2._conduct(snap, 1 / 30))
+        self.assertEqual(app2.conductor.running.kind, 'regroup')
+        self.assertFalse(app2.fighter.active)
+        self.assertEqual(app2._walk_cmd[1], (0.0, 0.0, -5.0))
+
+    def test_skeletons_not_after_the_player_dont_hold_a_walk(self):
+        # (two skeletons 6 and 9 blocks off, not after the player: the walk stood still 10 s, 2026-10-16)
+        from game_assistant.core.interface import Camera, Entity, Player, Snapshot
+        from game_assistant.core.melee import MeleeFighter
+        app = make_app()
+        app.fighter = MeleeFighter()
+        app._navi_line = lambda line, urgent=False: None
+
+        class A:
+            defend_on_walks = True
+
+            def terrain(self):
+                return {'room': lambda x, z: 25}
+
+            def combat_profile(self, e):
+                return {'ranged': 'skeleton' in (e.model or '')}
+        app.adapter = A()
+        app.walk.goal, app.walk.name = (0.0, 0.0, 20.0), 'oak log'
+        cam = Camera((0.0, 1.6, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 70, 1.7)
+        skeletons = tuple(Entity(i, 1, 'minecraft:skeleton', (x, 0.0, 7.0), (x, 1.0, 7.0), 0.3, 1.95, True, False,
+                                 20.0, 20.0, name='Skeleton', extra={'aggressive': True}) for i, x in ((1, -2), (2, 3)))
+        snap = Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive', 20.0, 20.0), cam, skeletons, None)
+        self.assertFalse(app._conduct(snap, 1 / 30))                     # (they shoot, not after us: let be)
+        zombie = Entity(3, 1, 'minecraft:zombie', (4.0, 0.0, 6.0), (4.0, 1.0, 6.0), 0.3, 1.95, True, False, 20.0,
+                        20.0, name='Zombie', extra={'aggressive': False})
+        snap = Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive', 20.0, 20.0), cam, (zombie,), None)
+        self.assertFalse(app._conduct(snap, 1 / 30))                     # (not after us, not where we're going)
+
+
+class ShooterAppTests(unittest.TestCase):
+    def app_with(self, skeleton_at, health=20.0, offhand=''):
+        from game_assistant.core.interface import Camera, Entity, Player, Snapshot
+        from game_assistant.core.melee import MeleeFighter
+        from game_assistant.core.walk_commands import WalkAction
+        app = make_app()
+        app.fighter = MeleeFighter(lambda e: {'ranged': 'skeleton' in (e.model or '')}, lambda h: 0,
+                                   weapon_damage=lambda h: 5.0)
+        app.lines = []
+        app._navi_line = lambda line, urgent=False: app.lines.append(line)
+        skel = Entity(5, 1, 'minecraft:skeleton', skeleton_at, (skeleton_at[0], 1.0, skeleton_at[2]), 0.3, 1.99,
+                      True, False, 20.0, 20.0, name='Skeleton', extra={'aggressive': True, 'using_item': True})
+        cam = Camera((0.0, 1.6, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 70, 1.7)
+        snap = Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive', health, 20.0), cam, (skel,), None,
+                        extra={'inventory': {}, 'offhand': offhand, 'hotbar': [('minecraft:stone_sword', 1)]})
+
+        class A:
+            defend_on_walks = True
+            covered = []
+
+            def combat_profile(self, e):
+                return {'ranged': 'skeleton' in (e.model or '')}
+
+            def cover_spot(self, foe):
+                self.covered.append(foe)
+                return (3.0, 0.0, -2.0)
+
+            def terrain(self):
+                return {}
+
+            def snapshot(self):
+                return snap
+
+            def fight_gear(self, e, extra):
+                return [] if extra.get('offhand') == 'minecraft:shield' else [('minecraft:shield', 'offhand')]
+        app.adapter = A()
+
+        class R:
+            def get_item(self, item, n):
+                return WalkAction('task', '', name=item, count=1,
+                                  steps=[('craft', type('Rec', (), {'result': item})(), 1)])
+        app.resolver = R()
+        app._step_cost = lambda s: 3.0
+        app.walk.goal, app.walk.name = (0.0, 0.0, 30.0), 'oak log'
+        app.walk.active = True
+        return app, snap
+
+    def test_a_shooter_far_off_is_hidden_from_near_and_alone_fought(self):
+        # (the user: "if a skeleton happens to be nearby or attacks us while we're doing other things, then we
+        # should either hide or kill it, depending on the situation")
+        app, snap = self.app_with((0.0, 0.0, 14.0))
+        self.assertTrue(app._conduct(snap, 1 / 30))
+        self.assertEqual(app.conductor.running.kind, 'cover')            # (far off: into cover)
+        self.assertEqual(app._walk_cmd[2], 'cover')
+        app, snap = self.app_with((0.0, 0.0, 7.0))
+        self.assertTrue(app._conduct(snap, 1 / 30))
+        self.assertEqual(app.conductor.running.kind, 'fight')            # (near, alone, well: fought)
+        app, snap = self.app_with((0.0, 0.0, 7.0), health=8.0)
+        app._conduct(snap, 1 / 30)
+        self.assertEqual(app.conductor.running.kind, 'cover')            # (hurt: cover)
+
+    def test_a_shield_got_before_an_ordered_fight_with_a_shooter(self):
+        from game_assistant.core.walk_commands import WalkAction
+        app, snap = self.app_with((0.0, 0.0, 7.0))
+        act = WalkAction('walk', '', (0.0, 0.0, 7.0), 'Skeleton', 5, 'fight')
+        app._start_action(act, 'kill the skeleton')
+        steps = app._task_cmd[0]
+        self.assertEqual(steps[-1], ('offhand', 'minecraft:shield'))
+        self.assertEqual(app._then_walk[2:], (5, 'fight'))              # (then the fight)
+        app2, snap2 = self.app_with((0.0, 0.0, 7.0), offhand='minecraft:shield')
+        app2._start_action(act, 'kill the skeleton')
+        self.assertEqual(app2._walk_cmd[0], 'start')                    # (one held: straight to it)
+
+    def test_bare_handed_the_quickest_weapon_first(self):
+        # (sent to kill skeletons with nothing in hand, it went for a shield and fought a zombie with its fists:
+        # 15 hits, still up, the player dead, 2026-10-16)
+        from game_assistant.core.walk_commands import WalkAction
+        app, snap = self.app_with((0.0, 0.0, 7.0))
+        app.adapter.fight_gear = lambda e, extra: [(('minecraft:stone_sword', 'minecraft:wooden_sword'), 'hand'),
+                                                   (('minecraft:shield',), 'offhand')]
+        costs = {'minecraft:stone_sword': 40.0, 'minecraft:wooden_sword': 25.0, 'minecraft:shield': 90.0}
+        app._step_cost = lambda s: costs[s[1].result]
+        app._fight_all = 'Zombie'                                       # (the last order's)
+        app._start_action(WalkAction('walk', '', (0.0, 0.0, 7.0), 'Skeleton', 5, 'fight'), 'kill the skeleton')
+        steps, name, _n = app._task_cmd
+        self.assertEqual(name, 'minecraft:wooden_sword')                # (the quickest that does)
+        self.assertEqual([s[1].result for s in steps if s[0] == 'craft'],
+                         ['minecraft:wooden_sword', 'minecraft:shield'])
+        self.assertEqual(steps[-1], ('offhand', 'minecraft:shield'))
+        self.assertIsNone(app._fight_all)                               # (not the last order's "all of them")
+        self.assertIn('wooden sword and a shield', app.lines[-1])
+
+
+class CoverWalkTests(unittest.TestCase):
+    def test_into_cover_and_then_on_with_the_order(self):
+        # (the walk to cover was held up every frame by the hiding itself: the player stood in the skeleton's sight,
+        # going nowhere, 2026-10-16): the conductor's frames, end to end
+        app, snap = ShooterAppTests().app_with((0.0, 0.0, 14.0))
+        app.adapter.cover_spot = lambda foes: (0.0, 0.0, 8.0)
+        w = World()
+        step(app, w, 0.5)
+        app.walk.active, app.walk.goal = True, (0.0, 0.0, 30.0)
+        self.assertTrue(app._conduct(snap, 1 / 30))                    # (the skeleton: into cover)
+        self.assertEqual(app.conductor.running.kind, 'cover')
+        step(app, w, 3)                                                 # (the skeleton's out of sight now)
+        self.assertGreater(w.pos[2], 5.0)                               # (it went)
+        step(app, w, 5)
+        self.assertIsNone(app.conductor.running)                        # (it gave up: over)
+        self.assertIsNone(app._paused_order)                            # (the order on again)
+
+
+class InTheAirTests(unittest.TestCase):
+    def test_nothing_cuts_a_jump_off(self):
+        # (into cover, mid-jump: the jump cut off, a fall of 10 blocks, 2026-10-16)
+        from game_assistant.core.interface import Camera, Entity, Player, Snapshot
+        app = make_app()
+
+        class A:
+            defend_on_walks = True
+        app.adapter = A()
+        app.walk.state, app.walk.active = 'parkour', True
+        z = Entity(1, 1, 'minecraft:zombie', (0.0, 0.0, 3.0), (0.0, 1.0, 3.0), 0.3, 1.95, True, False, 20.0, 20.0,
+                   name='Zombie', extra={'aggressive': True})
+        cam = Camera((0.0, 1.6, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 70, 1.7)
+        snap = Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive', 20.0, 20.0), cam, (z,), None)
+        self.assertFalse(app._conduct(snap, 1 / 30))
+        self.assertIsNone(app.conductor.running)
+
+
+class ErrandGearTests(unittest.TestCase):
+    def test_an_errand_among_enemies_gets_a_weapon_first(self):
+        # ("make me a bed" at night, 7 health, a pickaxe the best to hit with: two spiders, dead, 2026-10-17)
+        from types import SimpleNamespace as NS
+        from game_assistant.app import App
+        from game_assistant.core.interface import Entity, Player, Snapshot
+        spider = Entity(9, 1, 'minecraft:spider', (5.0, 0.0, 5.0), (5.0, 0.5, 5.0), 0.7, 0.9, True, False, 16.0, 16.0,
+                        name='Spider')
+        sword = [('craft', 'sword recipe', 1)]
+
+        class A:
+            def __init__(self, foes):
+                self.foes = foes
+
+            def snapshot(self):
+                return Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive'), None, self.foes, None,
+                                extra={'hotbar': [('minecraft:stone_pickaxe', 1)], 'inventory': {}})
+
+            def fight_gear(self, e, extra):
+                return [(('minecraft:stone_sword',), 'hand')]
+
+            def combat_profile(self, e):
+                return {}
+        app = App.__new__(App)
+        app.lines = []
+        app._navi_line = lambda line, urgent=False: app.lines.append(line)
+        app._step_cost = lambda s: 10.0
+        app.resolver = NS(get_item=lambda item, n: NS(kind='task', steps=sword))
+        bed = NS(kind='task', steps=[('gather', 'wool', 3)], name='minecraft:white_bed', count=1)
+        app.adapter = A((spider,))
+        app._task_cmd = (bed.steps, bed.name, 1)
+        app._errand_gear(bed)
+        self.assertEqual(app._task_cmd, (sword + bed.steps, 'minecraft:white_bed', 1))
+        self.assertIn('stone sword', app.lines[-1])
+        app.adapter = A(())                              # (none about: the errand as it was)
+        app._task_cmd = (bed.steps, bed.name, 1)
+        app._errand_gear(bed)
+        self.assertEqual(app._task_cmd, (bed.steps, 'minecraft:white_bed', 1))
+
+    def test_hurt_among_enemies_with_food_a_bite_first(self):
+        from types import SimpleNamespace as NS
+        from game_assistant.app import App
+        from game_assistant.core.interface import Entity, Player, Snapshot
+        spider = Entity(9, 1, 'minecraft:spider', (5.0, 0.0, 5.0), (5.0, 0.5, 5.0), 0.7, 0.9, True, False, 16.0, 16.0)
+
+        class A:
+            def snapshot(self):
+                return Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive', 7.0, 20.0), None, (spider,),
+                                None, extra={'hotbar': [('minecraft:iron_sword', 1), ('minecraft:bread', 3)]})
+
+            def fight_gear(self, e, extra):
+                return []
+
+            def food_slot(self, hotbar):
+                return 1
+        app = App.__new__(App)
+        app.lines = []
+        app._navi_line = lambda line, urgent=False: app.lines.append(line)
+        app.adapter = A()
+        bed = NS(kind='task', steps=[('gather', 'wool', 3)], name='minecraft:white_bed', count=1)
+        app._task_cmd = (bed.steps, bed.name, 1)
+        app._errand_gear(bed)
+        self.assertEqual(app._task_cmd[0], [('eat', None)] + bed.steps)
+        self.assertIn('a bite', app.lines[-1])
+
+
+class PlanPacingTests(unittest.TestCase):
+    def test_planned_again_from_one_spot_waits_longer_each_time(self):
+        # (a way whose first move gave up at once was planned 10 times a second for 15 s, the game lagging,
+        # 2026-10-17)
+        c = Companion()
+        c.plan_async = False
+        calls = []
+        c.route_fn = lambda s, g: calls.append(s) or None
+        c.mode = 'guide'
+        for i in range(100):                             # 10 s at 10 a second, never moving
+            c.t = i * 0.1
+            c._start_plan((0.0, 0.0, 0.0), (0.0, 30.0, 0.0))
+        self.assertLess(len(calls), 12)                  # (0.25, 0.5, 1, 2, 4 s apart: not 100)
+        c.t += 0.1
+        c._start_plan((3.0, 0.0, 0.0), (0.0, 30.0, 0.0))  # (moved on: at once)
+        self.assertEqual(calls[-1], (3.0, 0.0, 0.0))
+
+
+class BlocksFirstTests(unittest.TestCase):
+    def test_blocks_put_in_the_hotbar_before_a_walk_or_an_errand(self):
+        from types import SimpleNamespace as NS
+        from game_assistant.app import App
+        app = App.__new__(App)
+        app.adapter = NS(blocks_to_hand=lambda: ('arrange', ('a', 'b')))
+        walk = NS(kind='walk', point=(1.0, 2.0, 3.0), name='Horse', entity_id=None, attack=False, follow=None)
+        app._task_cmd = 'stop'
+        self.assertTrue(app._blocks_to_hand(walk))
+        self.assertEqual(app._task_cmd, ([('arrange', ('a', 'b'))], 'ready', 1))
+        # (the shield picked up where the player died stayed in the pack; a skeleton fought without it, 2026-10-17)
+        app.adapter = NS(blocks_to_hand=lambda: None, equipment=lambda inv, off: [('offhand', 'mc:shield')],
+                         snapshot=lambda: NS(extra={'inventory': {'mc:shield': 1}, 'offhand': ''}))
+        self.assertTrue(app._blocks_to_hand(walk))
+        self.assertEqual(app._task_cmd, ([('offhand', 'mc:shield')], 'ready', 1))
+        app.adapter = NS(blocks_to_hand=lambda: ('arrange', ('a', 'b')))
+        self.assertEqual(app._then_walk, ((1.0, 2.0, 3.0), 'Horse', None, False))
+        task = NS(kind='task', steps=[('use', 'x')], name='use', count=1)
+        app._task_cmd = (task.steps, task.name, 1)
+        self.assertFalse(app._blocks_to_hand(task))
+        self.assertEqual(app._task_cmd[0], [('arrange', ('a', 'b')), ('use', 'x')])
+        fight = NS(kind='walk', point=(0.0, 0.0, 0.0), name='Zombie', entity_id=3, attack='fight', follow=None)
+        self.assertFalse(app._blocks_to_hand(fight))       # (a fight: at once)
+
+
+class ErrandGearLimitTests(unittest.TestCase):
+    def test_no_gear_before_picking_things_up_and_never_a_shield(self):
+        # (the player's own sword and shield lay where they'd died: a sword and a shield were made first, 17 steps,
+        # skeletons shooting, dead again, 2026-10-17)
+        from types import SimpleNamespace as NS
+        from game_assistant.app import App
+        from game_assistant.core.interface import Entity, Player, Snapshot
+        skel = Entity(9, 1, 'minecraft:skeleton', (5.0, 0.0, 5.0), (5.0, 1.0, 5.0), 0.3, 1.99, True, False, 20.0,
+                      20.0)
+        app = App.__new__(App)
+        app.lines = []
+        app._navi_line = lambda line, urgent=False: app.lines.append(line)
+        app._step_cost = lambda s: 10.0
+        made = {'minecraft:stone_sword': [('craft', 'sword', 1)], 'minecraft:shield': [('smelt', 'iron', 1)]}
+        app.resolver = NS(get_item=lambda item, n: NS(kind='task', steps=made[item]))
+        app.adapter = NS(snapshot=lambda: Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive'), None,
+                                                   (skel,), None, extra={'inventory': {}}),
+                         fight_gear=lambda e, ex: [(('minecraft:stone_sword',), 'hand'),
+                                                   (('minecraft:shield',), 'offhand')],
+                         combat_profile=lambda e: {})
+        pickup = NS(kind='task', steps=[('pickup', None, 12.0)], name='items', count=1)
+        app._task_cmd = (pickup.steps, 'items', 1)
+        app._errand_gear(pickup)
+        self.assertEqual(app._task_cmd[0], pickup.steps)            # (picking up: as it was)
+        bed = NS(kind='task', steps=[('gather', 'wool', 3)], name='minecraft:white_bed', count=1)
+        app._task_cmd = (bed.steps, bed.name, 1)
+        app._errand_gear(bed)
+        self.assertEqual(app._task_cmd[0], [('craft', 'sword', 1)] + bed.steps)    # (a sword: no shield)

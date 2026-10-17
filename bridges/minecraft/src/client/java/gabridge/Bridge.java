@@ -35,7 +35,7 @@ import java.util.function.Function;
 public class Bridge implements ClientModInitializer {
 	public static final int PORT = 47821;
 	/** Bumped with each change the assistant relies on (it says when the game runs an older bridge). */
-	public static final int VERSION = 17;
+	public static final int VERSION = 20;
 	static final Gson GSON = new Gson();
 
 	/** The latest snapshot as a JSON line, replaced every frame while the assistant asks for it. */
@@ -171,6 +171,11 @@ public class Bridge implements ClientModInitializer {
 			}
 			case "block_ids":
 				return GSON.toJson(Finder.ids());
+			case "find_each": {
+				JsonArray ids = req.getAsJsonArray("ids");
+				int max = req.has("max") ? req.get("max").getAsInt() : 3;
+				return GSON.toJson(onGameThread(mc -> Finder.findEach(mc, ids, max)));
+			}
 			case "find_blocks": {
 				JsonArray ids = req.getAsJsonArray("ids");
 				int max = req.has("max") ? req.get("max").getAsInt() : 8;

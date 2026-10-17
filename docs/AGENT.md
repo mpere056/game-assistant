@@ -74,9 +74,11 @@ A small plan (one milestone) runs to its end unless a step fails.
 ### The doer (core/doer.py)
 
 The model above the planner, for what it has no goal for and for when it can't find a plan. Its tools
-become typed: `get(item, n)` (runs the planner), `go_to`, `mine_at`, `put_down`, `fight`, `flee`,
-`explore`, `situation` (the memory's summary and the survey), each answering with an Outcome. The text
-rules stay for the player's spoken orders only.
+are typed: `get(item, n)` (runs the goal planner), `how_to_get` (the plan and its time, nothing done),
+`go_to`, `mine_at`, `put_down`, `fight`, `flee`, `eat`, `explore`, `situation` (the memory as data, the plan
+under way), each answering with an Outcome as data (ok, why not, what changed in what's held, the seconds);
+a game offers the ones it has. The text rules are for the player's spoken orders, and `act` for what the
+typed tools don't cover. The prompt is any game's; a game's know-how is its adapter's `doer_notes`.
 
 ### The test world (tests/sim/)
 
@@ -88,9 +90,9 @@ route planner's route and takes its time). Cases: "an iron pickaxe from nothing"
 
 ## Stages
 
-Status (2026-10-15): stages 1-3 built and passing the tests (368; the test world's cases: an iron pickaxe from
+Status (2026-10-16): stages 1-4 built and passing the tests (379; the test world's cases: an iron pickaxe from
 nothing, a stone pickaxe 14 down a hole with planks (a new table there, 10 s), and out of a hole with only a
-pickaxe); not yet tried in the game. Next: stage 4.
+pickaxe). Stages 1-3 tried in the game (the iron pickaxe made, 2026-10-15); stage 4 not yet. Next: stage 5.
 
 1. **Typed outcomes and the world memory.** Outcome/Reason in the core; core/tasks.py's steps end with
    Outcomes (every failure a Reason); the walk's give-ups carry their route note as a Reason; the memory

@@ -1,29 +1,19 @@
-"""Walking in Minecraft: A* over the blocks themselves (Minecraft has no navigation mesh).
+"""Minecraft's blocks as the walk sees them: the grid the bridge reads, where one can stand, what's in sight.
 
-The bridge reads a box of blocks as one byte each (bridges/minecraft Grid.java). A place to stand is a block
-cell for the feet: nothing solid in it (or a low slab or carpet to stand on), room for the head above, and
-something to stand on below (or water to swim in, or a ladder to hold). Moves: the 8 neighbours on the same
-level; one up (a jump, or a stair); down by up to MAX_DROP blocks; up and down ladders. Diagonals never cut a
-corner. Lava, fire, magma, cactus, berry bushes and cobwebs are never stepped in or on; doors and gates count
-as walls for now (the walk doesn't open them). Powder snow can't hold you up (you sink into it) but can be
-waded through (the game slows you only a little and boosts jumps in it; it freezes you after 7 s, so it costs
-more). Falls: a walk off an edge carries the player on a block or two before landing, so a drop also counts
-what lies past its landing; and stands beside a deadly drop cost more (keep away from cliff edges).
-
-Breaking and building, as Baritone does (when the adapter allows it): mine through what's in the way (walking
-on, stepping up, stepping down), dig straight down, pillar up (jump and place a block under the feet), and
-bridge a gap (place the missing floor block, sneaking at the edge). Never: a block next to water or lava
-(it would flow in), under sand or gravel (it would fall), a door, bedrock and the like, or what isn't loaded.
-Each move carries its work, in order: ('break', cell) and ('place', cell, against, 'bridge' or 'pillar').
+The bridge reads a box of blocks as one byte each (bridges/minecraft Grid.java): what kind of thing is there
+for walking (air, water, a full block, a slab, a fence, a ladder, a door, lava and the like, powder snow) and
+how long each takes to break. A place to stand is a block cell for the feet: nothing solid in it (or a low slab
+or carpet to stand on), room for the head above, and something to stand on below (or water to swim in, its
+top, or a ladder to hold). What counts as there (_there), and whether a block can be seen and reached from a
+cell (sees: the crosshair's way), are here too; the routes themselves are planned in pathing.py (Baritone's
+way) and done in moving.py.
 
 All coordinates here are Minecraft's own (the adapter mirrors X around this).
 """
 from __future__ import annotations
 
 import base64
-import heapq
 import math
-import time
 from dataclasses import dataclass, field
 
 AIR, WATER, DANGER, SOLID, LOW, TALL, CLIMB, DOOR, PARTIAL, UNKNOWN, POWDER = range(11)
@@ -35,32 +25,7 @@ SOFT = {WATER}                      # falling into these does no harm
 FLOOR = {SOLID, PARTIAL, TALL, LOW}  # these hold you up from below
 MAX_DROP = 3                        # blocks: a fall this far costs no health (onto ground)...
 MAX_WATER_DROP = 60                 # ...and into water, any fall (as far as this)
-COST_DIAG = math.sqrt(2.0)
-COST_JUMP = 0.6
-COST_DROP = 0.4                     # per block fallen
-COST_WATER = 2.2                    # swimming: about half walking pace (its time, no more: the quickest way in all,
-                                    # the user, 2026-10-13: land only when it isn't much slower)
-COST_CLIMB = 1.5
-COST_EDGE = 2.0                     # standing next to a fall that would hurt
 NEAR_GOAL = 1.6                     # blocks across: a stand this near the goal reaches it
-# Costs are in blocks walked; the game's own times converted (Baritone reckons in ticks: walking a block takes
-# 20 / 4.317 = 4.63 ticks).
-TICKS_PER_BLOCK = 20.0 / 4.317
-# per block broken, on top of its time to break (the bridge's, in 4 ticks): turning to it and stopping for it (the
-# log: about 0.7 s a leaf block, 0.3 of it breaking; at 2 ticks, tunnelling 2 a step through a canopy looked
-# cheaper than walking over it, 2026-10-13)
-COST_BREAK = 8.0 / TICKS_PER_BLOCK
-PARKOUR_MAX = 3                     # blocks of gap a sprinting jump (with a run-up) clears
-COST_SPRINT_JUMP = 0.5              # a sprinting jump: a little dearer than a walking one
-PARKOUR_RISK = 2.0                  # per block of gap, when missing it would hurt (a deep drop, lava)
-COST_PLACE = 20.0 / TICKS_PER_BLOCK  # a block placed (bridging): turning round and placing, about a second
-COST_PILLAR = COST_PLACE + COST_JUMP  # a jump and a block placed under the feet
-# climbing back up a block from a hole dug straight down: a step dug up out of it (two blocks broken, a jump), the
-# blocks about as hard as stone with a wooden pickaxe (24 ticks): reckoned for a way that's come back along
-CLIMB_BACK = 1.0 + COST_JUMP + 2 * (COST_BREAK + 24.0 / TICKS_PER_BLOCK)
-BURIED_WEIGHT = 4.0                 # the estimate's weight toward a block in the ground (dug to)
-DIG_WEIGHT = 9.0                    # (squared: 3 blocks' walk for each block up or down to a block in the ground)
-H_WEIGHT = 1.5                      # weighted A*: a good route fast rather than the best one slowly
 UNBREAKABLE = 127                   # (the bridge's hardness byte: bedrock, obsidian, lava, unloaded)
 
 
@@ -128,126 +93,9 @@ def stand_height(g: Grid, x: int, y: int, z: int) -> float | None:
     return None
 
 
-def find(g: Grid, start: tuple[int, int, int], goal: tuple[int, int, int], budget_s: float = 1.0,
-         max_nodes: int = 200_000, can_break: bool = False, blocks: int = 0, kind: str = 'near',
-         box=None, no_place=frozenset(), sky=None, parkour: bool = True, ground=None,
-         back: bool = False) -> Path | None:
-    """A route from the stand nearest start toward goal (cells). None: nowhere to stand near the start.
-    can_break: mine through blocks; blocks: how many blocks there are to build with (bridging, pillaring).
-    kind, what counts as there (Baritone's goals): 'near' within NEAR_GOAL across and 2 up or down; 'block'
-    standing next to the goal block, facing a side of it that's open (at the feet, the head, or just below the
-    feet, its top open); 'column' within NEAR_GOAL across at any height (a village, a biome). box ((min x, y,
-    z), (max x, y, z), the max outside it): anywhere inside it across counts as there too (a village's area).
-    sky / ground ((x, z) -> a height, or None): standing at the open sky / on the land itself (not up a tree)
-    anywhere counts as there too (kind 'ground': only that). back: the way will be come back along (what's
-    gathered there is taken somewhere): each way down that can't be walked back up (a hole dug straight down, a
-    drop of more than a block) costs the climb back too (dug straight down 14 for stone, then no way up: the
-    cobblestone was for the furnace, 2026-10-15)."""
-    # stood in powder snow already (sunk in it): its cells round the body are taken as open, and the way out
-    # planned from there (else no stand near: no route, and the player froze, 2026-10-13)
-    sx, sy, sz = start
-    if POWDER in (g.at(sx, sy, sz), g.at(sx, sy + 1, sz)) and g.at(sx, sy - 1, sz) in FLOOR | {POWDER}:
-        g = _opened(g, [(sx, sy, sz), (sx, sy + 1, sz)])
-    s = _nearest_stand(g, start)
-    if s is None:
-        return None
-    s = (*s, 0)                                       # (x, y, z, 1 when standing on a block placed on the way)
-    gx, gy, gz = goal
-    # each block up or down toward a block to mine (it's in the ground) is most likely dug through: a few blocks'
-    # walk each, not one (counted as one, a stone 7 down was searched for across the whole surface first, and not
-    # found in 1.5 s, 2026-10-13)
-    buried = kind == 'mine' and g.at(gx, gy, gz) not in PASS
-    vw = DIG_WEIGHT if buried else 0.5
-    # (toward a block in the ground the way is mostly dug, many blocks' walk a block: reckoned as one, an ore 13
-    # off through stone wasn't reached in 3 s, 15,872 tried; four times it, half the time, the same way)
-    hw = H_WEIGHT * (BURIED_WEIGHT if buried else 1.0)
-
-    def h(c):
-        return hw * math.sqrt((c[0] - gx) ** 2 + (c[1] - gy) ** 2 * vw + (c[2] - gz) ** 2)
-
-    # the block to mine or use is never broken on the way (a route that ran out of time ended in the stone it was
-    # sent to mine, dug through it, and stood there waiting, 2026-10-13)
-    g.keep = frozenset({tuple(goal)}) if kind in ('mine', 'block') else frozenset()
-    ctx = _Ctx(g, {}, can_break and g.hard is not None, blocks, frozenset(no_place), parkour, back)
-    open_ = [(h(s), 0.0, s)]
-    came: dict = {s: None}
-    cost = {s: 0.0}
-    best = (h(s), s)
-    t0 = time.perf_counter()
-    expanded = 0
-    timed_out = False
-    end = None
-    while open_:
-        _f, c_cost, c = heapq.heappop(open_)
-        if c_cost > cost.get(c, math.inf):
-            continue
-        expanded += 1
-        hc = h(c)
-        if hc < best[0]:
-            best = (hc, c)
-        if _there(g, c, goal, kind) or (box is not None and _inside(c, box)) \
-                or (sky is not None and _open_sky(c, sky)) or (ground is not None and _on_ground(g, c, ground)):
-            end = c
-            break
-        if expanded >= max_nodes or (expanded % 512 == 0 and time.perf_counter() - t0 > budget_s):
-            timed_out = True
-            break
-        for n, step, work in _all_moves(ctx, c):
-            nc = c_cost + step
-            if nc < cost.get(n, math.inf):
-                cost[n] = nc
-                came[n] = (c, work)
-                heapq.heappush(open_, (nc + h(n), nc, n))
-    reached = end is not None
-    if end is None:
-        end = best[1]
-        # the box's edge or the time ran out (not: no way at all) when the best is at the box's edge
-        if not timed_out:
-            timed_out = _at_edge(g, end)
-    cells, works = [], []
-    c = end
-    while c is not None:
-        cells.append(c)
-        prev = came[c]
-        works.append(prev[1] if prev else ())
-        c = prev[0] if prev else None
-    cells.reverse()
-    works.reverse()                                   # works[i]: what's done on the way into cells[i]
-    pts = [(x + 0.5, (None if placed else stand_height(g, x, y, z)) or float(y), z + 0.5)
-           for x, y, z, placed in cells]
-    jumps, actions = [], []
-    for i in range(len(cells) - 1):
-        work = works[i + 1]
-        for w in work:
-            actions.append((w[0], pts[i], *w[1:]))
-        pillar = any(w[0] == 'place' and w[3] == 'pillar' for w in work)
-        leap = any(w[0] == 'parkour' for w in work)
-        if cells[i + 1][1] > cells[i][1] and g.at(*cells[i][:3]) != CLIMB and pts[i + 1][1] - pts[i][1] > 0.6 \
-                and not pillar and not leap:
-            jumps.append((pts[i], pts[i + 1]))
-            actions.append(('step', pts[i], pts[i + 1]))
-    keep = {a[1] for a in actions} | {pts[i + 1] for i in range(len(cells) - 1) if works[i + 1]}
-    path = Path(_simplify(pts, jumps, keep), reached, timed_out, jumps, expanded)
-    path.actions = actions
-    path.cells = pts
-    path.cost = cost.get(end, 0.0)
-    path.length = sum(math.dist(a, b) for a, b in zip(path.points, path.points[1:]))
-    return path
-
-
-@dataclass
-class _Ctx:
-    g: Grid
-    falls: dict
-    can_break: bool
-    blocks: int
-    no_place: frozenset = frozenset()   # cells where placing failed lately (not planned there again)
-    parkour: bool = True                 # jumps over gaps
-    back: bool = False                   # the way down is come back up: what can't be walked back costs the climb
-
-
 def _breakable(g: Grid, x: int, y: int, z: int) -> float | None:
-    """The cost of breaking cell (x, y, z), or None when it mustn't be broken."""
+    """The ticks breaking cell (x, y, z) takes, or None when it mustn't be broken (a block in a line of sight,
+    mined first)."""
     k = g.at(x, y, z)
     if k in (AIR, WATER, DANGER, UNKNOWN, DOOR) or (x, y, z) in g.keep:
         return None
@@ -260,129 +108,7 @@ def _breakable(g: Grid, x: int, y: int, z: int) -> float | None:
         nk = g.at(x + dx, y + dy, z + dz)
         if nk == WATER or (nk == DANGER and g.hardness(x + dx, y + dy, z + dz) & 127 >= UNBREAKABLE):
             return None                               # water or lava would flow in
-    return COST_BREAK + (hb & 127) * 4.0 / TICKS_PER_BLOCK
-
-
-def _open(ctx: _Ctx, cells) -> tuple[float, tuple] | None:
-    """Cost and work to make these cells room for the body (breaking what's there), or None."""
-    total, work = 0.0, []
-    for c in cells:
-        if ctx.g.at(*c) in PASS:
-            continue
-        if not ctx.can_break:
-            return None
-        b = _breakable(ctx.g, *c)
-        if b is None:
-            return None
-        total += b
-        work.append(('break', c))
-    work.sort(key=lambda w: -w[1][1])                 # the top first
-    return total, tuple(work)
-
-
-def _parkour(ctx: _Ctx, x: int, y: int, z: int, plain: set):
-    """Jumps over a gap (straight on, the 4 ways): a walking jump over 1 block, a sprinting one over 2 (or over 1
-    and up 1), a sprinting one with a run-up block behind over 3; landing level or 1 lower, with room for the arc
-    (two blocks over the head all the way). ('parkour', landing, gap, sprint, run-up cell or None)."""
-    g = ctx.g
-    here = g.at(x, y, z)
-    if here in (WATER, CLIMB) or g.at(x, y - 1, z) not in FLOOR or g.at(x, y + 2, z) not in PASS:
-        return
-    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        first = (x + dx, y, z + dz)
-        if stand_height(g, *first) is not None or first in plain:
-            continue                                  # (no gap: walked)
-        landed = False
-        for gap in range(1, PARKOUR_MAX + 1):
-            gx_, gz_ = x + dx * gap, z + dz * gap
-            if not _clear(g, gx_, y, y + 2, gz_):      # the arc: feet to two over the head
-                break
-            if gap > 1 and stand_height(g, gx_, y, gz_) is not None:
-                break                                 # (that's ground, not gap: it'd be landed on)
-            lx, lz = x + dx * (gap + 1), z + dz * (gap + 1)
-            for rise in ((0, -1, 1) if gap == 1 else (0, -1)):
-                ly = y + rise
-                if stand_height(g, lx, ly, lz) is None or not _clear(g, lx, ly, ly + 1, lz) \
-                        or g.at(lx, max(y, ly) + 2, lz) not in PASS:
-                    continue
-                sprint = gap >= 2 or rise > 0
-                runup = None
-                if gap == 3:                          # a run at it: a block behind to start from
-                    runup = (x - dx, y, z - dz)
-                    if stand_height(g, *runup) is None or g.at(x - dx, y + 2, z - dz) not in PASS:
-                        continue
-                # if it's missed: how bad the fall into the gap is
-                fall = min(_fall(g, x + dx * i, y, z + dz * i, ctx.falls) for i in range(1, gap + 1))
-                risk = 0.0 if fall <= MAX_DROP else PARKOUR_RISK * gap
-                cost = (gap + 1) + COST_JUMP + (COST_SPRINT_JUMP if sprint else 0.0) + risk \
-                    + (1.0 if runup else 0.0) + _edge_cost(g, lx, ly, lz, ctx.falls)
-                yield (lx, ly, lz, 0), cost, (('parkour', (lx, ly, lz), gap, sprint, runup),)
-                landed = True
-                break                                 # (the level landing first; else 1 lower)
-            if landed:
-                break                                 # (the nearest landing over the gap: none past it)
-
-
-def _all_moves(ctx: _Ctx, c):
-    """Every move from node c: (next node, cost, work)."""
-    g = ctx.g
-    x, y, z, placed = c
-    plain = set()
-    for n, step in _moves(g, (x, y, z), ctx.falls):
-        plain.add(n)
-        if ctx.back and n[1] < y - 1 and g.at(*n) != WATER:
-            step += CLIMB_BACK * (y - n[1] - 1)          # (a drop of more than a block: dug back up)
-        yield (*n, 0), step, ()
-    if ctx.parkour and not placed:
-        yield from _parkour(ctx, x, y, z, plain)
-    if not ctx.can_break and ctx.blocks <= 0:
-        return
-    here = g.at(x, y, z)
-    floor_solid = placed or g.at(x, y - 1, z) == SOLID
-    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        nx, nz = x + dx, z + dz
-        if any(n[0] == nx and n[2] == nz for n in plain):
-            continue
-        # walk on, breaking what's in the way; or bridge a missing floor
-        room = _open(ctx, ((nx, y, nz), (nx, y + 1, nz)))
-        if room is not None:
-            fk = g.at(nx, y - 1, nz)
-            if fk in FLOOR:
-                if room[1]:
-                    # (and the ways up and down too, below: with a tunnel straight on possible, climbing up
-                    # through the leaves was never weighed, and it tunnelled across a canopy, 2026-10-13)
-                    yield (nx, y, nz, 0), 1.0 + room[0] + _edge_cost(g, nx, y, nz, ctx.falls), room[1]
-            elif fk in (AIR, WATER) and ctx.blocks > 0 and floor_solid and here not in (WATER, CLIMB) \
-                    and (nx, y - 1, nz) not in ctx.no_place:
-                work = room[1] + (('place', (nx, y - 1, nz), (x, y - 1, z), 'bridge'),)
-                yield (nx, y, nz, 1), 1.0 + COST_PLACE + room[0] + _edge_cost(g, nx, y, nz, ctx.falls), work
-                continue
-        # step up one, breaking what's in the way (and room above the head here)
-        if g.at(nx, y, nz) in FLOOR:
-            room = _open(ctx, ((x, y + 2, z), (nx, y + 1, nz), (nx, y + 2, nz)))
-            if room is not None and room[1]:
-                yield (nx, y + 1, nz, 0), 1.0 + COST_JUMP + room[0] + _edge_cost(g, nx, y + 1, nz, ctx.falls), \
-                    room[1]
-        # step down one, breaking what's in the way
-        if g.at(nx, y - 2, nz) in FLOOR:
-            room = _open(ctx, ((nx, y + 1, nz), (nx, y, nz), (nx, y - 1, nz)))
-            if room is not None and room[1]:
-                yield (nx, y - 1, nz, 0), 1.0 + COST_DROP + room[0] + _edge_cost(g, nx, y - 1, nz, ctx.falls), \
-                    room[1]
-    # dig straight down (the floor here), onto ground
-    if ctx.can_break and not placed and here not in (WATER, CLIMB) and g.at(x, y - 2, z) in FLOOR \
-            and g.at(x, y - 1, z) not in PASS:
-        b = _breakable(g, x, y - 1, z)
-        if b is not None:
-            yield (x, y - 1, z, 0), b + 0.5 + (CLIMB_BACK if ctx.back else 0.0), (('break', (x, y - 1, z)),)
-    # pillar up: jump and place a block under the feet (a jump needs two blocks of room above the head: with
-    # one, the head hit the ceiling and the block never fitted under the feet, 2026-10-13)
-    if ctx.blocks > 0 and here not in (WATER, CLIMB) and (placed or g.at(x, y - 1, z) in FLOOR) \
-            and (x, y, z) not in ctx.no_place:
-        room = _open(ctx, ((x, y + 2, z), (x, y + 3, z)))
-        if room is not None:
-            yield (x, y + 1, z, 1), COST_PILLAR + room[0], \
-                room[1] + (('place', (x, y, z), (x, y - 1, z), 'pillar'),)
+    return (hb & 127) * 4.0
 
 
 def _open_sky(c, sky) -> bool:
@@ -415,15 +141,26 @@ def _there(g: Grid, c, goal, kind: str) -> bool:
         if gy in (y, y + 1):
             return True
         return gy == y - 1 and g.at(gx, y, gz) in PASS        # just below the feet in front: its top open
+    if kind == 'cell':                                      # that very block (a spot in cover: one beside it
+        return (x, y, z) == tuple(goal)                     # was still in sight, 2026-10-16)
     if kind == 'exact':
         # that block (or one beside it) at that height: "the top of the tree" is on it, not 2 below in its leaves
         return abs(x - gx) + abs(z - gz) <= 1 and y == gy
+    if kind == 'place':
+        # a block to put there: in reach and in sight of the cell, and not standing in it (the game won't put a
+        # block where the player is)
+        return (x, y, z) != tuple(goal) and (x, y + 1, z) != tuple(goal) and sees(g, (x, y, z), goal)
     if kind == 'mine':
         # within reach of it, and some of it in sight from the eye (to mine it or use it): a crafting table
         # one block behind a wall was "near" and couldn't be opened, 2026-10-13
         return sees(g, (x, y, z), goal)
-    if kind == 'column':
+    if kind == 'column':                                    # (Baritone's GoalXZ: that spot across, any height)
         return abs(x - gx) + abs(z - gz) <= NEAR_GOAL
+    if kind == 'level':                                     # (GoalYLevel: that height, anywhere)
+        return y == gy
+    if kind.startswith('within:'):                          # (GoalNear: within that many blocks of it)
+        r = float(kind[7:])
+        return (x - gx) ** 2 + (y - gy) ** 2 + (z - gz) ** 2 <= r * r
     if kind == 'ground':                                    # (find's ground: on the land anywhere)
         return False
     if kind == 'item':                                      # on its block (a dropped item, to pick it up)
@@ -463,6 +200,43 @@ def sees(g: Grid, c, key, eye: float = EYE, reach: float = PLAN_REACH, blockers:
     return got
 
 
+def sight_cost(g: Grid, c, key, eye: float = EYE, reach: float = PLAN_REACH) -> float | None:
+    """What it takes, from standing in cell c, to have block key in reach and in sight: 0 (seen as it is), the
+    ticks breaking the one block in the way of the cheapest line takes, or None (neither). (A stone "in sight"
+    past a block of dirt counted as seen: the dirt was dug first, a stone in plain sight a little farther passed
+    over, 2026-10-16.)"""
+    if sees(g, c, key, eye, reach, blockers=0):
+        return 0.0
+    if not sees(g, c, key, eye, reach, blockers=1):
+        return None
+    memo = ('cost', c[0], c[1], c[2], *key)
+    if memo in g.seen:
+        return g.seen[memo]
+    e = (c[0] + 0.5, c[1] + eye, c[2] + 0.5)
+    own = {(c[0], c[1], c[2]), (c[0], c[1] + 1, c[2])}
+    best = None
+    for axis in range(3):
+        for side in (0.0, 1.0):
+            face = key[axis] + side
+            if (e[axis] - face) * (1.0 if side else -1.0) <= 0.0:
+                continue
+            a, b = [i for i in range(3) if i != axis]
+            for u, v in FACE_POINTS:
+                q = [0.0, 0.0, 0.0]
+                q[axis], q[a], q[b] = face, key[a] + u, key[b] + v
+                if math.dist(e, q) > reach:
+                    continue
+                found = []
+                if _clear_line(g, e, q, key, own, 1, c[1], found) and found:
+                    t = (_breakable(g, *found[0]) or 0.0) + BREAK_EXTRA
+                    best = t if best is None else min(best, t)
+    g.seen[memo] = best
+    return best
+
+
+BREAK_EXTRA = 2.0       # ticks a block broken costs past its time to break (Baritone's penalty)
+
+
 def _sees(g: Grid, e, key, reach: float, own=frozenset(), blockers: int = 0, feet: int | None = None) -> bool:
     best = False
     for axis in range(3):
@@ -481,10 +255,11 @@ def _sees(g: Grid, e, key, reach: float, own=frozenset(), blockers: int = 0, fee
     return best
 
 
-def _clear_line(g: Grid, e, q, key, own=frozenset(), blockers: int = 0, feet: int | None = None) -> bool:
+def _clear_line(g: Grid, e, q, key, own=frozenset(), blockers: int = 0, feet: int | None = None,
+                found: list | None = None) -> bool:
     """Nothing in the way from e to q (a point on block key's face): every cell the line passes through on the
     way (each once, in order: a voxel walk) is one the body can be in, till key's own; but for up to `blockers`
-    that can be mined first (not below the feet: never the floor stood on)."""
+    that can be mined first (not below the feet: never the floor stood on; found: those, added to it)."""
     cell = [math.floor(e[0]), math.floor(e[1]), math.floor(e[2])]
     d = [q[i] - e[i] for i in range(3)]
     step, t_max, t_delta = [0, 0, 0], [math.inf] * 3, [math.inf] * 3
@@ -501,6 +276,8 @@ def _clear_line(g: Grid, e, q, key, own=frozenset(), blockers: int = 0, feet: in
             if blockers <= 0 or (feet is not None and cell[1] < feet) or _breakable(g, *cell) is None:
                 return False
             blockers -= 1
+            if found is not None:
+                found.append(tuple(cell))
         i = min(range(3), key=lambda j: t_max[j])
         if t_max[i] > 1.0:
             return True                                   # (at the point: on the face)
@@ -513,35 +290,6 @@ def _at_edge(g: Grid, c) -> bool:
     return lx <= 2 or lz <= 2 or lx >= g.size[0] - 3 or lz >= g.size[2] - 3
 
 
-BLOCK_GET_COST = 6.0      # what one more block to build with costs to get (mined beside: blocks walked)
-
-
-def plan_route(g: Grid, start, goal, have: int, **kw) -> tuple[Path | None, dict]:
-    """A route with what's spare to build with (have blocks): (the path, a note). The cheapest way building with
-    more than are spare isn't taken blind: the way that digs instead (a staircase up, through what's there) is
-    planned too, and taken unless getting the blocks first (BLOCK_GET_COST each) and building is cheaper; then
-    no path, and the note says how many it would take (14 down with 7 spare, a pillar of 13 the only way
-    planned: stuck, 2026-10-15). The note: {'found': 'there' | 'part' | 'no way' | 'needs blocks', ...}.
-    The same for the game and the test world."""
-    path = find(g, start, goal, blocks=have, **kw)
-    note = {'found': None if path is None else ('there' if path.reaches_goal else
-                                                'part' if path.timed_out else 'no way'),
-            'expanded': path.expanded if path else 0, 'cells': len(path.cells) if path else 0,
-            'blocks_to_build_with': have}
-    placing = sum(1 for a in path.actions if a[0] == 'place') if path is not None else 0
-    if path is None or placing <= have:
-        return path, note
-    try:
-        dug = find(g, start, goal, blocks=0, **kw)
-    except Exception:
-        dug = None
-    if dug is not None and (dug.reaches_goal or dug.timed_out) \
-            and dug.cost <= path.cost + (placing - have) * BLOCK_GET_COST:
-        note.update(found='there' if dug.reaches_goal else 'part', dug_instead_of_building=placing,
-                    expanded=dug.expanded, cells=len(dug.cells))
-        return dug, note
-    note.update(found='needs blocks', blocks_it_would_take=placing)
-    return None, note
 
 
 def _opened(g: Grid, cells) -> Grid:
@@ -590,82 +338,6 @@ def _fall(g: Grid, x: int, y: int, z: int, falls: dict | None = None) -> int:
     if falls is not None:
         falls[key] = out
     return out
-
-
-def _edge_cost(g: Grid, x: int, y: int, z: int, falls: dict) -> float:
-    """COST_EDGE when a step to the side (4 ways) falls farther than MAX_DROP."""
-    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        if _clear(g, x + dx, y, y + 1, z + dz) and _fall(g, x + dx, y, z + dz, falls) > MAX_DROP:
-            return COST_EDGE
-    return 0.0
-
-
-def _overshoot_ok(g: Grid, x: int, y: int, z: int, dx: int, dz: int, d: int, falls: dict) -> bool:
-    """Walking off an edge at height y and landing d lower in the next cell: the player carries on a block or
-    two (more the farther the fall) before landing; nowhere there may the fall add up past MAX_DROP."""
-    if g.at(x + dx, y - d, z + dz) in SOFT:
-        return True
-    for k in range(2, 3 + (d >= 2)):
-        cx, cz = x + dx * k, z + dz * k
-        if not _clear(g, cx, y - d, y - d + 1, cz):
-            return True                                 # a wall: the player stops against it
-        if d + _fall(g, cx, y - d, cz, falls) > MAX_DROP:
-            return False
-    return True
-
-
-def _moves(g: Grid, c, falls: dict | None = None):
-    if falls is None:
-        falls = {}
-    x, y, z = c
-    here = g.at(x, y, z)
-    swim = here == WATER
-    if here == CLIMB:                                   # up and down a ladder
-        for dy in (1, -1):
-            if stand_height(g, x, y + dy, z) is not None or g.at(x, y + dy, z) == CLIMB:
-                yield (x, y + dy, z), COST_CLIMB
-    for dx in (-1, 0, 1):
-        for dz in (-1, 0, 1):
-            if dx == 0 and dz == 0:
-                continue
-            diag = dx != 0 and dz != 0
-            base = COST_DIAG if diag else 1.0
-            nx, nz = x + dx, z + dz
-            # same level
-            if stand_height(g, nx, y, nz) is not None and _corner_ok(g, x, y, z, dx, dz, 1):
-                k = g.at(nx, y, nz)
-                slow = COST_WATER if k == WATER or swim else 1.0
-                yield (nx, y, nz), base * slow + _edge_cost(g, nx, y, nz, falls)
-                continue
-            # one up: a jump (room above the head here), or a stair
-            if stand_height(g, nx, y + 1, nz) is not None and g.at(x, y + 2, z) in PASS \
-                    and _corner_ok(g, x, y + 1, z, dx, dz, 2) and not diag:
-                yield (nx, y + 1, nz), base + COST_JUMP + _edge_cost(g, nx, y + 1, nz, falls)
-                continue
-            # down: walk off the edge and fall
-            if not diag and _clear(g, nx, y, y + 1, nz):
-                for d in range(1, MAX_WATER_DROP + 1):
-                    k = g.at(nx, y - d, nz)
-                    if k not in PASS:
-                        break
-                    if stand_height(g, nx, y - d, nz) is not None:
-                        # (into water, a fall of any height does no harm: the way down into a cave's pool; the
-                        # walk off the edge carries on a block, so the water must reach a block further too)
-                        if d <= MAX_DROP:
-                            ok = _overshoot_ok(g, x, y, z, dx, dz, d, falls)
-                        else:
-                            ok = k == WATER and (g.at(nx + dx, y - d, nz + dz) == WATER
-                                                 or not _clear(g, nx + dx, y - d, y - d + 1, nz + dz))
-                        if ok:
-                            yield (nx, y - d, nz), base + COST_DROP * d + _edge_cost(g, nx, y - d, nz, falls)
-                        break
-
-
-def _corner_ok(g: Grid, x, y, z, dx, dz, h) -> bool:
-    """A diagonal step doesn't clip either corner (both side cells clear for the body's height)."""
-    if dx == 0 or dz == 0:
-        return True
-    return _clear(g, x + dx, y, y + h, z) and _clear(g, x, y, y + h, z + dz)
 
 
 def _simplify(pts, jumps, keep=()):

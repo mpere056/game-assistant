@@ -117,3 +117,32 @@ class CraftingPlanTests(unittest.TestCase):
     def test_no_way(self):
         with self.assertRaises(CantMake):
             plan(Book(near=()), 'mc:wooden_pickaxe', 1, {})
+
+
+class CreatureAndTimeTests(unittest.TestCase):
+    def test_a_bed_from_the_wool_a_sheep_gives(self):
+        # ("make me a bed": wool comes only from sheep, which no plan knew, 2026-10-16)
+        b = Book()
+        W = ('mc:white_wool',)
+        b.book['mc:white_bed'] = [shaped('mc:white_bed', 1, [[W, W, W], [PLANKS, PLANKS, PLANKS]])]
+        sheep = Source('mc:sheep', W, None, on='creature', how='kill', per=1.0, variant=(('color', 'white'),))
+        b.src['mc:white_wool'] = [sheep]
+        b.nearby = lambda blocks: 10.0 if set(blocks) & (b.near | {'mc:sheep'}) else None
+        steps = plan(b, 'mc:white_bed', 1, {})
+        hunt = [s for s in steps if s[0] == 'gather' and s[1] == 'mc:white_wool']
+        self.assertEqual(len(hunt), 1)
+        self.assertEqual((hunt[0][2], hunt[0][3].creature), (3, True))
+        self.assertEqual(kinds(steps)[-1], ('craft', 'mc:white_bed'))
+
+    def test_working_a_plan_out_has_a_time_limit(self):
+        # (a bed's every wool and dye, each looked for in the world: the order hung, 2026-10-16)
+        import time
+        from game_assistant.core.crafting import plan_cost
+        b = Book()
+        slow = b.nearby
+        b.nearby = lambda blocks: (time.sleep(0.05), slow(blocks))[1]
+        t = time.monotonic()
+        with self.assertRaises(CantMake) as got:
+            plan_cost(b, 'mc:stone_pickaxe', 1, {}, deadline=time.monotonic() + 0.03)
+        self.assertLess(time.monotonic() - t, 1.0)
+        self.assertIn('took too long', str(got.exception))
