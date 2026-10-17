@@ -93,6 +93,31 @@ final class Grid {
 		return o;
 	}
 
+	/** Blocks round the feet each frame (the walk's moves look at them as they're done: what's still in the way,
+	 *  what's been put down): NEAR_R each way across, NEAR_DOWN below the feet to NEAR_UP above. */
+	static final int NEAR_R = 3, NEAR_DOWN = 3, NEAR_UP = 4;
+
+	static JsonObject near(ClientLevel level, BlockPos at) {
+		int x0 = at.getX() - NEAR_R, y0 = at.getY() - NEAR_DOWN, z0 = at.getZ() - NEAR_R;
+		int sx = 2 * NEAR_R + 1, sy = NEAR_DOWN + NEAR_UP + 1, sz = 2 * NEAR_R + 1;
+		byte[] out = new byte[sx * sy * sz];
+		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+		int i = 0;
+		for (int y = 0; y < sy; y++) {
+			for (int z = 0; z < sz; z++) {
+				for (int x = 0; x < sx; x++) {
+					pos.set(x0 + x, y0 + y, z0 + z);
+					out[i++] = level.isLoaded(pos) ? kind(level, pos) : UNKNOWN;
+				}
+			}
+		}
+		JsonObject o = new JsonObject();
+		o.add("min", Bridge.vec(x0, y0, z0));
+		o.add("size", Bridge.vec(sx, sy, sz));
+		o.addProperty("data", Base64.getEncoder().encodeToString(out));
+		return o;
+	}
+
 	/** Tools whose digging time the estimate also gives (what one could make first). */
 	static final String[] WOULD_HAVE = {"minecraft:wooden_pickaxe", "minecraft:stone_pickaxe", "minecraft:iron_pickaxe",
 			"minecraft:wooden_shovel", "minecraft:wooden_axe"};

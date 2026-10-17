@@ -26,7 +26,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .autowalk import DIRECTIONS, Intent, _flat, _wrap, _yaw
+from .autowalk import DIRECTIONS, Intent, _flat, _wrap, _yaw, cam_yaw
 from .interface import Snapshot
 
 # Rolling, from how Elden Ring works (community frame data, eldenring.wiki.gg "Invincibility Frames"):
@@ -257,7 +257,7 @@ def target_score(x, p, cam=None) -> float:
     (in front: easy to lock on to), minus up to 2 for missing health (the weakest: one attacker fewer soonest)."""
     d = _flat(p, x.pos) - x.radius
     if cam is not None:
-        off = abs(_wrap(_yaw((x.pos[0] - p[0], 0.0, x.pos[2] - p[2])) - _yaw(cam.forward)))
+        off = abs(_wrap(_yaw((x.pos[0] - p[0], 0.0, x.pos[2] - p[2])) - cam_yaw(cam)))
         d += off / 30.0
     if x.health is not None and x.max_health:
         d -= 2.0 * (1.0 - max(0.0, min(1.0, x.health / x.max_health)))
@@ -394,7 +394,7 @@ class Fighter:
         intent = self._update(snap, dt)
         self._last_keys = intent.keys
         if intent.keys and self.state != 'dodging' and snap.camera is not None:   # never off a ledge
-            keys = self._safe(intent.keys, _yaw(snap.camera.forward), roll=False)
+            keys = self._safe(intent.keys, cam_yaw(snap.camera), roll=False)
             if keys != intent.keys:
                 self.debug['ledge'] = sorted(intent.keys)
                 intent = Intent(keys, intent.turn, intent.taps)
@@ -497,9 +497,9 @@ class Fighter:
                       'poise': self._poise, 'model': e.model, 'my_reach': self.my_reach,
                       'vel': tuple(round(v, 1) for v in self._vel.get(e.id, (0.0, 0.0))),
                       'locked': self._locked}
-        err = _wrap(_yaw((e.pos[0] - p[0], 0.0, e.pos[2] - p[2])) - _yaw(snap.camera.forward))
+        err = _wrap(_yaw((e.pos[0] - p[0], 0.0, e.pos[2] - p[2])) - cam_yaw(snap.camera))
         self.debug['cam_err'] = round(err, 1)
-        self.debug.update(pos=(round(p[0], 1), round(p[2], 1)), cam_yaw=round(_yaw(snap.camera.forward)),
+        self.debug.update(pos=(round(p[0], 1), round(p[2], 1)), cam_yaw=round(cam_yaw(snap.camera)),
                           near=self._near_log(snap, p), target=e.id % 10000)
         if self._escaping_since is not None:
             self.debug['escape'] = {'route': len(self.escape_route or ()), 'at': self._escape_i,
@@ -512,7 +512,7 @@ class Fighter:
             self._switch(aimed, 'retarget')   # the camera is on it: swing at it (not at one off to the side)
             e = aimed
             gap = _flat(p, e.pos) - e.radius
-            err = _wrap(_yaw((e.pos[0] - p[0], 0.0, e.pos[2] - p[2])) - _yaw(snap.camera.forward))
+            err = _wrap(_yaw((e.pos[0] - p[0], 0.0, e.pos[2] - p[2])) - cam_yaw(snap.camera))
             self._off_since = None
         if self._locked and abs(err) > LOCK_OFF:
             if self._off_since is None:
@@ -525,7 +525,7 @@ class Fighter:
                     self._switch(aimed, 'retarget')
                     e = aimed
                     gap = _flat(p, e.pos) - e.radius
-                    err = _wrap(_yaw((e.pos[0] - p[0], 0.0, e.pos[2] - p[2])) - _yaw(snap.camera.forward))
+                    err = _wrap(_yaw((e.pos[0] - p[0], 0.0, e.pos[2] - p[2])) - cam_yaw(snap.camera))
                 else:
                     # The camera stays off the target: the game's lock is gone (out of range) or on another.
                     # Don't press lock (if the game already dropped it, that press locks someone else): stop
@@ -576,7 +576,7 @@ class Fighter:
                 return Intent(frozenset(), 0.0, tuple(taps))
             att = soonest[3]
             off = _yaw((p[0] - att.pos[0], 0.0, p[2] - att.pos[2]))
-            keys = frozenset(min(DIRECTIONS, key=lambda d: abs(_wrap(off - _yaw(snap.camera.forward) - d[0])))[1])
+            keys = frozenset(min(DIRECTIONS, key=lambda d: abs(_wrap(off - cam_yaw(snap.camera) - d[0])))[1])
             return Intent(keys, 0.0, tuple(taps))
         if soonest is not None and soonest[0] <= max(0.0, lead) and self.t - self._last_roll >= DODGE_EVERY:
             follow = self._follow_up(soonest)
@@ -589,7 +589,7 @@ class Fighter:
             solo = self.chains.get('_solo', {}).get(_base(soonest[3].model), {}).get(str(soonest[4]), 0)
             escape = long_hit or (follow is not None and follow < ROLL_AGAIN) or (follow is None and solo < SOLO_SEEN)
             self.debug['follow_up_s'] = None if follow is None else round(follow, 2)
-            pick = self._pick_roll(snap, p, soonest, escape, _yaw(snap.camera.forward))
+            pick = self._pick_roll(snap, p, soonest, escape, cam_yaw(snap.camera))
             if pick is not None:   # (every way off a ledge: take the hit rather than fall)
                 self._covered[soonest[1]] = self.t + soonest[0]
                 self._covered = {k: v for k, v in self._covered.items() if v > self.t - 2.0}
@@ -602,11 +602,11 @@ class Fighter:
                 self.events.append('dodge')
                 return Intent(self._roll_keys, 0.0, tuple(taps) + ('roll',))
         away = self._away_yaw(snap, p, e)
-        cam_yaw = _yaw(snap.camera.forward)
-        escape = self._crowd_step(snap, p, soonest, doing, taps, away, cam_yaw)
+        heading = cam_yaw(snap.camera)
+        escape = self._crowd_step(snap, p, soonest, doing, taps, away, heading)
         if escape is not None:
             return escape
-        heal = self._heal_step(snap, pl, p, soonest, doing, taps, away, cam_yaw)
+        heal = self._heal_step(snap, pl, p, soonest, doing, taps, away, heading)
         if heal is not None:
             return heal
         # 2. Out of stamina: back off until it has come back.
@@ -618,7 +618,7 @@ class Fighter:
                 self._recovering = False
         if self._recovering:
             self.state = 'recovering'
-            return Intent(self._back_keys(p, away, cam_yaw), 0.0, tuple(taps))
+            return Intent(self._back_keys(p, away, heading), 0.0, tuple(taps))
         if doing == 'free' and self.t - self._last_swing > 1.2:
             self._combo = 0
         # 3. Bait and punish. A swing locks the player in for PLAYER_COMMIT seconds, so it only goes in
@@ -729,7 +729,7 @@ class Fighter:
             # 4b. too close between openings: step back out of reach (not while it recovers from an attack:
             # that is when to be close)
             self.state = 'spacing'
-            return Intent(self._back_keys(p, away, cam_yaw), turn, tuple(taps))
+            return Intent(self._back_keys(p, away, heading), turn, tuple(taps))
         self._back_from = None
         if self.t < self._after_escape and gap > CROWD_RANGE and not walled:
             self.state = 'waiting'             # just got room: let the chasers come, one at a time
@@ -1396,7 +1396,7 @@ class Fighter:
     @staticmethod
     def _aimed(snap: Snapshot, p):
         """The living hostile enemy the camera points at (who the game's lock-on is on), or None."""
-        cam = _yaw(snap.camera.forward)
+        cam = cam_yaw(snap.camera)
         best = None
         for x in snap.entities:
             if not x.hostile or x.dead or _flat(p, x.pos) > 20.0:

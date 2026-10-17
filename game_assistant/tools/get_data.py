@@ -3,6 +3,7 @@
     Get-GameData.bat [game]      (default eldenring)
 
 Elden Ring: Paramdex ER/Names lists (https://github.com/soulsmods/Paramdex), about 1.4 MB.
+Minecraft: the game's own data from the installed game (Get-GameData.bat minecraft).
 """
 from __future__ import annotations
 
@@ -78,7 +79,22 @@ def get_attacks() -> int:
     return ga.main()
 
 
-GAMES = {'eldenring': get_eldenring, 'voice': get_voice, 'navmesh': get_navmesh, 'attacks': get_attacks}
+def get_minecraft() -> int:
+    """Minecraft's own data (recipes, loot tables, tags, structures, names) out of the installed game's client jar
+    (read only): a few seconds, about 10 MB in .local/minecraft/<version>/. See games/minecraft/data.py."""
+    from ..games.minecraft import data
+    try:
+        got = data.extract()
+    except OSError as e:
+        print(f'  FAILED: {e}')
+        return 1
+    print(f"  {got['files']:,} files, {got['bytes']:,} bytes -> {got['to']}")
+    print(f"  creatures' drops: {len(data.GameData().drops())} items")
+    return 0
+
+
+GAMES = {'eldenring': get_eldenring, 'voice': get_voice, 'navmesh': get_navmesh, 'attacks': get_attacks,
+         'minecraft': get_minecraft}
 
 
 def main() -> int:

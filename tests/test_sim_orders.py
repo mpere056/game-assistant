@@ -62,3 +62,18 @@ class SimOrderTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PlanOrderTests(unittest.TestCase):
+    def test_a_station_is_put_down_just_before_it_is_used(self):
+        # (the furnace put down by the crafting table before the iron was dug, 23 blocks below: climbed back up to
+        # smelt, 2026-10-16)
+        try:
+            from sim.world import plan_for
+        except ModuleNotFoundError:
+            from tests.sim.world import plan_for
+        steps = plan_for(plains(), M + 'iron_pickaxe', 1)
+        kinds = [(s[0], s[1] if isinstance(s[1], str) else s[1].result) for s in steps]
+        furnace = kinds.index(('station', M + 'furnace'))
+        self.assertGreater(furnace, kinds.index(('gather', M + 'raw_iron')))
+        self.assertEqual(steps[furnace + 1][0], 'smelt')

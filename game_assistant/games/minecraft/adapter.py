@@ -24,7 +24,7 @@ from ...core.interface import (CAP_CAMERA, CAP_ENTITIES, CAP_KNOWLEDGE, CAP_NAVM
                                CAP_RAYCAST, CAP_SCREEN, CAP_TARGET, Camera, Entity, GameNotRunning, Player, RayHit,
                                Screen, Snapshot, Vec3, normalize)
 from ...core import terrain
-from . import blocks
+from . import blocks, pathing
 
 PORT = 47821
 SNAPSHOT_CACHE = 0.010     # seconds a snapshot is reused (several threads ask every frame)
@@ -47,6 +47,45 @@ SURFACE_RING = 2          # blocks round a column the land's level is taken from
 HOLE_RING = 3             # blocks out the land round the player is looked at (in a hole?)
 SPOTS = 6                 # spots of a block asked for, reckoning what getting one costs...
 SPOTS_FOR = 8.0           # ...asked again after this many seconds
+FOE_AVOID = 8.0           # blocks round a hostile creature where a move costs more (Baritone's avoidance)...
+FOE_COST = 1.5            # ...this many times as much
+NEUTRAL_KINDS = ('enderman', 'zombified_piglin', 'piglin', 'spider', 'cave_spider')   # hostile only when provoked
+FOE_NEAR_R = 6.0          # blocks: a hostile creature this near a block to gather...
+FOE_NEAR_S = 30.0         # ...makes it this many seconds dearer (the crafting
+                          # plan's reckoning of where to get things)
+QUICK_MANY = 16           # blocks found weighed by one search toward all of them (which one's way is quickest)...
+QUICK_MARGIN = 6          # ...over the box round them and the player, this much more each way...
+QUICK_S = 1.0             # ...in this long at most
+FOE_GOAL = 3.0            # (one this near the goal is what's walked to)
+COVER_RADIUS = 6          # blocks round the player a spot out of a shooter's sight is looked for in...
+COVER_TRIES = 40          # ...the nearest this many...
+COVER_SEEN_AT = (1.5, 0.7)   # ...out of sight at the head and the body (blocks over the feet)
+FIGHT_SPACE = 4           # blocks round the player read for where to move in a fight
+ROOM_STEPS = 3            # steps out from a spot its room is counted over
+HUNT_S = 8.0              # seconds a creature hunted takes (up to it, the fight, the drops picked up)
+SWORD_DAMAGE = 4.0        # a hit this hard (a wooden sword's) or harder: armed (fight_gear)
+ARMOR_PARTS = ('helmet', 'chestplate', 'leggings', 'boots')
+ARMOR_TIERS = ('netherite', 'diamond', 'iron', 'turtle', 'chainmail', 'copper', 'golden', 'leather')   # best first
+HUNT_RANGE = 96.0         # blocks: creatures this near (across; up or down counts three times) are hunted
+MORE_CREATURES_S = 60.0   # seconds to find each one more of a kind than are about
+FAR_CREATURES = 16        # creatures of a kind asked of the game's search, when too few are about...
+FAR_CREATURES_FOR = 2.0   # ...asked again after this many seconds
+FAR_KIND_S = 20.0         # seconds more each farther one counts when the kind of it matters (a white sheep):
+                          # not known from there
+# never hunted for what they drop: they may be someone's (a cat, a dog, a horse) or the village's
+NO_HUNT = {'minecraft:' + n for n in ('cat', 'wolf', 'parrot', 'horse', 'donkey', 'mule', 'llama', 'trader_llama',
+                                      'camel', 'villager', 'wandering_trader', 'iron_golem', 'snow_golem', 'allay',
+                                      'axolotl', 'fox', 'ocelot', 'panda', 'turtle', 'sniffer', 'armadillo',
+                                      'strider', 'hoglin', 'piglin', 'zombified_piglin', 'enderman', 'bee')}
+USE_S = 4.0               # seconds using an item on something takes (up to it, the click, the drops picked up)
+MIN_PER = 0.05            # what a creature or block gives less often than this (a zombie's iron) isn't a way
+# the game's verbs for what's got by using something on a creature or a block (its loot tables' folders), and
+# what's used ('': the hand): its words, not each thing's
+USE_WITH = {'shearing': 'minecraft:shears', 'carve': 'minecraft:shears', 'brush': 'minecraft:brush',
+            'till': 'minecraft:wooden_hoe', 'harvest': ''}
+PREFETCH_ITEMS = 400      # items looked through for the blocks a plan may need (one search for all of them)
+FIND_MANY = 32            # blocks found to choose the quickest trip from (a gather's)
+WALK_BPS = 4.317          # blocks a second, walking
 CLIMB_S = 1.0             # seconds a block up, reckoned (a step dug or a block put down)
 DROP_S = 0.5              # ...a block down (dug or dropped)
 MINE_S = 1.5              # ...mining one block of what's gathered
@@ -57,11 +96,16 @@ FAST = {'spider', 'cave_spider', 'wolf', 'enderman', 'vex', 'phantom', 'bee', 's
         'hoglin', 'zoglin', 'piglin_brute', 'ravager', 'breeze'}    # as quick as the player or quicker
 RANGED = {'skeleton', 'stray', 'bogged', 'pillager', 'blaze', 'ghast', 'witch', 'drowned', 'shulker', 'breeze',
           'piglin', 'llama', 'snow_golem'}
-BRIDGE_VERSION = 17        # the bridge (bridges/minecraft Bridge.VERSION) this adapter needs
+BRIDGE_VERSION = 20        # the bridge (bridges/minecraft Bridge.VERSION) this adapter needs
 SLOW_BREAK = 15           # a block slower than this to break (the bridge's hardness byte: 4 ticks a unit, 3 s)...
 SLOW_BREAKS_FOR_TOOL = 3  # ...this many on a route: weigh making a tool first
 TOOL_WORTH_S = 20.0       # seconds a tool must save, all told, to be made first
 NO_PLACE_S = 120.0        # seconds a cell where placing failed isn't planned for again
+HAND_BLOCKS_MIN = 8       # blocks to build with held at least, none in the hotbar: put there before a walk
+ROUTE_TINY = 3            # cells of way or fewer, out of time: next to none (the next plan from there: longer)
+ROUTE_BUDGET_MAX = 8.0    # seconds a plan may be given at most, so
+GRID_REUSE_S = 1.0         # seconds a route's box of blocks is used again for the same box (not asked again)
+SPRINT_FOOD = 6           # food at or under this: no running (the game's), so no jump at a run planned
 GROUND_RADIUS = 12        # blocks round the player searched for a way down to the land itself (out of a tree)
 LAND_RADIUS = 96          # blocks round the player read for the lie of the land (hills) in the survey
 SKY_RADIUS = 16           # blocks round the player searched for a way up to the open sky
@@ -107,6 +151,12 @@ PROMPT_NOTES = """- Minecraft facts: the game reports names, health (in half-hea
   rough the way."""
 
 
+def _id(name: str) -> str:
+    """'bucket', 'Milk Bucket', 'minecraft:cow' -> the game's id."""
+    name = str(name).strip().lower()
+    return name if ':' in name else 'minecraft:' + name.replace(' ', '_')
+
+
 def _mirror(v) -> Vec3:
     return (-float(v[0]), float(v[1]), float(v[2]))
 
@@ -141,7 +191,8 @@ class MinecraftAdapter:
     # lock-on or roll; the right button uses the held item (a flask's job in Elden Ring: food, a potion).
     default_keys = {'forward': 'W', 'back': 'S', 'left': 'A', 'right': 'D', 'sprint': 'LCTRL', 'jump': 'SPACE',
                     'interact': 'RMB', 'attack': 'LMB', 'item': 'RMB', 'lock': '', 'roll': '',
-                    'sneak': 'LSHIFT', 'inventory': 'E', 'escape': 'ESC', **{f'slot{i}': str(i) for i in range(1, 10)}}
+                    'sneak': 'LSHIFT', 'inventory': 'E', 'escape': 'ESC', 'swap_hands': 'F',
+                    **{f'slot{i}': str(i) for i in range(1, 10)}}
 
     walk_breaks = False   # no blind swings when stuck: the route itself says what to break (and place)
     walk_sprint = False   # walk, don't run: a run carries the player farther past a ledge (falls) and costs food
@@ -160,6 +211,24 @@ class MinecraftAdapter:
                      "tree, a roof, a pillar; 'get me down'), 'take me to the surface' (up out of a cave or a hole to "
                      "the open sky: walked out or dug up; a tree top is already the surface), 'run away' (from the "
                      "hostile ones near), 'eat something', 'go to that' (what the player looks at), 'stop'.")
+    # (the doer's Minecraft know-how: core/doer.py's prompt is any game's)
+    doer_notes = ("In Minecraft: the walk pillars up and bridges by itself with blocks held (dirt, cobblestone, "
+                  "planks or logs); with none, a walk with no way comes back with how many it would take: get some "
+                  "dirt or cobblestone first, or craft logs held into planks (four from each). A pickaxe before "
+                  "digging down through stone. Keep clear of creepers. Hostile creatures come out in the dark: one "
+                  "may be quicker found at night on the player's own level than by digging down to one. A way "
+                  "through several points is one act order: 'go to x y z, then go to x y z' (a hill's points along "
+                  "its top or round its foot, from the survey; 'this hill' is the rise the player stands on, if "
+                  "they are). A tree top or a roof is not the ground. Building: the player's y is the height of "
+                  "their feet: the ground block they stand on is at y - 1 (a floor laid there replaces the ground; "
+                  "walls start at y). Keep the player's own cells (x, y and y + 1 where they stand) out of the "
+                  "blocks, or they stand inside a wall. Fighting: a wooden or stone sword is a minute's work "
+                  "from a tree (get 'wooden_sword' or 'stone_sword'); with a few blocks held (dirt, cobblestone) "
+                  "a crowd of zombies is fought from up a 2-block pillar, out of their reach (the fight does "
+                  "that itself); skeletons and creepers aren't. A fight with a skeleton is taken on with a shield "
+                  "in the off hand (6 planks and an iron ingot: a fight order gets one first itself); one shooting "
+                  "from afar is hidden from. Zombies burn in daylight; things dropped where the "
+                  "player died last 5 minutes.")
     walk_precise = True   # every block of the route, walked block by block (core/autowalk.py precise)
 
     can_break = True      # the walk mines through blocks and builds (bridges, pillars) like Baritone
@@ -287,8 +356,12 @@ class MinecraftAdapter:
                  'blocks': self._building(pl)[1], 'inventory': pl.get('inventory') or {},
                  'hotbar': pl.get('hotbar') or [], 'free_slots': pl.get('free_slots'),
                  'container': d.get('container'),
-                 **{k: pl[k] for k in ('attack_strength', 'attack_delay', 'hurt_time', 'on_ground', 'vy', 'offhand',
-                                       'blocking') if k in pl}}
+                 'near': d.get('near'),
+                 **{k: pl[k] for k in ('attack_strength', 'attack_delay', 'hurt_time', 'on_ground', 'vy', 'vx', 'vz',
+                                       'collided', 'crouching', 'sprinting', 'offhand', 'blocking', 'food', 'last_death',
+                                       'air', 'armor')
+                    if k in pl},
+                 **_water_flags(d.get('near'), pl.get('pos'), pl.get('eye'))}
         return Snapshot(self.game, frame, True, player, camera, tuple(ents), d.get('dimension'),
                         target_id=target_id, screen=screen, menu=bool(d.get('menu')) or bool(d.get('paused')),
                         extra=extra)
@@ -405,7 +478,7 @@ class MinecraftAdapter:
                                       and not b.split(':')[1].startswith('stripped'))
             return 'block', alias
         names = self._place_names()
-        best = None
+        best, ties = None, []
         for kind, ids, bonus in (('structure', names.get('structure_tags', []), 0.3),
                                  ('structure', names.get('structures', []), 0.2), ('biome', names.get('biomes', []), 0.0),
                                  ('block', self._block_ids(), 0.1), ('creature', self._entity_types(), 0.25)):
@@ -418,20 +491,26 @@ class MinecraftAdapter:
                     continue
                 score = len(words) / len(id_words) + bonus     # a whole match; the shorter id the better
                 if best is None or score > best[0]:
-                    best = (score, kind, ident)
+                    best, ties = (score, kind, ident), [ident]
+                elif kind == best[1] and abs(score - best[0]) < 1e-9:
+                    ties.append(ident)
         if best and best[1] == 'creature':
             return 'creature', (best[2],)
         if best and best[1] == 'block':
             ident = best[2]
             if ident.endswith('_ore') and not ident.startswith('minecraft:deepslate_'):
                 return 'block', (ident, ident.replace('minecraft:', 'minecraft:deepslate_'))
-            return 'block', (ident,)
+            # (as well matched, all of them: "the bed" was a black one only, the player's white bed not found,
+            # 2026-10-17)
+            return 'block', tuple(ties)
         return (best[1], best[2]) if best else None
 
     def locate(self, query: str) -> dict:
         """The nearest place of that name (a village, a stronghold, a cherry grove...), as /locate finds it:
         name, kind, distance (blocks), compass, position. Structures are found at their middle, on their map
         position (height not known: the player's height is given)."""
+        if _DEATH.search(query or ''):
+            return self._locate_death()
         if _GROUND.search(query or ''):
             return self._locate_ground()
         if _SURFACE.search(query or ''):
@@ -633,6 +712,24 @@ class MinecraftAdapter:
         g = self._heights(x, z, 1, 1, ground=True)
         return g(x, z) if g else None
 
+    def _locate_death(self) -> dict:
+        """Where the player last died (the game keeps it: a recovery compass points there): what they had lies
+        there for 5 minutes. ("Do you know where I died?" "Sorry, I don't have a record", 2026-10-16.)"""
+        d = self.raw()
+        pl = d.get('player') or {}
+        at, me = pl.get('last_death'), pl.get('pos')
+        if not at or not me:
+            return {'error': "the game has no death of yours on record", 'results': []}
+        x, y, z, dim = at[0], at[1], at[2], at[3] if len(at) > 3 else None
+        if dim and d.get('dimension') and dim != d.get('dimension'):
+            return {'error': f'you last died in {_pretty(dim)}', 'results': []}
+        dx, dz = x + 0.5 - me[0], z + 0.5 - me[2]
+        return {'query': 'where you died', 'results': [{
+            'name': 'where you died', 'kind': 'death', 'distance_m': round(math.hypot(dx, dz)),
+            'compass': _compass(dx, dz), 'height_diff_m': round(y - me[1]),
+            'coordinates': {'x': x, 'y': y, 'z': z}, 'position': _mirror((x + 0.5, float(y), z + 0.5)),
+            'note': 'what you had lies there for 5 minutes after you died, then it is gone'}]}
+
     def _locate_ground(self) -> dict:
         """The ground: the land itself under the player (down out of a tree, off whatever was built; up out of
         a cave too): any column near at the land's height (the walk takes the quickest way down or up)."""
@@ -712,6 +809,30 @@ class MinecraftAdapter:
         tallest = sorted(trees, key=lambda t: (-t['height'], t['distance']))[:6]
         trees.sort(key=lambda t: t['distance'])
         return {'within_blocks': radius, 'count': len(trees), 'nearest': trees[:5], 'tallest': tallest}
+
+    def goal_point(self, x=None, y=None, z=None, within=None):
+        """A point to walk to and what counts as there, as Baritone's goals: x y z (GoalBlock: stood there; a
+        solid block, in reach of it), x z (GoalXZ: that spot across, at any height), y (GoalYLevel: that height,
+        anywhere: dug down or climbed up to), within (GoalNear: within that many blocks of x y z)."""
+        me = (self.raw().get('player') or {}).get('pos') or [0.0, 0.0, 0.0]
+        if x is None or z is None:                        # (a height only: from here, straight down or up)
+            if y is None:
+                return None
+            x, z = me[0], me[2]
+            cell = (math.floor(x), math.floor(y), math.floor(z))
+            point = _mirror((cell[0] + 0.5, float(cell[1]), cell[2] + 0.5))
+            self._goals[_goal_key(point)] = ('level', cell)
+            return point
+        if y is None:                                    # (across only)
+            cell = (math.floor(x), math.floor(me[1] + 0.01), math.floor(z))
+            point = _mirror((cell[0] + 0.5, float(cell[1]), cell[2] + 0.5))
+            self._goals[_goal_key(point)] = ('column', None)
+            return point
+        point = self.coords_point(x, y, z)
+        if within:
+            cell = (math.floor(x), math.floor(y), math.floor(z))
+            self._goals[_goal_key(point)] = (f'within:{float(within):g}', cell)
+        return point
 
     def coords_point(self, x: float, y: float, z: float):
         """A point to walk to from the game's own coordinates (F3, as where_is and survey give them): stood there;
@@ -808,6 +929,154 @@ class MinecraftAdapter:
                 best = (rank, i)
         return (best[1] if best else -1), sum(spare.values())
 
+    def blocks_to_hand(self):
+        """('arrange', layout): the most plentiful block to build with that's held into the hotbar, when none to
+        build with is there (only the hotbar's are built with, and planned with); None when there are some there,
+        or too few held. (70 cobblestone and 47 diorite in the pack, none in the hotbar: a ravine 38 deep was dug
+        out of step by step, 6 s a block, not climbed by a pillar, 2026-10-17.)"""
+        pl = self.raw().get('player') or {}
+        if pl.get('creative') or self._building(pl)[1] > 0:
+            return None
+        inv = pl.get('inventory') or {}
+        reserve = getattr(self, 'reserve', None) or {}
+        spare = {it: n - int(reserve.get(it, 0)) for it, n in inv.items() if it in BUILD_FIRST}
+        spare = {it: n for it, n in spare.items() if n >= HAND_BLOCKS_MIN}
+        if not spare:
+            return None
+        best = max(spare, key=lambda it: spare[it])
+        return ('arrange', self.hotbar_layout(inv, pl.get('hotbar') or [], [best]))
+
+    def plan_in_worker(self) -> None:
+        """Routes planned in a process of their own (pathing.run): the search never holds up the frame loop (it ran
+        at 115 ms a frame while a long climb was planned again and again, 2026-10-17)."""
+        pathing.use_worker(True)
+
+    def equipment(self, inventory: dict, offhand: str | None = None, items=()) -> list:
+        """The task steps putting on what's held to wear (core/tasks.py 'equip', 'offhand'): the best piece for
+        each of the head, chest, legs and feet (what's worn isn't known: one worse than it is swapped back), and
+        a shield into an empty off hand. items: only these (the game's ids). ("Equip my armour": "my tools can only
+        sort the hotbar", 2026-10-17.)"""
+        held = [k for k, v in (inventory or {}).items() if v and (not items or k in items)]
+        steps = []
+        for part in ARMOR_PARTS:
+            got = [h for h in held if h.split(':')[-1].endswith('_' + part)]
+            if got:
+                steps.append(('equip', min(got, key=lambda h: next(
+                    (k for k, t in enumerate(ARMOR_TIERS) if h.split(':')[-1].startswith(t)), 99))))
+        if 'minecraft:shield' in held and not offhand:
+            steps.append(('offhand', 'minecraft:shield'))
+        return steps
+
+    def hotbar_layout(self, inventory: dict, hotbar: list, items=(), sort: bool = False, slots=None) -> tuple:
+        """What each of the nine hotbar slots is to hold (an item, or None: left as it is), for the inventory
+        skill (core/tasks.py 'arrange'). items: to be in the hotbar; sort: the usual layout, as players keep
+        it (the best weapon, pickaxe, axe, shovel, food, blocks to build with, a torch; then items; then what
+        else was there); slots: {slot 1-9: item} as asked. Only what's held."""
+        held = {k: v for k, v in (inventory or {}).items() if v}
+        now = [((s[0] if s else '') or None) for s in (hotbar or [])][:9]
+        now += [None] * (9 - len(now))
+        items = [i for i in items if i in held]
+        if not sort:
+            out = list(now)
+            for it in items:
+                if it in out:
+                    continue
+                spot = next((j for j in range(9) if out[j] is None), None)
+                if spot is None:                         # (full: the last that isn't one of items)
+                    spot = next((j for j in range(8, -1, -1) if out[j] not in items), 8)
+                out[spot] = it
+        else:
+            bar = [(h, 1) for h in held]
+            weapon = self.weapon_slot(bar)
+            weapon = bar[weapon][0] if weapon is not None and bar[weapon][0] else None
+
+            def best(suffix):
+                got = [h for h in held if h.split(':')[-1].endswith(suffix) and h != weapon]
+                order = ['netherite', 'diamond', 'iron', 'copper', 'stone', 'golden', 'wooden']
+                return min(got, key=lambda h: next((k for k, t in enumerate(order)
+                                                    if h.split(':')[-1].startswith(t)), 9), default=None)
+            food = self.food_slot([(h, 1) for h in held])
+            food = list(held)[food] if food is not None else None
+            blocks = max((h for h in held if h in BUILD_FIRST), key=lambda h: held[h], default=None)
+            torch = 'minecraft:torch' if 'minecraft:torch' in held else None
+            order = [weapon, best('_pickaxe'), best('_axe'), best('_shovel'), food, blocks, *items, torch,
+                     *[h for h in now if h]]
+            out = []
+            for h in order:
+                if h and h not in out:
+                    out.append(h)
+            for it in items:                             # (what was asked for always in)
+                if it not in out[:9]:
+                    drop = next(k for k in range(8, -1, -1) if out[k] not in items)
+                    out[drop] = it
+            out = (out + [None] * 9)[:9]
+        for k, it in (slots or {}).items():               # (asked for, slot by slot)
+            j = int(k) - 1
+            if 0 <= j < 9 and it in held:
+                out[j] = it
+        return tuple(out)
+
+    def learn(self, way: dict) -> str:
+        """A way to get an item learned (the wiki): kept in .local/minecraft/learned.json; the book read again."""
+        from . import data
+        way = {'item': _id(way['item']), 'target': _id(way['target']), 'on': way.get('on') or 'block',
+               'using': _id(way['using']) if way.get('using') else '', 'per': float(way.get('per') or 1.0)}
+        n = len(data.learn(way))
+        self._book = None
+        return f"learned: {way['item']} from {way['target']}" + (f" with {way['using']}" if way['using'] else '') + \
+            f' ({n} learned ways in all)'
+
+    def creature_near(self, kind: str, variant: dict | None = None, exclude=()):
+        """The nearest creature of that kind (and kind of it: a sheep's colour, not shorn) about, not one of
+        exclude: (where it is (snapshot coordinates), its name, its id); None: none loaded near."""
+        got = self.creatures_near(kind, variant, exclude, want=1)
+        return got[0] if got else None
+
+    def creatures_near(self, kind: str, variant: dict | None = None, exclude=(), want: int = 0) -> list:
+        """Every creature of that kind (and kind of it) about, nearest first, as creature_near gives one. Fewer
+        than want about: the nearest farther off in the loaded world too (the game's search, as where_is: what
+        kind of it they are isn't known from there, so they're last; walked up to, they're looked at again).
+        (Sheep 90 blocks off were found by where_is, and "get wool" said there were none, 2026-10-16.)"""
+        d = self.raw()
+        me = (d.get('player') or {}).get('pos')
+        if not me:
+            return []
+        found, seen = [], set()
+        for e in d.get('entities') or []:
+            if e.get('type') != kind:
+                continue
+            seen.add(e.get('id'))
+            if e.get('dead') or e.get('id') in exclude:
+                continue
+            have = e.get('variant') or {}
+            if any(have.get(k, v) != v for k, v in (variant or {}).items()):
+                continue
+            p = e['pos']
+            far = math.hypot(p[0] - me[0], p[2] - me[2]) + abs(p[1] - me[1]) * 3.0
+            if far <= HUNT_RANGE:
+                found.append((far, e))
+        found.sort(key=lambda fe: fe[0])
+        out = [(_mirror(e['pos']), e.get('name') or _pretty(kind), e['id']) for _f, e in found]
+        if len(out) < want:
+            cache = self.__dict__.setdefault('_far_creatures', {})     # (a plan asks of each kind many times)
+            hit = cache.get(kind)
+            if hit is not None and time.monotonic() - hit[0] < FAR_CREATURES_FOR:
+                got = hit[1]
+            else:
+                try:
+                    got = self._ask({'op': 'find_entities', 'types': [kind], 'max': FAR_CREATURES}, timeout=2.0)
+                except Exception:
+                    got = {}
+                cache[kind] = (time.monotonic(), got)
+            far = []
+            for x, y, z, ident, eid in got.get('found') or []:
+                if eid in seen or eid in exclude:
+                    continue
+                far.append((math.hypot(x - me[0], z - me[2]) + abs(y - me[1]) * 3.0, (x, y, z), eid))
+            for _f, pos, eid in sorted(far)[:want - len(out)]:
+                out.append((_mirror(pos), _pretty(kind), eid))
+        return out
+
     def game_coords(self, p):
         """A snapshot position in the game's own coordinates (F3)."""
         return _mirror(p)
@@ -816,6 +1085,163 @@ class MinecraftAdapter:
         """The walk to point (snapshot coordinates) will be come back along (what's gathered there is taken on):
         ways down that can't be walked back up cost the climb back."""
         self._back_goals = getattr(self, '_back_goals', set()) | {_goal_key(point)}
+
+    def _foe_costs(self, lo, size, goal=None) -> dict:
+        """{cell: cost multiplier} round each hostile creature in the box, Baritone's avoidance: a move into a
+        cell within FOE_AVOID of one costs FOE_COST times as much (twice as near two of them: that twice over), so
+        the walk goes round them, not past them (to where the player had died, at night, through four zombies,
+        2026-10-16). Not a spider in daylight, nor one that's only hostile when provoked and isn't; nor one at the
+        goal (it's what's walked to: a creature to fight)."""
+        out: dict = {}
+        light = (self.raw().get('world') or {}).get('light')
+        r = int(FOE_AVOID)
+        for e in (self.raw().get('entities') or []):
+            if not e.get('hostile') or e.get('dead') or not e.get('pos'):
+                continue
+            kind = str(e.get('type') or '').split(':')[-1]
+            if kind in NEUTRAL_KINDS and not e.get('aggressive'):
+                if not (kind in ('spider', 'cave_spider') and light is not None and light < 8):
+                    continue
+            if goal is not None and math.hypot(e['pos'][0] - goal[0], e['pos'][2] - goal[2]) < FOE_GOAL:
+                continue
+            ex, ey, ez = (math.floor(v) for v in e['pos'])
+            if not (lo[0] - r <= ex <= lo[0] + size[0] + r and lo[2] - r <= ez <= lo[2] + size[2] + r):
+                continue
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    for dz in range(-r, r + 1):
+                        if dx * dx + dy * dy + dz * dz <= r * r:
+                            c = (ex + dx, ey + dy, ez + dz)
+                            out[c] = out.get(c, 1.0) * FOE_COST
+        return out
+
+    def mover(self):
+        """What does a route move by move in the game (moving.Mover, Baritone's way)."""
+        from .moving import Mover
+        return Mover(aimer=self.aim_point, probe=self.block_solid)
+
+    def goal_place(self, point, cell) -> None:
+        """The walk to point (snapshot coordinates) ends where a block can be put into cell (the game's
+        coordinates): in reach and in sight of it, not standing in it."""
+        self._goals[_goal_key(point)] = ('place', tuple(int(v) for v in cell))
+
+    def walk_limits(self, point, place_blocks: bool = True, dig: bool = True, fewest_jumps: bool = False) -> None:
+        """The walk to point (snapshot coordinates) as the order said: without putting blocks down, without
+        digging; with as few jumps over gaps as there can be ("can you do it with just one jump?")."""
+        lim = getattr(self, '_limits', None)
+        if lim is None:
+            lim = self._limits = {}
+        lim[_goal_key(point)] = {'place_blocks': bool(place_blocks), 'dig': bool(dig),
+                                 'fewest_jumps': bool(fewest_jumps)}
+
+    def way_check(self, target=None, place_blocks: bool = True, dig: bool = True, on_top: bool = True,
+                  most_jumps: int | None = None) -> dict:
+        """Whether the player could get to target, and how (the planner's own way, nothing done): target 'that'
+        (what the crosshair's on: onto its top, on_top) or (x, y, z) (the game's: where the feet would be). Its
+        jumps (the gap, at a run or not, up a block), drops, blocks put down and dug, about how long; with or
+        without putting blocks down or digging. ("Could you jump onto that crafting table from here without
+        placing blocks?": "yes, walk two blocks closer", then "probably not": guessed, 2026-10-16.) most_jumps:
+        the way with the fewest jumps over gaps, and whether that's no more than this ("can you do it with just
+        one jump?": "I can't", read off the quickest way's two, 2026-10-16)."""
+        d = self.raw()
+        me = (d.get('player') or {}).get('pos')
+        if not me:
+            return {'error': 'no player in the world'}
+        if target in (None, 'that', 'crosshair'):
+            t = d.get('target') or {}
+            if t.get('kind') != 'block':
+                return {'error': 'the crosshair is on no block'}
+            bx, by, bz = (int(v) for v in t['pos'])
+            cell = (bx, by + 1, bz) if on_top else (bx, by, bz)
+        else:
+            cell = tuple(math.floor(float(v)) for v in target)
+        goal = _mirror((cell[0] + 0.5, float(cell[1]), cell[2] + 0.5))
+        self._goals[_goal_key(goal)] = ('cell', cell)
+
+        def plan(fewest):
+            self.walk_limits(goal, place_blocks, dig, fewest_jumps=fewest)
+            try:
+                return self.route(_mirror(me), goal, budget_s=1.0)
+            finally:
+                self._limits.pop(_goal_key(goal), None)
+
+        def jumps_of(r):
+            return [m for m in (getattr(r, 'moves', None) or []) if m.kind in ('parkour', 'leap')]
+        # (in no more jumps than asked: the quickest way, if it's within that; else the way with the fewest)
+        route, fewest = plan(False), False
+        if most_jumps is not None and route is not None and getattr(route, 'reaches_goal', False) \
+                and len(jumps_of(route)) > most_jumps:
+            route, fewest = plan(True), True
+        note = dict(getattr(self, 'route_note', None) or {})
+        out = {'to': {'x': cell[0], 'y': cell[1], 'z': cell[2]}, 'placing_blocks': place_blocks, 'digging': dig}
+        if route is None or not getattr(route, 'reaches_goal', False):
+            out.update(can=False, why=note.get('found') or 'no way',
+                       blocks_it_would_take=note.get('blocks_it_would_take'))
+            return {k: v for k, v in out.items() if v is not None}
+        moves = list(getattr(route, 'moves', []) or [])
+        jumps = [{'gap': m.get('dist') - 1, 'at_a_run': bool(m.get('sprint')), 'up_a_block': bool(m.get('ascend'))}
+                 if m.kind == 'parkour' else
+                 {'across': m.get('dist'), 'slanted': m.src[0] != m.dest[0] and m.src[2] != m.dest[2],
+                  'at_a_run': bool(m.get('sprint')), 'up_a_block': m.get('rise') == 1,
+                  'down_a_block': m.get('rise') == -1}
+                 for m in jumps_of(route)]
+        ticks = getattr(route, 'cost', 0.0) - (pathing.FEWEST_JUMPS * len(jumps) if fewest else 0.0)
+        if most_jumps is not None and len(jumps) > most_jumps:
+            out.update(can=False, why=f'it takes {len(jumps)} jumps at the fewest', jumps=jumps)
+            return out
+        out.update(can=True, seconds=round(ticks / 20.0, 1), steps=len(moves),
+                   jumps=jumps, drops=[m.get('height') for m in moves if m.kind == 'fall'],
+                   blocks_put_down=sum(1 for m in moves if m.place is not None),
+                   blocks_dug=sum(len(m.breaks) for m in moves),
+                   steps_up=sum(1 for m in moves if m.kind == 'ascend'),
+                   go_to={'x': cell[0], 'y': cell[1], 'z': cell[2], 'place_blocks': place_blocks, 'dig': dig,
+                          **({'fewest_jumps': True} if fewest else {})})
+        return out
+
+    def top_of(self, what=None):
+        """The cell (the game's coordinates) the feet are in stood on top of a block: the one the crosshair's on
+        (what None or 'that'), or the nearest of a kind of block by name. None if there's none. ("Jump onto that
+        crafting table": checked onto its top, then walked to beside it, 2026-10-16.)"""
+        if what in (None, '', 'that', 'crosshair'):
+            t = self.raw().get('target') or {}
+            if t.get('kind') != 'block':
+                return None
+            bx, by, bz = (int(v) for v in t['pos'])
+            return (bx, by + 1, bz)
+        got = self.locate(what)
+        for r in got.get('results') or []:
+            c = r.get('coordinates')
+            if r.get('kind') == 'block' and c:
+                return (int(c['x']), int(c['y']) + 1, int(c['z']))
+        return None
+
+    def cells_now(self, cells, items) -> dict:
+        """What's in each of these cells (the game's coordinates) now, and round them: 'same' (one of items is
+        there), 'other' (something solid else), 'air' (nothing to stand on: air, water, a plant)."""
+        cells = [tuple(int(v) for v in c) for c in cells]
+        if not cells:
+            return {}
+        lo = [min(c[i] for c in cells) - 1 for i in range(3)]
+        hi = [max(c[i] for c in cells) + 1 for i in range(3)]
+        size = [hi[i] - lo[i] + 1 for i in range(3)]
+        got = self._ask({'op': 'grid', 'min': lo, 'size': size}, timeout=4.0)
+        if 'error' in got:
+            return {}
+        g = blocks.Grid.from_bridge(got)
+        me = (self.raw().get('player') or {}).get('pos') or [0.0, 0.0, 0.0]
+        far = min(64, max(abs(c[i] - math.floor(me[i])) for c in (lo, hi) for i in range(3)) + 1)
+        same = set()
+        if items:                                        # (the bridge searches round the player)
+            hit = self._ask({'op': 'find_blocks', 'ids': sorted(items), 'max': 4096, 'radius': far}, timeout=4.0)
+            same = {tuple(int(v) for v in f[:3]) for f in hit.get('found') or []}
+        out = {}
+        for x in range(lo[0], hi[0] + 1):
+            for y in range(lo[1], hi[1] + 1):
+                for z in range(lo[2], hi[2] + 1):
+                    k = g.at(x, y, z)
+                    out[(x, y, z)] = 'same' if (x, y, z) in same else \
+                        'other' if k in (blocks.SOLID, blocks.PARTIAL, blocks.DANGER, blocks.UNKNOWN) else 'air'
+        return out
 
     def goal_beside(self, point, key) -> None:
         """The walk to point (snapshot coordinates) ends right beside block key (the game's coordinates), its
@@ -879,6 +1305,9 @@ class MinecraftAdapter:
         if what == 'place' and info.get('into'):
             self._no_place = getattr(self, '_no_place', {})
             self._no_place[tuple(info['into'])] = time.monotonic()
+        if what == 'jump' and info.get('from') and info.get('to'):    # (one not made, not running at it)
+            self._no_jump = getattr(self, '_no_jump', {})
+            self._no_jump[(tuple(info['from']), tuple(info['to']))] = time.monotonic()
 
     def explore_point(self, direction: str | None, distance: float | None, vector=None) -> tuple | None:
         """A point to walk to, exploring: that far (blocks; default 64) toward a compass direction (else the way
@@ -904,20 +1333,95 @@ class MinecraftAdapter:
         self._goals[_goal_key(point)] = ('column', None)
         return point
 
-    def locate_blocks(self, ids, to_mine: bool = False) -> dict:
+    def locate_blocks(self, ids, to_mine: bool = False, near=None) -> dict:
         """The nearest blocks of these ids (as locate() for a kind of block). to_mine: walked to within reach
-        to mine (not to stand beside and look at)."""
-        got = self._locate_block(_pretty(ids[0]) if ids else 'block', ids)
+        to mine (not to stand beside and look at). near (the game's coordinates): where what's got is taken
+        next (where the step began: by the station it's used at): the quickest there and back first, a block
+        straight under the feet only where the fall after it is safe (each stone the nearest, dug straight down
+        16 blocks from the crafting table, the last 6 a fall into a cave, then all the way back up for the
+        furnace, 2026-10-16)."""
+        if to_mine and near is None:                     # (back to here: and hostile ones near counted, always)
+            near = (self.raw().get('player') or {}).get('pos')
+        got = self._locate_block(_pretty(ids[0]) if ids else 'block', ids, many=near is not None)
+        if near is not None and got.get('results'):
+            got['results'] = self._quickest(got['results'], tuple(near))
         if to_mine:
             for r in got.get('results', []):
                 c = r['coordinates']
                 self._goals[_goal_key(r['position'])] = ('mine', (c['x'], c['y'], c['z']))
         return got
 
-    def _locate_block(self, query: str, ids) -> dict:
+    def _quickest(self, results: list, near: tuple) -> list:
+        """The found blocks, the quickest to get to first, as Baritone's mining chooses: one search toward the
+        nearest of them at once (QUICK_MANY), and the one its way reaches first is the one (not the nearest as the
+        crow flies: a tree 34 blocks off was taken past two closer ones, 2026-10-16); the rest after it by the
+        trip (to it, then on to near). A block straight under the feet is left out when the fall after it isn't
+        safe."""
+        me = (self.raw().get('player') or {}).get('pos')
+        if not me:
+            return results
+        feet = (math.floor(me[0]), math.floor(me[1] + 0.01), math.floor(me[2]))
+        eye = (me[0], me[1] + blocks.EYE, me[2])
+
+        def trip(a, b):
+            dy = b[1] - a[1]
+            return math.hypot(b[0] - a[0], b[2] - a[2]) / WALK_BPS + (dy * CLIMB_S if dy > 0 else -dy * DROP_S)
+        rows = []
+        for r in results:
+            c = r['coordinates']
+            cell = (c['x'], c['y'], c['z'])
+            mid = (cell[0] + 0.5, cell[1] + 0.5, cell[2] + 0.5)
+            if cell == (feet[0], feet[1] - 1, feet[2]) and not self._safe_to_dig_under(cell):
+                continue
+            there = 0.0 if math.dist(eye, mid) <= blocks.PLAN_REACH else trip(me, mid)
+            rows.append((there + trip(mid, near), cell, r))
+        rows.sort(key=lambda x: x[0])
+        if len(rows) > 1 and rows[0][0] > 0.0:
+            first = self._reached_first([row[1] for row in rows[:QUICK_MANY]], me)
+            if first is not None:
+                rows.sort(key=lambda x: (x[1] != first, x[0]))
+        return [row[2] for row in rows[:5]]
+
+    def _reached_first(self, cells, me):
+        """Of these blocks (the game's cells), the one the cheapest way (to mine it: in reach and sight) gets to,
+        or None (none got to in the time)."""
+        pts = [me] + [(c[0] + 0.5, c[1] + 0.5, c[2] + 0.5) for c in cells]
+        lo = [math.floor(min(p[i] for p in pts)) - (QUICK_MARGIN if i != 1 else ROUTE_DEPTH) for i in range(3)]
+        hi = [math.floor(max(p[i] for p in pts)) + (QUICK_MARGIN if i != 1 else ROUTE_DEPTH) for i in range(3)]
+        size = [hi[i] - lo[i] + 1 for i in range(3)]
+        while size[0] * size[1] * size[2] > 160 * 1024 and size[1] > 16:
+            size[1] -= 2
+            lo[1] += 1
+        if size[0] * size[1] * size[2] > 160 * 1024:
+            return None
+        got = self._ask({'op': 'grid', 'min': lo, 'size': size}, timeout=4.0)
+        if 'error' in got:
+            return None
+        grid = blocks.Grid.from_bridge(got)
+        start = (math.floor(me[0]), math.floor(me[1] + 0.01), math.floor(me[2]))
+        have = self._building(self.raw().get('player') or {})[1]
+        try:
+            path = pathing.run('find', grid, start, cells[0], goals=cells, kind='mine', budget_s=QUICK_S,
+                                can_break=self.can_break, blocks=have, foes=self._foe_costs(lo, size))
+        except Exception:
+            return None
+        return path.goal if path is not None and path.reaches_goal else None
+
+    def _safe_to_dig_under(self, cell) -> bool:
+        """Mining the block stood on drops the player into its cell: safe when it lands within a safe fall (or in
+        water), not into a cave or lava."""
+        x, y, z = cell
+        got = self._ask({'op': 'grid', 'min': [x, y - 10, z], 'size': [1, 11, 1]}, timeout=1.0)
+        if 'error' in got:
+            return False
+        g = blocks._opened(blocks.Grid.from_bridge(got), [cell])
+        return blocks._fall(g, x, y, z) <= blocks.MAX_DROP
+
+    def _locate_block(self, query: str, ids, many: bool = False) -> dict:
         """The nearest blocks of these kinds in the loaded world round the player (64 blocks out, 32 up and
-        down): the nearest first, at the block (the walk goes up to it, mining its way if need be)."""
-        got = self._ask({'op': 'find_blocks', 'ids': list(ids), 'max': 5}, timeout=4.0)
+        down): the nearest first, at the block (the walk goes up to it, mining its way if need be). many: more
+        of them (to choose from)."""
+        got = self._ask({'op': 'find_blocks', 'ids': list(ids), 'max': FIND_MANY if many else 5}, timeout=4.0)
         found = got.get('found') or []
         if not found:
             return {'error': got.get('error') or f'no {query} within 64 blocks', 'results': []}
@@ -978,16 +1482,19 @@ class MinecraftAdapter:
             words_ = [w.rstrip('s') if len(w) > 3 else w for w in ident.split(':')[-1].split('_')]
             if all(w in words_ for w in q):
                 scored.append((len(q) / len(words_), ident))
-        scored.sort(key=lambda x: -x[0])
+        # (as well matched, the white one first: what one is undyed; "a bed" of 16 colours had only the first 6 in
+        # the book planned, none white, and a purple bed was set about: dyes from flowers first, 2026-10-16)
+        scored.sort(key=lambda x: (-x[0], not x[1].split(':')[-1].startswith('white_')))
         return [i for _s, i in scored[:6]]
 
-    def items_near(self, items: tuple, radius: float) -> list:
-        """Dropped items of these kinds lying within radius of the player, nearest first (snapshot coordinates)."""
+    def items_near(self, items: tuple | None, radius: float) -> list:
+        """Dropped items of these kinds (None: any) lying within radius of the player, nearest first (snapshot
+        coordinates)."""
         d = self.raw()
         me = (d.get('player') or {}).get('pos') or [0, 0, 0]
         out = []
         for e in d.get('entities') or []:
-            if e.get('item') in items:
+            if e.get('item') and (items is None or e.get('item') in items):
                 p = e['pos']
                 dist = math.dist(p, me)
                 if dist <= radius:
@@ -998,7 +1505,7 @@ class MinecraftAdapter:
                     out.append((dist, at))
         return [p for _d, p in sorted(out)]
 
-    def place_spot(self, exclude=()) -> tuple | None:
+    def place_spot(self, exclude=(), only=None) -> tuple | None:
         """Where to put a block down near the player (a crafting table, a furnace): (aim point, the block clicked,
         its face, the new block), the keys in the game's block coordinates. Any open cell within reach that
         neither the player's body nor a creature is in, beside a solid block whose face toward it is in sight
@@ -1006,7 +1513,8 @@ class MinecraftAdapter:
         feet were tried: stood in a dip, every one was ground, and "I can't find a spot" twice on open plains,
         with animals about, 2026-10-13.) Seen as the crosshair sees, from the eye crouched (it's put down
         crouched, never using what's clicked): grass in the spot is put over (a block takes its place); a plant in
-        the way, knocked out first. exclude: spots (new blocks' cells) tried already."""
+        the way, knocked out first. exclude: spots (new blocks' cells) tried already. only: that cell (the game's
+        coordinates: a block of a building), in reach and in sight from here, or None."""
         d = self.raw()
         pl = d.get('player') or {}
         p = pl.get('pos')
@@ -1017,7 +1525,13 @@ class MinecraftAdapter:
         x, y, z = math.floor(p[0]), math.floor(p[1] + 0.01), math.floor(p[2])
         r = PLACE_RADIUS
         exclude = {tuple(c) for c in exclude}
-        got = self._ask({'op': 'grid', 'min': [x - r, y - 2, z - r], 'size': [2 * r + 1, 6, 2 * r + 1]}, timeout=2.0)
+        lo, size = [x - r, y - 2, z - r], [2 * r + 1, 6, 2 * r + 1]
+        if only is not None:
+            only = tuple(int(v) for v in only)
+            lo = [min(lo[i], only[i] - 1) for i in range(3)]
+            size = [max(x - r + 2 * r + 1, only[0] + 2) - lo[0], max(y + 4, only[1] + 2) - lo[1],
+                    max(z - r + 2 * r + 1, only[2] + 2) - lo[2]]
+        got = self._ask({'op': 'grid', 'min': lo, 'size': size}, timeout=2.0)
         if 'error' in got:
             return None
         g = blocks.Grid.from_bridge(got)
@@ -1026,23 +1540,23 @@ class MinecraftAdapter:
             if e.get('living') and not e.get('dead') and e.get('pos'):
                 taken |= _cells_in(e['pos'], float(e.get('w') or 0.6) / 2, float(e.get('h') or 1.0))
         cands = []
-        for cy in range(y - 1, y + 3):
-            for cz in range(z - r, z + r + 1):
-                for cx in range(x - r, x + r + 1):
-                    c = (cx, cy, cz)
-                    if g.at(*c) != blocks.AIR or c in taken or c in exclude:
-                        continue
-                    if math.dist(eye, (cx + 0.5, cy + 0.5, cz + 0.5)) > blocks.REACH - 0.5:
-                        continue
-                    across = math.hypot(cx + 0.5 - p[0], cz + 0.5 - p[2])
-                    for dv in ((0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, 1, 0)):
-                        n = (cx + dv[0], cy + dv[1], cz + dv[2])
-                        if g.at(*n) != blocks.SOLID:
-                            continue
-                        face = tuple(c[i] + 0.5 + dv[i] * 0.5 for i in range(3))   # (on n, toward c)
-                        # on the ground (clicked on top), at the feet's height, a step or two off
-                        score = abs(cy - y) * 2.0 + abs(across - 1.8) + (0.0 if dv == (0, -1, 0) else 1.5)
-                        cands.append((score, c, n, face))
+        cells = [only] if only is not None else [(cx, cy, cz) for cy in range(y - 1, y + 3)
+                                                  for cz in range(z - r, z + r + 1) for cx in range(x - r, x + r + 1)]
+        for c in cells:
+            cx, cy, cz = c
+            if g.at(*c) != blocks.AIR or c in taken or c in exclude:
+                continue
+            if math.dist(eye, (cx + 0.5, cy + 0.5, cz + 0.5)) > blocks.REACH - 0.5:
+                continue
+            across = math.hypot(cx + 0.5 - p[0], cz + 0.5 - p[2])
+            for dv in ((0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, 1, 0)):
+                n = (cx + dv[0], cy + dv[1], cz + dv[2])
+                if g.at(*n) != blocks.SOLID:
+                    continue
+                face = tuple(c[i] + 0.5 + dv[i] * 0.5 for i in range(3))   # (on n, toward c)
+                # on the ground (clicked on top), at the feet's height, a step or two off
+                score = abs(cy - y) * 2.0 + abs(across - 1.8) + (0.0 if dv == (0, -1, 0) else 1.5)
+                cands.append((score, c, n, face))
         cands.sort(key=lambda t: t[0])
         cands = cands[:PLACE_TRIES]
         if not cands:
@@ -1068,16 +1582,50 @@ class MinecraftAdapter:
 
     def terrain(self) -> dict:
         """What's around the player's feet for moving in a fight (core/melee.py): {'in_water': bool, 'avoid':
-        {(dx, dz): 'water' | 'lava' | 'drop'}} for the 8 cells round the player (snapshot coordinates' x)."""
+        {(dx, dz): 'water' | 'lava' | 'drop' | 'wall'}} for the 8 cells round the player (snapshot coordinates'
+        x); and over FIGHT_SPACE blocks round: 'open' (x, z) -> whether the player can stand there (about this
+        high, a step up or down; snapshot coordinates), 'room' (x, z) -> how many cells can be got to from there
+        in ROOM_STEPS steps (few: a corner, a dead end; backed into one by a zombie, the player died there,
+        2026-10-16); 'floor' (x, z) -> the height the feet are at standing there, or None."""
         d = self.raw()
         p = (d.get('player') or {}).get('pos')
         if not p:
             return {}
         x, y, z = math.floor(p[0]), math.floor(p[1] + 0.01), math.floor(p[2])
-        got = self._ask({'op': 'grid', 'min': [x - 1, y - 5, z - 1], 'size': [3, 8, 3]}, timeout=1.0)
+        r = FIGHT_SPACE
+        got = self._ask({'op': 'grid', 'min': [x - r, y - 5, z - r], 'size': [2 * r + 1, 9, 2 * r + 1]},
+                        timeout=1.0)
         if 'error' in got:
             return {}
         g = blocks.Grid.from_bridge(got)
+        stands = {}                                      # (game x, z) -> the feet's height there
+        for cx in range(x - r, x + r + 1):
+            for cz in range(z - r, z + r + 1):
+                for h in (y, y + 1, y - 1):
+                    k = g.at(cx, h, cz)                  # (a snow layer, a carpet: stood on, in its cell)
+                    if (k == blocks.LOW or k in blocks.PASS and k != blocks.WATER
+                            and g.at(cx, h - 1, cz) in blocks.FLOOR) and g.at(cx, h + 1, cz) in blocks.PASS:
+                        stands[(cx, cz)] = h
+                        break
+
+        def open_at(sx, sz):
+            return (math.floor(-sx), math.floor(sz)) in stands  # (snapshot x is the game's mirrored)
+
+        def room(sx, sz):
+            start = (math.floor(-sx), math.floor(sz))
+            if start not in stands:
+                return 0
+            seen, edge = {start}, [start]
+            for _ in range(ROOM_STEPS):
+                nxt = []
+                for c in edge:
+                    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        n = (c[0] + dx, c[1] + dz)
+                        if n in stands and n not in seen and abs(stands[n] - stands[c]) <= 1:
+                            seen.add(n)
+                            nxt.append(n)
+                edge = nxt
+            return len(seen)
         avoid = {}
         for dx in (-1, 0, 1):
             for dz in (-1, 0, 1):
@@ -1105,18 +1653,112 @@ class MinecraftAdapter:
                     kind = 'drop'
                 if kind:
                     avoid[(-dx, dz)] = kind                       # (x mirrored for the snapshot)
-        return {'in_water': g.at(x, y, z) == blocks.WATER or g.at(x, y + 1, z) == blocks.WATER, 'avoid': avoid}
+        def floor(sx, sz):
+            return stands.get((math.floor(-sx), math.floor(sz)))
+
+        return {'in_water': g.at(x, y, z) == blocks.WATER or g.at(x, y + 1, z) == blocks.WATER, 'avoid': avoid,
+                'open': open_at, 'room': room, 'floor': floor}
 
     def combat_profile(self, e) -> dict:
         """What a kind of character does in a fight (core/melee.py): explodes, shoots, how far it hits."""
         kind = (e.model or '').split(':')[-1]
         return {'explodes': kind == 'creeper',
                 'ranged': kind in RANGED,
+                # (up a pillar is no way out of their reach: two spiders climbed after the player, dead,
+                # 2026-10-17)
+                'climbs': kind in ('spider', 'cave_spider'),
+                'flies': kind in ('phantom', 'vex', 'bee', 'ghast', 'blaze', 'breeze'),
                 # can't be got away from on foot (a spider bit the player to death as it backed off, 2026-10-13)
                 'fast': kind in FAST or bool((e.extra or {}).get('baby')),
+                # (hostile only when provoked: walks don't stop for them)
+                'neutral': kind in ('enderman', 'zombified_piglin', 'piglin', 'spider', 'cave_spider')
+                and not (e.extra or {}).get('aggressive'),
                 # how far past the widths it hits (Minecraft's melee reach: 0.83 for most; bigger for these)
                 'reach': {'ravager': 1.6, 'warden': 1.6, 'iron_golem': 1.6, 'hoglin': 1.2, 'zoglin': 1.2}.get(kind,
                                                                                                            0.83)}
+
+    def sight_pairs(self, pairs) -> list:
+        """For each (eye, point) (snapshot coordinates), whether the point is in the eye's sight (one batch of the
+        game's rays)."""
+        if not pairs:
+            return []
+        rays = [(_mirror(a), _mirror(b)) for a, b in pairs]
+        hits = self._sight(rays)
+        hits += [None] * (len(rays) - len(hits))
+        return [h is None or math.dist(h['at'], a) >= math.dist(a, b) - 0.3 for (a, b), h in zip(rays, hits)]
+
+    def in_sight(self, eyes, to) -> list:
+        """For each eye (snapshot coordinates), whether to (snapshot coordinates) is in its sight: nothing solid on
+        the line between, by the game's own rays."""
+        if not eyes:
+            return []
+        b = _mirror(to)
+        rays = [(_mirror(e), b) for e in eyes]
+        hits = self._sight(rays)
+        out = []
+        for (a, _b), h in zip(rays, hits + [None] * (len(rays) - len(hits))):
+            out.append(h is None or math.dist(h['at'], a) >= math.dist(a, b) - 0.3)
+        return out
+
+    def cover_spot(self, foes) -> tuple | None:
+        """The nearest spot (snapshot coordinates) within COVER_RADIUS where the player can stand out of the sight of
+        all those that shoot (foes: their eyes, snapshot coordinates; or one eye): the game's own rays from each eye
+        to the head and the body there, at the height the feet would really be at, each stopped by a block. The
+        walk there ends on that very block. None: none near. (Tested at the player's own height, with the head
+        only, and "there" a block short of it: a spot 3 blocks off, shot from 20 health to 4 there, 2026-10-16.)"""
+        if foes and isinstance(foes[0], (int, float)):
+            foes = [foes]
+        d = self.raw()
+        p = (d.get('player') or {}).get('pos')
+        if not p:
+            return None
+        ground = self.terrain() or {}
+        open_at, floor = ground.get('open'), ground.get('floor')
+        if open_at is None:
+            return None
+        sp = _mirror(p)                                  # (the player, snapshot coordinates)
+        cands = []
+        r = COVER_RADIUS
+        for dx in range(-r, r + 1):
+            for dz in range(-r, r + 1):
+                x, z = math.floor(sp[0]) + dx + 0.5, math.floor(sp[2]) + dz + 0.5
+                far = math.hypot(x - sp[0], z - sp[2])
+                seen_in = (math.floor(x), math.floor(z)) in getattr(self, 'cover_avoid', ())
+                if far <= r and open_at(x, z) and not seen_in:
+                    y = floor(x, z) if floor is not None else None
+                    cands.append((far, (x, float(y if y is not None else math.floor(sp[1] + 0.01)), z)))
+        cands.sort()
+        cands = cands[:COVER_TRIES]
+        if not cands:
+            return None
+        rays = [(_mirror(f), _mirror((c[0], c[1] + h, c[2]))) for _f, c in cands for f in foes for h in COVER_SEEN_AT]
+        hits = self._sight(rays)
+        hits += [None] * (len(rays) - len(hits))
+        k = len(foes) * len(COVER_SEEN_AT)
+        for i, (_far, c) in enumerate(cands):
+            hidden = all(h is not None and math.dist(h['at'], a) < math.dist(a, b) - 0.3
+                         for h, (a, b) in zip(hits[i * k:(i + 1) * k], rays[i * k:(i + 1) * k]))
+            if hidden:                                   # (a block between it and each of them, head and body)
+                cell = (math.floor(-c[0]), math.floor(c[1] + 0.01), math.floor(c[2]))
+                self._goals[_goal_key(c)] = ('cell', cell)
+                return c
+        return None
+
+    def fight_gear(self, e, extra: dict) -> list:
+        """What a fight with e wants that isn't there: [(items, where)], items the ones that would do (the quickest
+        got), where 'hand' (in the hotbar: the fighter takes the best) or 'offhand'. A weapon, bare-handed (sent to
+        kill skeletons with nothing, it went for a shield and fought a zombie with its fists: 15 hits, still up, the
+        player dead, 2026-10-16); a shield against one that shoots (the user: "it should get a shield before trying
+        to kill a skeleton"). [] when it's all there."""
+        extra = extra or {}
+        need = []
+        # (less than a sword's: a pickaxe, 2 to 3, was taken for armed, and two spiders killed the player at night,
+        # 2026-10-17; a stone sword is cobblestone and a stick)
+        if (self.weapon_damage(extra.get('hotbar') or []) or 1.0) < SWORD_DAMAGE:
+            need.append((('minecraft:stone_sword', 'minecraft:wooden_sword'), 'hand'))
+        if self.combat_profile(e).get('ranged') and extra.get('offhand') not in ('minecraft:shield',):
+            need.append((('minecraft:shield',), 'offhand'))
+        return need
 
     def food_slot(self, hotbar: list) -> int | None:
         """The hotbar slot with the best food to eat now (cooked meat and bread before raw; rotten flesh, spider
@@ -1179,7 +1821,13 @@ class MinecraftAdapter:
         from ...core.nav import Route
         s, g = _mirror(start), _mirror(goal)
         kind, block = self._goals.get(_goal_key(goal), ('near', None))
-        to_mine = kind in ('mine', 'exact')                # (the goal's cell given: no 'look' at the end)
+        # (planned again from about the same spot after next to no way came of the last plan: twice the time, up
+        # to ROUTE_BUDGET_MAX; the plan's in a process of its own, the game's never held up by it. Out of a
+        # ravine, plan after plan ran out of time with one block of way, stuck, 2026-10-17)
+        last = getattr(self, '_route_last', {}).get(_goal_key(goal))
+        if last is not None and math.dist(last[0], s) < 2.0 and last[1] == 'part' and last[2] <= ROUTE_TINY:
+            budget_s = min(ROUTE_BUDGET_MAX, max(budget_s, last[3] * 2))
+        to_mine = kind in ('mine', 'exact', 'place')       # (the goal's cell given: no 'look' at the end)
         box = None
         sky_goal = kind == 'sky'
         ground_goal = kind == 'ground'
@@ -1232,32 +1880,58 @@ class MinecraftAdapter:
         while size[0] * size[1] * size[2] > 160 * 1024 and size[1] > 16:
             size[1] -= 2
             lo[1] += 1
-        got = self._ask({'op': 'grid', 'min': lo, 'size': size}, timeout=4.0)
-        if 'error' in got:
-            return None
+        # (the same box asked for again within GRID_REUSE_S: the one got then; each is read on the game's own
+        # thread, and plans one after another from one spot made the game lag, 2026-10-17)
+        last = getattr(self, '_route_grid', None)
+        if last is not None and last[1] == (tuple(lo), tuple(size)) and time.monotonic() - last[0] < GRID_REUSE_S:
+            got = last[2]
+        else:
+            got = self._ask({'op': 'grid', 'min': lo, 'size': size}, timeout=4.0)
+            if 'error' in got:
+                return None
+            self._route_grid = (time.monotonic(), (tuple(lo), tuple(size)), got)
         grid = blocks.Grid.from_bridge(got)
         cell = lambda p: (math.floor(p[0]), math.floor(p[1] + 0.01), math.floor(p[2]))
         pl = self.raw().get('player') or {}
         have = self._building(pl)[1]
+        # as the order said: without putting blocks down, without digging ("jump onto it without placing any
+        # blocks": the walk put down two, 2026-10-16)
+        limits = getattr(self, '_limits', {}).get(_goal_key(goal)) or {}
+        if limits.get('place_blocks') is False:
+            have = 0
+        can_break = self.can_break and limits.get('dig') is not False
         now = time.monotonic()
         self._no_place = {c: t for c, t in getattr(self, '_no_place', {}).items() if now - t < NO_PLACE_S}
-        path, short_note = blocks.plan_route(grid, cell(s), block if block else cell(aim), have,
-                                             budget_s=budget_s, can_break=self.can_break, kind=kind, box=box,
-                                             no_place=frozenset(self._no_place), sky=sky, ground=ground, back=back)
+        self._no_jump = {c: t for c, t in getattr(self, '_no_jump', {}).items() if now - t < NO_PLACE_S}
+        # (running needs food over 6: a jump at a run isn't planned without it)
+        sprint = pl.get('food') is None or pl.get('food') > SPRINT_FOOD
+        path, short_note = pathing.run('plan_route', grid, cell(s), block if block else cell(aim), have,
+                                             no_jump=frozenset(self._no_jump), can_sprint=sprint,
+                                             budget_s=budget_s, can_break=can_break, kind=kind, box=box,
+                                             no_place=frozenset(self._no_place), sky=sky, ground=ground, back=back,
+                                             keep=frozenset(getattr(self, 'keep_blocks', None) or ()),
+                                             foes=self._foe_costs(lo, size, g),
+                                             jump_extra=pathing.FEWEST_JUMPS if limits.get('fewest_jumps') else 0.0)
         # (short of blocks for the cheapest way: the way that digs, or "needs blocks": blocks.plan_route)
         self.route_note = {'goal_kind': 'sky' if sky_goal else kind, 'box': [lo, size], **short_note}
+        self.__dict__.setdefault('_route_last', {})[_goal_key(goal)] = (tuple(s), short_note.get('found'),
+                                                                        short_note.get('cells') or 0, budget_s)
         if path is None and short_note.get('found') == 'needs blocks':
             return None
-        if (path is None or not path.reaches_goal) and have < 8 and not sky_goal:
-            # with blocks to build with, would there be a way? (then the order can get some first: dirt)
+        no_blocks = limits.get('place_blocks') is False
+        if (path is None or not (path.reaches_goal or path.timed_out)) and have < 8 and not sky_goal \
+                and not no_blocks:
+            # with blocks to build with, would there be a way? (then the order can get some first: dirt) (only
+            # when there's none: not on a long way out of time, where it doubled each plan's time, 3 s, the
+            # game lagging with plans one after another, 2026-10-17)
             try:
-                alt = blocks.find(grid, cell(s), block if block else cell(aim), budget_s=1.5,
+                alt = pathing.run('find', grid, cell(s), block if block else cell(aim), budget_s=1.5,
                                   can_break=self.can_break, blocks=64, kind=kind, box=box,
                                   no_place=frozenset(self._no_place), ground=ground)
             except Exception:
                 alt = None
             if alt is not None and alt.reaches_goal:
-                need = sum(1 for a in alt.actions if a[0] == 'place')
+                need = sum(1 for m in alt.moves if m.place is not None)
                 if need > have:
                     self.route_note['blocks_it_would_take'] = need
         if path is None:
@@ -1274,6 +1948,8 @@ class MinecraftAdapter:
         route.length_m = path.length
         route.timed_out = not complete and (path.timed_out or path.reaches_goal)
         route.actions = [_action(a) for a in path.actions]
+        route.moves, route.grid = list(path.moves), grid      # (done move by move: moving.Mover)
+        route.cost = path.cost
         self._slow_breaks[_goal_key(goal)] = sum(1 for a in path.actions if a[0] == 'break'
                                                  and (grid.hardness(*a[2]) & 127) >= SLOW_BREAK)
         if block and kind == 'block' and path.reaches_goal and not to_mine:   # end facing it: came to see it
@@ -1300,7 +1976,8 @@ ITEM_ALIASES = {
 }
 PICK_TIERS = {'pickaxe': ['wooden', 'golden', 'stone', 'copper', 'iron', 'diamond', 'netherite'],
               'axe': ['wooden', 'golden', 'stone', 'copper', 'iron', 'diamond', 'netherite'],
-              'shovel': ['wooden', 'golden', 'stone', 'copper', 'iron', 'diamond', 'netherite']}
+              'shovel': ['wooden', 'golden', 'stone', 'copper', 'iron', 'diamond', 'netherite'],
+              'hoe': ['wooden', 'golden', 'stone', 'copper', 'iron', 'diamond', 'netherite']}
 
 
 class _Book:
@@ -1327,6 +2004,34 @@ class _Book:
                 continue                                # (sticks and saplings only now and then)
             for item in set(info['drops']):
                 self._sources.setdefault(item, []).append(Source(block, tuple(info['drops']), info['tool'] or None))
+        # what the world gives besides mining (the game's own loot tables, .local/minecraft: Get-GameData.bat
+        # minecraft): creatures killed, and what's got by using an item on a creature or a block (shears on a
+        # sheep, the hand on a berry bush), the item by the table's verb
+        from . import data
+        known = set(got.get('sources') or {})
+        for item, drops in data.GameData().drops().items():
+            for d in drops:
+                if d.per < MIN_PER:
+                    continue
+                if d.verb == 'kill':
+                    if d.on == 'creature' and d.target not in NO_HUNT:
+                        self._sources.setdefault(item, []).append(
+                            Source(d.target, (item,), None, on='creature', how='kill', per=d.per, variant=d.variant))
+                    continue
+                if d.verb not in USE_WITH:
+                    continue                            # (a charged creeper's blast: not a way)
+                targets = [d.target] if d.on == 'creature' else \
+                    [b for b in known if b == d.target or b.startswith(d.target + '_') or b == d.target + 's']
+                for t in targets or [d.target]:
+                    self._sources.setdefault(item, []).append(
+                        Source(t, (item,), USE_WITH[d.verb] or None, on=d.on, how='use', per=d.per,
+                               variant=d.variant))
+        for w in data.learned():                        # (and what the doer learned from the wiki)
+            item, target = _id(w['item']), _id(w['target'])
+            self._sources.setdefault(item, []).append(
+                Source(target, (item,), _id(w['using']) if w.get('using') else None,
+                       on='creature' if w.get('on') == 'creature' else 'block', how='use',
+                       per=float(w.get('per') or 1.0)))
         self._near: dict = {}
         self._spots: dict = {}             # block -> (when, the nearest few spots)
 
@@ -1356,19 +2061,54 @@ class _Book:
     within = None     # blocks: only what's this near counts as near (stuck: nothing that needs the way out)
 
     def nearby(self, blocks_):
-        key = tuple(blocks_)
-        hit = self._near.get(key)
-        if hit is not None and time.monotonic() - hit[0] < 20.0:
-            return hit[1] if self.within is None or (hit[1] is not None and hit[1] <= self.within) else None
-        got = self.a._ask({'op': 'find_blocks', 'ids': list(blocks_), 'max': 1}, timeout=4.0)
-        found = got.get('found') or []
         me = (self.a.raw().get('player') or {}).get('pos') or [0, 0, 0]
-        d = math.dist(me, found[0][:3]) if found else None
-        self._near[key] = (time.monotonic(), d)
+        ds = [math.dist(me, c) for b in blocks_ for c in self._where(b)]
+        d = min(ds) if ds else None
         return d if self.within is None or (d is not None and d <= self.within) else None
 
+    def prefetch(self, item: str) -> None:
+        """Where the blocks are that getting item may take (its recipes' ingredients' sources, all the way down):
+        found in one search, not one each (a bed's every wool and dye, each searched on its own, froze the
+        game, 2026-10-16). (An older bridge: one each, as before.)"""
+        if getattr(self.a, '_no_find_each', False):
+            return
+        # (the stations used and, once anything's smelted, every fuel too: shears' iron weighed the fuels, signs and
+        # banners among them, and each was searched on its own: 56 searches, 6 s, 2026-10-16)
+        blocks_, todo, seen, fuels = {self.station}, [item], set(), False
+        while todo and len(seen) < PREFETCH_ITEMS:
+            it = todo.pop()
+            if it in seen:
+                continue
+            seen.add(it)
+            for src in self.sources(it):
+                if not src.creature:
+                    blocks_.add(src.block)
+                if src.tool:
+                    todo.append(src.tool)
+            for rec in self.recipes(it):
+                todo.extend(f for fits, _n in rec.needs() for f in fits)
+                if getattr(rec, 'station', None):
+                    blocks_.add(rec.station)
+                    if not fuels:
+                        fuels = True
+                        todo.extend(self.fuels())
+        now = time.monotonic()
+        ask = sorted(b for b in blocks_ if not (b in self._spots and now - self._spots[b][0] < SPOTS_FOR))
+        if not ask:
+            return
+        got = self.a._ask({'op': 'find_each', 'ids': ask, 'max': SPOTS}, timeout=10.0)
+        if 'error' in got and 'found' not in got:
+            self.a._no_find_each = 'unknown' in str(got.get('error')).lower()
+            return
+        found = got.get('found') or {}
+        for b in ask:
+            self._spots[b] = (now, [tuple(int(v) for v in c[:3]) for c in found.get(b) or []])
+
     def fuels(self) -> dict:
-        return self._fuels
+        # (never a tool or a weapon: the player's own wooden sword was burnt for shears' iron, and another made to
+        # burn too, when two planks did it; a sword burns for one item, the planks it's made of for three,
+        # 2026-10-17)
+        return {k: v for k, v in self._fuels.items() if not _NOT_FUEL.search(k.split(':')[-1])}
 
     # costs in seconds from where the player is (core/crafting.py: a station there against one made here)
 
@@ -1400,14 +2140,34 @@ class _Book:
         return max(0.0, flat - 3.0) / 4.3 + max(0.0, dy - 2.0) * CLIMB_S + max(0.0, -dy - 3.0) * DROP_S
 
     def gather_cost(self, src, n):
+        each = HUNT_S if src.how == 'kill' else USE_S if src.how == 'use' else MINE_S
+        times = math.ceil(n / max(0.1, src.per))
+        if src.creature:
+            # each one it takes, of those about: the walk out to the farthest of them; each one more than are
+            # about, found further off (12 string from spiders was planned with one spider about, over 3 sheep:
+            # "get 12 string, 111 s", 2026-10-16)
+            about = len(self.a.creatures_near(src.block, dict(src.variant)))
+            near = self.a.creatures_near(src.block, dict(src.variant), want=times)
+            if not near:
+                return None
+            unsure = (len(near) - about) * FAR_KIND_S if src.variant else 0.0
+            return self._travel(_mirror(near[min(times, len(near)) - 1][0])) + times * each + unsure \
+                + max(0, times - len(near)) * MORE_CREATURES_S
         spots = self._usable(src.block)
         if not spots:
             return None
-        return self._travel(spots[0]) + n * MINE_S
+        return min(self._travel(c) + self._danger(c) for c in spots[:3]) + times * each
+
+    def _danger(self, c) -> float:
+        """Seconds a spot counts as dearer for the hostile creatures near it (the crafting table by the pit of
+        zombies was gone back to, and the player was killed there, 2026-10-16)."""
+        foes = [e['pos'] for e in self.a.raw().get('entities') or [] if e.get('hostile') and not e.get('dead')
+                and e.get('pos')]
+        return FOE_NEAR_S * sum(1 for f in foes if math.dist(f, (c[0] + 0.5, c[1], c[2] + 0.5)) < FOE_NEAR_R)
 
     def station_cost(self, item):
         spots = self._usable(item)
-        return self._travel(spots[0]) if spots else None
+        return min(self._travel(c) + self._danger(c) for c in spots[:3]) if spots else None
 
     def station_near(self, item=None):
         d = self.nearby((item or self.station,))
@@ -1436,8 +2196,27 @@ def _box_distance(box, p) -> float:
     return math.hypot(max(x0 - p[0], 0.0, p[0] - x1), max(z0 - p[2], 0.0, p[2] - z1))
 
 
+def _water_flags(near, pos, eye) -> dict:
+    """{'in_water': the feet or the eyes in water, 'head_under': the eyes in it} from the blocks round the feet
+    the bridge sends each frame (the walk keeps afloat by them: core/autowalk.py); {} without them."""
+    if not near or not near.get('data') or not pos:
+        return {}
+    import base64
+    g = blocks.Grid(tuple(int(v) for v in near['min']), tuple(int(v) for v in near['size']),
+                    base64.b64decode(near['data']))
+    feet = g.at(math.floor(pos[0]), math.floor(pos[1] + 0.01), math.floor(pos[2])) == blocks.WATER
+    e = eye or (pos[0], pos[1] + 1.62, pos[2])
+    head = g.at(math.floor(e[0]), math.floor(e[1]), math.floor(e[2])) == blocks.WATER
+    return {'in_water': feet or head, 'head_under': head}
+
+
+# what burns but is never burnt: tools, weapons and the like (_Book.fuels)
+_NOT_FUEL = re.compile(r"(_sword|_pickaxe|_axe|_shovel|_hoe|^bow|^crossbow|^fishing_rod|^shield|_spear)$")
+
 # the land itself, under the trees ("take me to the ground" from a tree top was "already on the surface",
 # 2026-10-13)
+_DEATH = re.compile(r"\b(where (?:i|you|we) died|(?:my|our|the) death(?: point| spot| place)?|where (?:i|we) "
+                    r"(?:fell|was killed|got killed)|(?:my|our) (?:stuff|things|items) (?:i|we) dropped)\b", re.I)
 _GROUND = re.compile(r"\b((?:the|solid) ground|ground level|down (?:from|out of) (?:this|the) trees?|"
                      r"(?:get|take) (?:me )?down(?: from here)?$|off (?:this|the) trees?)\b", re.I)
 _SURFACE = re.compile(r"\b(surface|outside|open air|the sky|daylight|out of (?:this|the) (?:cave|hole|mine|tunnel))\b",

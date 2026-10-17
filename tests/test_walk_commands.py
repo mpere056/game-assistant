@@ -443,3 +443,108 @@ class MineAtTests(unittest.TestCase):
         self.assertEqual(got.kind, 'task')
         self.assertEqual(got.steps, [('dig', (12, 56, -5), (-12.5, 56.0, -4.5), 'iron ore')])
         self.assertEqual(r.handle('break the block at 3 70 -2', use_model=False).steps[0][1], (3, 70, -2))
+
+
+class TypedOrderTests(unittest.TestCase):
+    """The doer's typed tools (docs/AGENT.md stage 4): orders given as data, no words read into."""
+
+    def resolver(self, held=None, entities=()):
+        from game_assistant.core.interface import Entity
+        try:
+            from sim.world import M, SimBook
+            from test_sim_orders import plains
+        except ModuleNotFoundError:
+            from tests.sim.world import M, SimBook
+            from tests.test_sim_orders import plains
+        world = plains()
+
+        class A(FakeAdapter):
+            can_break = True
+
+            def book(self):
+                return SimBook(world)
+
+            def match_item(self, what):
+                item = M + what.strip().replace(' ', '_')
+                return [item] if item in (M + 'iron_pickaxe', M + 'crafting_table', M + 'oak_planks') else []
+
+            def snapshot(self):
+                s = super().snapshot()
+                return s.__class__(**{**s.__dict__, 'extra': {'inventory': dict(held or {})}})
+
+            def coords_point(self, x, y, z):
+                return (-x - 0.5, float(y), z + 0.5)
+
+            def explore_point(self, direction, distance, vector=None):
+                self.explored = (direction, distance)
+                return (0.0, 0.0, distance or 64.0)
+        zombies = [Entity(i, 3, None, (x, 0.0, 5.0), (x, 1.0, 5.0), 0.3, 1.9, True, False, name='Zombie')
+                   for i, x in ((1, -1.0), (2, 1.0))] if entities else ()
+        return CommandResolver(A([], entities=zombies)), M
+
+    def test_get_an_item_by_name_or_id(self):
+        r, M = self.resolver()
+        for name in ('iron_pickaxe', 'minecraft:iron_pickaxe', 'iron pickaxe'):
+            got = r.typed('get', {'item': name, 'count': 1})
+            self.assertEqual((got.kind, got.name, got.count), ('task', M + 'iron_pickaxe', 1), name)
+            self.assertEqual(got.steps[-1][1].result, M + 'iron_pickaxe')
+        self.assertEqual(r.typed('get', {'item': 'moon rock'}).kind, 'none')
+        self.assertEqual(r.typed('get', {'item': 'oak_planks', 'count': 4}).count, 4)
+
+    def test_put_down_only_what_is_held(self):
+        r, M = self.resolver(held={'minecraft:crafting_table': 1})
+        got = r.typed('put_down', {'item': 'crafting_table'})
+        self.assertEqual((got.kind, got.steps), ('task', [('station', M + 'crafting_table')]))
+        r, M = self.resolver()
+        self.assertEqual(r.typed('put_down', {'item': 'crafting_table'}).kind, 'none')
+
+    def test_go_to_and_mine_at_by_coordinates(self):
+        r, M = self.resolver()
+        got = r.typed('go_to', {'x': 12, 'y': 40, 'z': -30})
+        self.assertEqual((got.kind, got.point), ('walk', (-12.5, 40.0, -29.5)))
+        got = r.typed('mine_at', {'x': 12.7, 'y': 56, 'z': -4.2, 'what': 'minecraft:iron_ore'})
+        self.assertEqual(got.steps, [('dig', (12, 56, -5), (-12.5, 56.0, -4.5), 'iron ore')])
+        self.assertEqual(r.typed('mine_at', {'x': 1, 'y': 2}).kind, 'none')
+        self.assertEqual(r.typed('go_to', {}).kind, 'none')
+
+    def test_fight_how_many(self):
+        r, M = self.resolver(entities=True)
+        got = r.typed('fight', {'target': 'zombie', 'count': 2})
+        self.assertEqual((got.kind, got.attack, got.every, got.count), ('walk', 'fight', 'Zombie', 2))
+        got = r.typed('fight', {'target': 'zombie', 'all': True})
+        self.assertEqual((got.every, got.count), ('Zombie', None))
+        got = r.typed('fight', {'target': 'zombie'})
+        self.assertEqual((got.kind, got.every), ('walk', None))
+
+    def test_explore_a_way(self):
+        r, M = self.resolver()
+        got = r.typed('explore', {'direction': 'North', 'distance': 80})
+        self.assertEqual(got.kind, 'walk')
+        self.assertEqual(r.adapter.explored, ('north', 80.0))
+        self.assertEqual(r.typed('fly', {}).kind, 'none')
+
+
+class HotbarOrderTests(unittest.TestCase):
+    def test_hotbar_and_sort_orders_lay_out_the_hotbar(self):
+        # ("move the iron into my hotbar and sort things as well": "I didn't catch where to go", 2026-10-16)
+        from types import SimpleNamespace as NS
+        from game_assistant.core.walk_commands import CommandResolver
+        calls = []
+
+        class A:
+            def snapshot(self):
+                return NS(extra={'inventory': {'minecraft:raw_iron': 6, 'minecraft:dirt': 9},
+                                 'hotbar': [('minecraft:dirt', 9)]})
+
+            def match_item(self, words):
+                return ['minecraft:raw_iron'] if 'iron' in words else []
+
+            def hotbar_layout(self, inv, hot, items, sort, slots):
+                calls.append((tuple(items), sort))
+                return ('minecraft:dirt', *items) + (None,) * (8 - len(items))
+        r = CommandResolver.__new__(CommandResolver)
+        r.adapter = A()
+        got = r.typed('inventory', {'items': ['raw iron'], 'sort': True})
+        self.assertEqual(got.kind, 'task')
+        self.assertEqual(got.steps[0][0], 'arrange')
+        self.assertEqual(calls[-1], (('minecraft:raw_iron',), True))

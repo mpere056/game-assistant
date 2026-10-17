@@ -52,6 +52,7 @@ final class Snapshots {
 		o.addProperty("paused", mc.isPaused());
 		o.addProperty("dimension", String.valueOf(mc.level.dimension().identifier()));
 		o.add("player", player(p));
+		o.add("near", Grid.near(mc.level, p.blockPosition()));   // (the blocks round the feet, as they are now)
 		o.add("world", world(mc, p));
 		o.add("camera", camera(mc.gameRenderer.mainCamera()));
 		o.add("target", target(mc, p));
@@ -96,6 +97,14 @@ final class Snapshots {
 		o.addProperty("max_health", p.getMaxHealth());
 		o.addProperty("food", p.getFoodData().getFoodLevel());
 		o.addProperty("armor", p.getArmorValue());
+		p.getLastDeathLocation().ifPresent(g -> {         // where the player last died (what they had lies there)
+			JsonArray d = new JsonArray();
+			d.add(g.pos().getX());
+			d.add(g.pos().getY());
+			d.add(g.pos().getZ());
+			d.add(g.dimension().identifier().toString());
+			o.add("last_death", d);
+		});
 		o.addProperty("air", p.getAirSupply());
 		o.addProperty("dead", p.isDeadOrDying());
 		o.addProperty("creative", p.isCreative());
@@ -107,6 +116,11 @@ final class Snapshots {
 		o.addProperty("hurt_time", p.hurtTime);
 		o.addProperty("on_ground", p.onGround());
 		o.addProperty("vy", p.getDeltaMovement().y);
+		o.addProperty("vx", p.getDeltaMovement().x);         // (blocks a tick: the walk's jumps and landings)
+		o.addProperty("vz", p.getDeltaMovement().z);
+		o.addProperty("collided", p.horizontalCollision);    // (up against something across)
+		o.addProperty("crouching", p.isCrouching());
+		o.addProperty("sprinting", p.isSprinting());          // (it stays on till forward's let go)
 		ItemStack off = p.getOffhandItem();
 		o.addProperty("offhand", off.isEmpty() ? "" : String.valueOf(BuiltInRegistries.ITEM.getKey(off.getItem())));
 		o.addProperty("blocking", p.isBlocking());
@@ -251,6 +265,12 @@ final class Snapshots {
 		if (e instanceof net.minecraft.world.entity.Mob mob) {
 			o.addProperty("aggressive", mob.isAggressive());
 			o.addProperty("baby", mob.isBaby());          // (a baby zombie: too quick to get away from)
+		}
+		if (e instanceof net.minecraft.world.entity.animal.sheep.Sheep sh) {   // which: its wool's colour, shorn
+			JsonObject v = new JsonObject();
+			v.addProperty("color", sh.getColor().getSerializedName());
+			v.addProperty("sheared", sh.isSheared());
+			o.add("variant", v);
 		}
 		if (e instanceof net.minecraft.world.entity.monster.Creeper c) {
 			o.addProperty("swell", c.getSwelling(0.0f));  // 0..1: about to explode

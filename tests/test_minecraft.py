@@ -10,7 +10,7 @@ try:
 except ModuleNotFoundError:                 # (run as tests.<module>)
     from tests.mc_fakes import fake_sight
 
-from game_assistant.core.interface import GameNotRunning, dot
+from game_assistant.core.interface import Entity, GameNotRunning, dot
 from game_assistant.games.minecraft.adapter import MinecraftAdapter
 
 
@@ -282,3 +282,282 @@ class BuildingBlockTests(unittest.TestCase):
         pl = {'hotbar': [['minecraft:cobblestone', 20]], 'inventory': {'minecraft:cobblestone': 20}, 'blocks': 20}
         a.reserve = {'minecraft:cobblestone': 8}
         self.assertEqual(a._building(pl), (0, 12))                     # what's over is
+
+
+class QuickestBlockTests(unittest.TestCase):
+    def test_the_quickest_there_and_back_and_never_a_fall_into_a_cave(self):
+        # (each stone the nearest: dug straight down 16 blocks from the crafting table, the last 6 a fall into a
+        # cave, then all the way back up for the furnace, 2026-10-16)
+        import base64
+        from game_assistant.games.minecraft import blocks as B
+        a = MinecraftAdapter()
+        a.raw = lambda: {'player': {'pos': [0.5, 70.0, 0.5]}}
+        under, deep, beside = (0, 69, 0), (1, 64, 0), (4, 70, 2)
+
+        def ask(req, timeout=None):
+            if req['op'] == 'find_blocks':               # the nearest first, as the bridge gives them
+                return {'found': [[*under, 'minecraft:stone'], [*deep, 'minecraft:stone'],
+                                  [*beside, 'minecraft:stone']]}
+            (x0, y0, z0), (sx, sy, sz) = req['min'], req['size']
+            # under the stone stood on: a cave (air from 68 down to 60)
+            data = bytes(B.AIR if 60 <= y0 + yy <= 68 else B.SOLID for yy in range(sy))
+            return {'min': req['min'], 'size': req['size'], 'data': base64.b64encode(data).decode()}
+        a._ask = ask
+        got = a.locate_blocks(['minecraft:stone'], to_mine=True, near=(0.5, 70.0, 0.5))
+        cells = [tuple(r['coordinates'][k] for k in 'xyz') for r in got['results']]
+        self.assertNotIn(under, cells)                  # (a fall of 9 into the cave)
+        self.assertEqual(cells[0], beside)              # on the player's level: no climb back
+        self.assertEqual(cells[-1], deep)
+
+
+class GameDataTests(unittest.TestCase):
+    def test_interactions_from_the_loot_tables(self):
+        # (shearing was in the game's data, and not planned with, 2026-10-16): every interaction's table read the
+        # same way, its verb's item from the adapter's few words
+        import json
+        import pathlib
+        import tempfile
+        from game_assistant.games.minecraft import data
+        root = pathlib.Path(tempfile.mkdtemp())
+        lt = root / '26.3' / 'data' / 'minecraft' / 'loot_table'
+        tables = {
+            'entities/sheep': {'type': 'minecraft:entity', 'pools': [{'rolls': 1, 'entries': [
+                {'type': 'minecraft:loot_table', 'value': 'minecraft:entities/sheep/white', 'condition': {
+                    'type': 'minecraft:entity_properties', 'entity': 'this', 'predicate': {
+                        'minecraft:components': {'minecraft:sheep/color': 'white'}}}}]}]},
+            'entities/sheep/white': {'type': 'minecraft:entity', 'pools': [{'rolls': 1, 'entries': [
+                {'type': 'minecraft:item', 'name': 'minecraft:white_wool'}]}]},
+            'shearing/sheep': {'type': 'minecraft:shearing', 'pools': [{'rolls': {'min': 1, 'max': 3}, 'entries': [
+                {'type': 'minecraft:item', 'name': 'minecraft:white_wool'}]}]},
+            'entities/zombie': {'type': 'minecraft:entity', 'pools': [{'rolls': 1, 'condition': {
+                'type': 'minecraft:all_of', 'terms': [{'type': 'minecraft:killed_by_player'}, {
+                    'type': 'minecraft:random_chance_with_enchanted_bonus', 'unenchanted_chance': 0.025}]},
+                'entries': [{'type': 'minecraft:item', 'name': 'minecraft:iron_ingot'},
+                            {'type': 'minecraft:item', 'name': 'minecraft:carrot'}]}]},
+            'harvest/sweet_berry_bush': {'type': 'minecraft:block_interact', 'pools': [{'rolls': 1, 'entries': [
+                {'type': 'minecraft:item', 'name': 'minecraft:sweet_berries'}]}]}}
+        for name, t in tables.items():
+            p = lt / f'{name}.json'
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(t))
+        saved = data.DIR
+        data.DIR = root
+        try:
+            d = data.GameData().drops()
+        finally:
+            data.DIR = saved
+        wool = {(x.verb, x.per) for x in d['minecraft:white_wool']}
+        self.assertEqual(wool, {('kill', 1.0), ('shearing', 2.0)})
+        self.assertEqual(d['minecraft:white_wool'][0].variant, (('color', 'white'),))
+        self.assertAlmostEqual(d['minecraft:iron_ingot'][0].per, 0.0125, places=3)   # (one of two, 2.5 % of kills)
+        berries = d['minecraft:sweet_berries'][0]
+        self.assertEqual((berries.on, berries.verb, berries.target), ('block', 'harvest', 'minecraft:sweet_berry_bush'))
+
+
+class FightGearTests(unittest.TestCase):
+    def test_a_weapon_bare_handed_and_a_shield_against_a_shooter(self):
+        a = MinecraftAdapter()
+        skel = Entity(1, 1, 'minecraft:skeleton', (0.0, 0.0, 5.0), (0.0, 1.0, 5.0), 0.3, 1.99, True, False, 20.0,
+                      20.0)
+        zomb = Entity(2, 1, 'minecraft:zombie', (0.0, 0.0, 5.0), (0.0, 1.0, 5.0), 0.3, 1.95, True, False, 20.0, 20.0)
+        need = a.fight_gear(skel, {'hotbar': [('minecraft:dirt', 9)]})
+        self.assertEqual([w for _i, w in need], ['hand', 'offhand'])     # (a weapon first)
+        self.assertIn('minecraft:wooden_sword', need[0][0])
+        self.assertEqual(a.fight_gear(zomb, {'hotbar': [('minecraft:stone_sword', 1)]}), [])
+        self.assertEqual(a.fight_gear(skel, {'hotbar': [('minecraft:iron_sword', 1)],
+                                             'offhand': 'minecraft:shield'}), [])
+        # (a pickaxe isn't armed: two spiders, dead, 2026-10-17; an axe is)
+        self.assertEqual([w for _i, w in a.fight_gear(zomb, {'hotbar': [('minecraft:stone_pickaxe', 1)]})], ['hand'])
+        self.assertEqual(a.fight_gear(zomb, {'hotbar': [('minecraft:stone_axe', 1)]}), [])
+
+
+class QuickestByWayTests(unittest.TestCase):
+    def test_the_block_whose_way_is_quickest_not_the_nearest(self):
+        # (Baritone's mining: one search toward all of them; a tree 34 blocks off was taken past two closer ones,
+        # 2026-10-16). One tree 5 off across a wall that can't be broken; one 9 off in the open.
+        import base64
+        from game_assistant.games.minecraft import blocks as B
+        size = (24, 12, 24)
+        data = bytearray(size[0] * size[1] * size[2])
+        hard = bytearray(len(data))
+
+        def put(x, y, z, k, h=127):
+            i = (y * size[2] + z) * size[0] + x
+            data[i], hard[i] = k, h
+        for x in range(size[0]):
+            for z in range(size[2]):
+                put(x, 3, z, B.SOLID)                    # the ground: stand at 4
+        for z in range(size[2]):
+            for y in range(4, 11):
+                put(8, y, z, B.SOLID)                    # a wall across, too high to get over, unbreakable
+        behind, open_ = (10, 4, 5), (5, 4, 14)
+        for c in (behind, open_):
+            for y in range(4, 7):
+                put(c[0], y, c[2], B.SOLID, 15)          # the trunks
+
+        def ask(req, timeout=None):
+            if req.get('op') == 'grid':
+                lo, sz = req['min'], req['size']
+                out, out_h = bytearray(sz[0] * sz[1] * sz[2]), bytearray(sz[0] * sz[1] * sz[2])
+                n = 0
+                for y in range(sz[1]):
+                    for z in range(sz[2]):
+                        for x in range(sz[0]):
+                            gx, gy, gz = lo[0] + x, lo[1] + y, lo[2] + z
+                            if 0 <= gx < size[0] and 0 <= gy < size[1] and 0 <= gz < size[2]:
+                                k = (gy * size[2] + gz) * size[0] + gx
+                                out[n], out_h[n] = data[k], hard[k]
+                            else:
+                                out[n], out_h[n] = (B.SOLID if gy < 4 else B.AIR), 127
+                            n += 1
+                return {'min': lo, 'size': sz, 'data': base64.b64encode(bytes(out)).decode(),
+                        'hard': base64.b64encode(bytes(out_h)).decode()}
+            return {'found': [[*behind, 'minecraft:oak_log'], [*open_, 'minecraft:oak_log']]}
+        a = MinecraftAdapter()
+        a.can_break = False
+        a.raw = lambda: {'player': {'pos': [5.5, 4.0, 5.5]}, 'entities': []}
+        a._ask = ask
+        got = a.locate_blocks(['minecraft:oak_log'], to_mine=True)
+        self.assertEqual(tuple(got['results'][0]['coordinates'][k] for k in 'xyz'), open_)
+
+
+class WayCheckTests(unittest.TestCase):
+    def test_could_you_jump_onto_that_without_placing_blocks(self):
+        # ("could you jump onto that crafting table from here without placing blocks?": "yes, walk two blocks
+        # closer", then "probably not": guessed, 2026-10-16). The planner on the ground there: a gap of two, the
+        # table a block up, at a run.
+        import base64
+        from game_assistant.games.minecraft import blocks as B
+        size = (20, 10, 12)
+        data = bytearray(size[0] * size[1] * size[2])
+        hard = bytearray(len(data))
+
+        def put(x, y, z, k, h=127):
+            i = (y * size[2] + z) * size[0] + x
+            data[i], hard[i] = k, h
+        for z in range(size[2]):
+            for x in range(size[0]):
+                if x not in (6, 7):
+                    for y in range(0, 4):
+                        put(x, y, z, B.SOLID)            # the ground (stand at 4), a gap two wide, 4 deep
+        put(8, 4, 5, B.SOLID, 10)                        # the crafting table, beyond the gap
+
+        def ask(req, timeout=None):
+            if req.get('op') != 'grid':
+                return {'error': 'not here'}
+            lo, sz = req['min'], req['size']
+            out, out_h = bytearray(sz[0] * sz[1] * sz[2]), bytearray(sz[0] * sz[1] * sz[2])
+            n = 0
+            for y in range(sz[1]):
+                for z in range(sz[2]):
+                    for x in range(sz[0]):
+                        gx, gy, gz = lo[0] + x, lo[1] + y, lo[2] + z
+                        if 0 <= gx < size[0] and 0 <= gy < size[1] and 0 <= gz < size[2]:
+                            k = (gy * size[2] + gz) * size[0] + gx
+                            out[n], out_h[n] = data[k], hard[k]
+                        else:
+                            out[n], out_h[n] = (B.SOLID if gy < 0 else B.AIR), 127
+                        n += 1
+            return {'min': lo, 'size': sz, 'data': base64.b64encode(bytes(out)).decode(),
+                    'hard': base64.b64encode(bytes(out_h)).decode()}
+        a = MinecraftAdapter()
+        a.raw = lambda: {'player': {'pos': [3.5, 4.0, 5.5], 'hotbar': [['minecraft:cobblestone', 58]],
+                                    'inventory': {'minecraft:cobblestone': 58}},
+                         'entities': [], 'target': {'kind': 'block', 'pos': [8, 4, 5]}}
+        a._ask = ask
+        got = a.way_check('that', place_blocks=False, dig=False)
+        self.assertTrue(got['can'], got)
+        self.assertEqual(got['jumps'], [{'gap': 2, 'at_a_run': True, 'up_a_block': True}])
+        self.assertEqual((got['blocks_put_down'], got['blocks_dug']), (0, 0))
+        self.assertEqual(got['to'], {'x': 8, 'y': 5, 'z': 5})
+
+
+class BedAndWoolTests(unittest.TestCase):
+    """"Make a bed": a purple one was set about (dyes from flowers first), its wool from 12 string with one spider
+    about, while sheep were 90 blocks off and unseen by the plan (2026-10-16)."""
+
+    def adapter(self, entities, far=()):
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        a.raw = lambda: {'player': {'pos': [0.0, 64.0, 0.0]}, 'entities': entities}
+        a._ask = lambda req, timeout=None: {'found': [list(f) for f in far]} if req.get('op') == 'find_entities' \
+            else {'error': 'not here'}
+        return a
+
+    def test_a_bed_is_planned_white_first(self):
+        colours = ('black', 'blue', 'brown', 'cyan', 'gray', 'green', 'light_blue', 'purple', 'red', 'white')
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        a.book = lambda: type('B', (), {'items': lambda self: {f'minecraft:{c}_bed' for c in colours}})()
+        self.assertEqual(a.match_item('bed')[0], 'minecraft:white_bed')
+        self.assertEqual(a.match_item('a red bed'), ['minecraft:red_bed'])
+
+    def test_a_creature_cost_counts_how_many_are_about(self):
+        from game_assistant.core.crafting import Source
+        from game_assistant.games.minecraft.adapter import _Book
+        spider = {'id': 1, 'type': 'minecraft:spider', 'pos': [10.0, 64.0, 0.0]}
+        book = _Book.__new__(_Book)
+        book.a = self.adapter([spider])
+        string = Source('minecraft:spider', ('minecraft:string',), on='creature', how='kill', per=1.0)
+        self.assertGreater(book.gather_cost(string, 12), 11 * 60)        # (one about: 11 more found further)
+        self.assertLess(book.gather_cost(string, 1), 30)
+
+    def test_creatures_beyond_sight_are_found(self):
+        from game_assistant.core.crafting import Source
+        from game_assistant.games.minecraft.adapter import _Book
+        far = [(90.0, 64.0, 0.0, 'minecraft:sheep', 7), (95.0, 64.0, 3.0, 'minecraft:sheep', 8),
+               (99.0, 64.0, 1.0, 'minecraft:sheep', 9)]
+        a = self.adapter([], far)
+        got = a.creature_near('minecraft:sheep', {'color': 'white'})
+        self.assertEqual(got[2], 7)
+        book = _Book.__new__(_Book)
+        book.a = a
+        wool = Source('minecraft:sheep', ('minecraft:white_wool',), on='creature', how='kill', per=1.0,
+                      variant=(('color', 'white'),))
+        cost = book.gather_cost(wool, 3)
+        self.assertIsNotNone(cost)
+        self.assertLess(cost, 150)
+
+
+class EquipmentTests(unittest.TestCase):
+    def test_the_best_of_each_part_and_a_shield(self):
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        inv = {'minecraft:leather_chestplate': 1, 'minecraft:iron_chestplate': 1, 'minecraft:golden_boots': 1,
+               'minecraft:shield': 1, 'minecraft:dirt': 9}
+        self.assertEqual(a.equipment(inv, ''), [('equip', 'minecraft:iron_chestplate'),
+                                                 ('equip', 'minecraft:golden_boots'), ('offhand', 'minecraft:shield')])
+        self.assertEqual(a.equipment(inv, 'minecraft:shield', ['minecraft:golden_boots']),
+                         [('equip', 'minecraft:golden_boots')])
+
+
+class BlocksToHandTests(unittest.TestCase):
+    def test_blocks_held_not_in_the_hotbar_put_there(self):
+        # (70 cobblestone in the pack, none in the hotbar: a ravine dug out of step by step, 2026-10-17)
+        a = MinecraftAdapter.__new__(MinecraftAdapter)
+        hot = [['minecraft:wooden_sword', 1], ['minecraft:saddle', 1]] + [['', 0]] * 7
+        inv = {'minecraft:wooden_sword': 1, 'minecraft:saddle': 1, 'minecraft:cobblestone': 70,
+               'minecraft:diorite': 47}
+        a.raw = lambda: {'player': {'hotbar': hot, 'inventory': inv}}
+        step = a.blocks_to_hand()
+        self.assertEqual(step[0], 'arrange')
+        self.assertIn('minecraft:cobblestone', step[1])
+        hot2 = [['minecraft:cobblestone', 64]] + hot[1:]
+        a.raw = lambda: {'player': {'hotbar': hot2, 'inventory': inv}}
+        self.assertIsNone(a.blocks_to_hand())            # (some there already)
+
+
+class WorkerPlanTests(unittest.TestCase):
+    def test_a_plan_in_its_own_process_is_the_same(self):
+        # (planned on a thread here, the frame loop ran at 115 ms a frame, 2026-10-17)
+        from game_assistant.games.minecraft import pathing as P
+        try:
+            from test_minecraft_paths import grid, world
+        except ModuleNotFoundError:
+            from tests.test_minecraft_paths import grid, world
+        d, s = world()
+        g = grid(d, s)
+        here = P.find(g, (2, 1, 2), (15, 1, 15), kind='exact')
+        P.use_worker(True)
+        try:
+            there = P.run('find', g, (2, 1, 2), (15, 1, 15), kind='exact')
+        finally:
+            P.use_worker(False)
+        self.assertEqual([m.dest for m in there.moves], [m.dest for m in here.moves])

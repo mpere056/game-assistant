@@ -87,6 +87,66 @@ class GatherTests(unittest.TestCase):
         self.assertIn('done', r.events)
 
 
+class WornOutToolTests(unittest.TestCase):
+    def test_a_tool_gone_when_the_next_block_is_looked_for_fails_the_step(self):
+        # (the stone pickaxe wore out down a mine: the step went on "mining" iron with a wooden one, nothing
+        # dropping, the same ore walked to again and again, 2026-10-16). Failed with NEEDS_TOOL, the goal runner
+        # plans again from what's held: a new pickaxe in it.
+        from game_assistant.core.skills import NEEDS_TOOL
+
+        class W(World):
+            def task_tool(self, need, have):
+                return 'mc:stone_pickaxe' if have.get('mc:stone_pickaxe') else None
+
+            def snap(self):
+                s = super().snap()
+                s.extra['hotbar'] = [('mc:stone_pickaxe', 1)] if self.inv.get('mc:stone_pickaxe') else []
+                return s
+        w = W()
+        w.inv['mc:stone_pickaxe'] = 1
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:oak_log', 3, Source('mc:oak_log', ('mc:oak_log',), 'mc:stone_pickaxe'))],
+                'mc:oak_log', 3)
+        r.update(w.snap(), 1 / 30, False)
+        self.assertEqual(r.phase, 'walk')                # (it had the tool: off to the first)
+        del w.inv['mc:stone_pickaxe']                    # (worn out on it)
+        r._set('find')                                   # (that one done: the next looked for)
+        r.update(w.snap(), 1 / 30, False)
+        self.assertFalse(r.active)
+        self.assertEqual(r.outcome.reason.kind, NEEDS_TOOL)
+
+    def test_a_tool_gone_on_the_way_fails_the_step_at_once(self):
+        # (the walk to the ore dug through stone with the pickaxe till it broke; then the ore was punched by hand,
+        # 15 s and nothing dropping, 2026-10-17)
+        from game_assistant.core.skills import NEEDS_TOOL
+
+        class W(World):
+            stops = 0
+
+            def task_tool(self, need, have):
+                return 'mc:stone_pickaxe' if have.get('mc:stone_pickaxe') else None
+
+            def task_stop(self):
+                self.stops += 1
+
+            def snap(self):
+                s = super().snap()
+                s.extra['hotbar'] = [('mc:stone_pickaxe', 1)] if self.inv.get('mc:stone_pickaxe') else []
+                return s
+        w = W()
+        w.inv['mc:stone_pickaxe'] = 1
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:raw_iron', 3, Source('mc:iron_ore', ('mc:raw_iron',), 'mc:stone_pickaxe'))],
+                'mc:raw_iron', 3)
+        r.update(w.snap(), 1 / 30, False)
+        self.assertEqual(r.phase, 'walk')
+        del w.inv['mc:stone_pickaxe']                    # (broke digging the way there)
+        r.update(w.snap(), 1 / 30, True)
+        self.assertFalse(r.active)
+        self.assertEqual(r.outcome.reason.kind, NEEDS_TOOL)
+        self.assertGreaterEqual(w.stops, 1)              # (the walk stopped)
+
+
 class StationWorld:
     """A crafting table to put down at (0, 0, 2), on the ground's top (the block below); the crosshair (as the
     game's) stops on the first plant along its line (cells (0, 0, 1) then (0, 0, 2)), else on the ground's top.
@@ -481,3 +541,473 @@ class StuckHereTests(unittest.TestCase):
         r.on_event('gave_up')                                           # again from the same spot: stuck here
         self.assertFalse(r.active)
         self.assertIn('failed', r.events)
+        self.assertEqual(r.outcome.reason.kind, 'stuck')
+
+    def test_ways_that_need_blocks_are_not_stuck(self):
+        # (logs up the trunk the player stood under, 2 blocks to pillar, none spare: "every way out needs
+        # something", and the order went back to the doer, 2026-10-16): unreachable, with the route's note
+        from game_assistant.core.skills import Reason
+        w = World()
+        w.logs = 5
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:oak_log', 3, Source('mc:oak_log', ('mc:oak_log',)))], 'mc:oak_log', 3)
+        r.pos = (0.0, 80.0, 0.0)
+        note = {'found': 'no way', 'blocks_it_would_take': 2, 'blocks_to_build_with': 0}
+        for _ in range(2):
+            r.phase = 'walk'
+            r.on_event('gave_up', Reason('unreachable', {'what': 'Oak Log', 'at': None, 'route': note}))
+        self.assertFalse(r.active)
+        self.assertEqual(r.outcome.reason.kind, 'unreachable')
+        self.assertEqual(r.outcome.reason.get('route'), note)
+
+
+class ClearFirstTests(unittest.TestCase):
+    def test_a_leaf_in_front_of_the_log_is_mined_first(self):
+        # (the route planner counts one block in the way of what's mined as none (it's mined first); the mining
+        # said "hidden" and walked right up beside it, round the tree, and the step was given up, 2026-10-16)
+        class W(World):
+            leaf = True
+
+            def snap(self):
+                s = super().snap()
+                s.extra['aim_block'] = (0, 1, 1) if self.leaf else ((0, 1, 2) if self.logs else None)
+                return s
+
+            def apply(self, intent, dt):
+                if intent is not None and 'attack' in intent.keys and self.leaf:
+                    self.leaf = False                    # (a leaf goes at once)
+                elif not self.leaf:
+                    super().apply(intent, dt)
+
+            def task_find(self, blocks, exclude):
+                return ((0.0, 0.5, 2.5), 'Oak Log', (0, 1, 2)) if self.logs and (0, 1, 2) not in exclude else None
+
+            def task_aim(self, key, eye):
+                if tuple(key) == (0, 1, 1):
+                    return ((0.0, 1.5, 1.0), None)
+                return ((0.0, 1.5, 2.0), None) if not self.leaf else (None, (0, 1, 1))
+
+            def task_walk(self, point, name, beside=None):
+                self.walks.append((name, beside))
+        w = W()
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:oak_log', 1, Source('mc:oak_log', ('mc:oak_log',)))], 'mc:oak_log', 1)
+        for _ in range(5):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        r.on_event('arrived')
+        for _ in range(200):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+            if not r.active:
+                break
+        self.assertFalse(w.leaf)
+        self.assertEqual(w.inv.get('mc:oak_log'), 1)
+        self.assertEqual([x for x in w.walks if x[1] is not None], [])     # no walk round to it
+        self.assertIn('done', r.events)
+
+
+class HuntTests(unittest.TestCase):
+    def test_wool_from_a_sheep_hunted_then_picked_up(self):
+        # (a bed's wool comes only from sheep, 2026-10-16)
+        sheep = Source('mc:sheep', ('mc:white_wool',), None, on='creature', how='kill', per=1.0,
+                       variant=(('color', 'white'),))
+
+        class W(World):
+            hunts, lying = [], []
+
+            def task_creature(self, kind, variant, exclude):
+                self.asked = (kind, dict(variant))
+                return ((3.0, 0.0, 4.0), 'Sheep', 7) if 7 not in exclude else None
+
+            def task_hunt(self, point, name, ident):
+                self.hunts.append(ident)
+
+            def task_items(self, items, radius):
+                return list(self.lying)
+        w = W()
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:white_wool', 1, sheep)], 'mc:white_wool', 1)
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertEqual(w.hunts, [7])
+        self.assertEqual(w.asked, ('mc:sheep', {'color': 'white'}))
+        self.assertEqual(r.phase, 'hunt')
+        w.lying = [(3.0, 0.0, 4.0)]                     # the fight's over (the app): its wool on the ground
+        r.resume()
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertEqual(r.phase, 'pickup')
+        w.inv['mc:white_wool'], w.lying = 1, []
+        r.on_event('arrived')
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertIn('done', r.events)
+
+
+class UseTests(unittest.TestCase):
+    def test_a_sheep_shorn_with_the_shears_held(self):
+        # (the game's data has shearing: the same use skill as every interaction, 2026-10-16)
+        from game_assistant.core.interface import Entity
+        sheep = Source('mc:sheep', ('mc:white_wool',), 'mc:shears', on='creature', how='use', per=2.0,
+                       variant=(('color', 'white'), ('sheared', False)))
+
+        class W(World):
+            approached, lying, clicks = [], [], 0
+
+            def snap(self):
+                s = super().snap()
+                e = Entity(7, 3, None, (0.0, 0.0, 2.0), (0.0, 1.6, 2.0), 0.45, 1.3, False, False, name='Sheep')
+                s.extra.update({'hotbar': [('mc:stick', 1), ('mc:shears', 1)], 'slot': self.slot})
+                return s.__class__(**{**s.__dict__, 'entities': (e,), 'target_id': 7 if self.slot == 1 else None})
+            slot = 0
+
+            def task_creature(self, kind, variant, exclude):
+                return ((0.0, 0.0, 2.0), 'Sheep', 7) if 7 not in exclude else None
+
+            def task_approach(self, point, name, ident):
+                self.approached.append(ident)
+
+            def task_tool(self, need, have):
+                return 'mc:shears' if have.get('mc:shears') else None
+
+            def task_items(self, items, radius):
+                return list(self.lying)
+        w = W()
+        w.inv['mc:shears'] = 1
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:white_wool', 2, sheep)], 'mc:white_wool', 2)
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertEqual((w.approached, r.phase), ([7], 'approach'))
+        r.on_event('arrived')
+        for _ in range(60):
+            intent = r.update(w.snap(), 1 / 30, False)
+            if intent is not None:
+                if 'slot2' in intent.taps:
+                    w.slot = 1                          # the shears in hand
+                if 'interact' in intent.taps:
+                    self.assertEqual(w.slot, 1)
+                    w.clicks += 1
+                    w.lying = [(0.0, 0.0, 2.5)]         # the wool falls
+            if r.phase == 'pickup':
+                break
+        self.assertEqual(w.clicks, 1)
+        w.inv['mc:white_wool'], w.lying = 2, []
+        r.on_event('arrived')
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertIn('done', r.events)
+
+
+class SeekTests(unittest.TestCase):
+    def test_a_creature_out_of_sight_is_walked_toward_then_hunted(self):
+        # (sheep found by the game's search, beyond sight: hunted by id, each was "gone" at once, 3 s apiece,
+        # 16 of them twice, 2026-10-17)
+        sheep = Source('mc:sheep', ('mc:white_wool',), on='creature', how='kill')
+
+        class W(World):
+            approached, seen, stops = [], False, 0
+
+            def task_creature(self, kind, variant, exclude):
+                return ((0.0, 0.0, 80.0), 'Sheep', 7)
+
+            def task_seen(self, ident):
+                return self.seen
+
+            def task_hunt(self, point, name, ident):
+                self.approached.append(ident)
+
+            def task_stop(self):
+                self.stops += 1
+        w = W()
+        r = TaskRunner(w)
+        r.start([('gather', 'mc:white_wool', 2, sheep)], 'mc:white_wool', 2)
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertEqual((r.phase, w.walks, w.approached), ('seek', ['Sheep'], []))
+        for _ in range(30):                              # (on the way: no "the hunt ended")
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertEqual(r.phase, 'seek')
+        w.seen = True                                    # (in sight now)
+        for _ in range(3):
+            w.apply(r.update(w.snap(), 1 / 30, False), 1 / 30)
+        self.assertGreaterEqual(w.stops, 1)
+        self.assertEqual((r.phase, w.approached), ('hunt', [7]))
+
+
+class FuelTests(unittest.TestCase):
+    def test_tools_are_never_burnt(self):
+        # (the player's own wooden sword was burnt for shears' iron, and another made to burn, 2026-10-17)
+        from game_assistant.games.minecraft.adapter import _Book
+        b = _Book.__new__(_Book)
+        b._fuels = {'minecraft:wooden_sword': 200, 'minecraft:wooden_pickaxe': 200, 'minecraft:bow': 300,
+                    'minecraft:oak_planks': 300, 'minecraft:coal': 1600, 'minecraft:bowl': 200}
+        self.assertEqual(sorted(b.fuels()), ['minecraft:bowl', 'minecraft:coal', 'minecraft:oak_planks'])
+
+
+class OffhandTests(unittest.TestCase):
+    def test_a_shield_into_the_off_hand(self):
+        # (the user: "it should get a shield before trying to kill a skeleton"; it's held in the off hand)
+        class W(World):
+            slot, offhand = 0, ''
+
+            def snap(self):
+                s = super().snap()
+                s.extra.update({'hotbar': [('mc:stone_sword', 1), ('mc:shield', 1)], 'slot': self.slot,
+                                'offhand': self.offhand})
+                return s
+        w = W()
+        w.inv['mc:shield'] = 1
+        r = TaskRunner(w)
+        r.start([('offhand', 'mc:shield')], 'mc:shield', 1)
+        for _ in range(60):
+            intent = r.update(w.snap(), 1 / 30, False)
+            if intent is not None and 'slot2' in intent.taps:
+                w.slot = 1
+            if intent is not None and 'swap_hands' in intent.taps:
+                w.offhand = 'mc:shield'
+            if not r.active:
+                break
+        self.assertIn('done', r.events)
+        self.assertEqual(w.offhand, 'mc:shield')
+
+
+class EquipTests(unittest.TestCase):
+    """("Equip my armour": "my tools can only sort the hotbar", 2026-10-17.) The game puts a piece on when it's used
+    from the hand, swapping it for what's worn there."""
+
+    def world(self, worn):
+        class W(World):
+            slot, armor, worn_ = 0, 0, None
+
+            def snap(self):
+                s = super().snap()
+                hot = [('mc:stone_sword', 1)] + [(k, 1) for k in ('mc:iron_chestplate', 'mc:leather_chestplate')
+                                                 if self.inv.get(k)]
+                s.extra.update({'hotbar': hot, 'slot': self.slot, 'armor': self.armor})
+                return s
+        w = W()
+        w.worn_ = worn
+        w.armor = {'mc:iron_chestplate': 6, 'mc:leather_chestplate': 3}.get(worn, 0)
+        return w
+
+    def run_equip(self, w, item):
+        r = TaskRunner(w)
+        r.start([('equip', item)], item, 1)
+        ups = 0
+        for _ in range(120):
+            intent = r.update(w.snap(), 1 / 30, False)
+            if intent is not None:
+                if intent.pitch < 0:
+                    ups += 1
+                hot = w.snap().extra['hotbar']
+                for i in range(len(hot)):
+                    if f'slot{i + 1}' in intent.taps:
+                        w.slot = i
+                if 'interact' in intent.taps:               # (used from the hand: worn, swapped)
+                    held = w.snap().extra['hotbar'][w.slot][0]
+                    w.inv[held] -= 1
+                    if w.worn_:
+                        w.inv[w.worn_] = w.inv.get(w.worn_, 0) + 1
+                    w.worn_ = held
+                    w.armor = {'mc:iron_chestplate': 6, 'mc:leather_chestplate': 3}[held]
+            if not r.active:
+                break
+        return r, ups
+
+    def test_put_on_looking_up(self):
+        w = self.world(None)
+        w.inv['mc:iron_chestplate'] = 1
+        r, ups = self.run_equip(w, 'mc:iron_chestplate')
+        self.assertIn('done', r.events)
+        self.assertEqual((w.worn_, w.armor), ('mc:iron_chestplate', 6))
+        self.assertGreater(ups, 0)                      # (looked up first: not used on a block in front)
+
+    def test_worse_than_worn_swapped_back(self):
+        w = self.world('mc:iron_chestplate')
+        w.inv['mc:leather_chestplate'] = 1
+        r, _ups = self.run_equip(w, 'mc:leather_chestplate')
+        self.assertIn('done', r.events)
+        self.assertEqual((w.worn_, w.armor), ('mc:iron_chestplate', 6))
+
+
+class UseOnTests(unittest.TestCase):
+    """("Sleep in the bed": "I can't lie down in it myself", 2026-10-17.) A block or a creature right-clicked, as a
+    player does, walked to first."""
+
+    def test_a_bed_walked_to_beside_then_right_clicked_not_crouched(self):
+        class W(World):
+            aim, beside = None, None
+
+            def snap(self):
+                s = super().snap()
+                s.extra.update({'hotbar': [('mc:cobblestone', 64), None], 'slot': self.slot, 'aim_block': self.aim})
+                return s
+            slot = 0
+
+            def task_walk(self, point, name, beside=None):
+                self.walks.append(name)
+                self.beside = beside
+
+            def task_aim(self, key, eye):
+                return (key[0] + 0.5, key[1] + 0.3, key[2] + 0.5), None
+        w = W()
+        r = TaskRunner(w)
+        r.start([('use', 'block', (12, 64, 3), (-12.5, 64.0, 3.5), None, 'white bed')], 'use', 1)
+        clicks = []
+        for i in range(90):
+            intent = r.update(w.snap(), 1 / 30, False)
+            if intent is not None:
+                if 'slot2' in intent.taps:
+                    w.slot = 1                           # (an empty hand)
+                if 'interact' in intent.taps:
+                    clicks.append(w.slot)
+                    self.assertNotIn('sneak', intent.keys)
+            if r.phase == 'go' and i > 5:
+                w.aim = (12, 64, 3)                      # (there, looking at it)
+                r.on_event('arrived')
+            if not r.active:
+                break
+        self.assertEqual((w.walks, w.beside), (['white bed'], (12, 64, 3)))
+        self.assertEqual(clicks, [1])                    # (once, with the empty hand)
+        self.assertIn('done', r.events)
+
+    def test_an_item_used_on_a_creature(self):
+        from game_assistant.core.interface import Entity
+
+        class W(World):
+            approached = []
+
+            def snap(self):
+                s = super().snap()
+                e = Entity(5, 1, 'mc:horse', (0.0, 0.0, 2.0), (0.0, 1.0, 2.0), 0.7, 1.6, False, False, name='Horse')
+                s.extra.update({'hotbar': [('mc:stick', 1), ('mc:saddle', 1)], 'slot': self.slot})
+                return s.__class__(**{**s.__dict__, 'entities': (e,), 'target_id': 5})
+            slot = 0
+        w = W()
+        w.inv['mc:saddle'] = 1
+        r = TaskRunner(w)
+        r.start([('use', 'creature', 5, (0.0, 0.0, 2.0), 'mc:saddle', 'Horse')], 'use', 1)
+        clicks = []
+        for _ in range(60):
+            intent = r.update(w.snap(), 1 / 30, False)
+            if intent is not None:
+                if 'slot2' in intent.taps:
+                    w.slot = 1
+                if 'interact' in intent.taps:
+                    clicks.append(w.slot)
+            if not r.active:
+                break
+        self.assertEqual(clicks, [1])                    # (in reach already: the saddle used on it, no walk)
+        self.assertIn('done', r.events)
+
+
+class InvScreen:
+    """The player's inventory screen, as the game clicks it: 9 hotbar slots (indices 36-44) and 27 above them
+    (9-35). A left click with nothing on the cursor picks the stack up; with a stack, on an empty slot puts it
+    down, on the same item adds to it, on another swaps the two."""
+
+    def __init__(self, hotbar, main):
+        self.slot = {36 + i: tuple(s) if s else None for i, s in enumerate(hotbar)}
+        self.slot.update({9 + i: tuple(s) if s else None for i, s in enumerate(main)})
+        for i in range(9, 45):
+            self.slot.setdefault(i, None)
+        self.carried, self.open, self.ptr = None, False, (0, 0)
+
+    def xy(self, i):
+        return (100 + 40 * ((i - 9) % 9), 300 + 40 * ((i - 9) // 9))
+
+    def screen(self):
+        slots = []
+        for i in range(9, 45):
+            item, n = self.slot[i] or ('', 0)
+            role = f'hotbar{i - 36}' if i >= 36 else f'main{i}'
+            slots.append([i, *self.xy(i), item, n, role])
+        c = self.carried or ('', 0)
+        hov = next((s[0] for s in slots if (s[1], s[2]) == self.ptr), -1)
+        return {'menu': 'InventoryMenu', 'slots': slots, 'carried': c[0], 'carried_count': c[1], 'hovered': hov,
+                'mouse': [self.ptr[0], self.ptr[1], 0]}
+
+    def click(self):
+        i = next((k for k in self.slot if self.xy(k) == self.ptr), None)
+        if i is None:
+            return
+        here = self.slot[i]
+        if self.carried is None:
+            self.carried, self.slot[i] = here, None
+        elif here is None:
+            self.slot[i], self.carried = self.carried, None
+        elif here[0] == self.carried[0]:
+            self.slot[i], self.carried = (here[0], here[1] + self.carried[1]), None
+        else:
+            self.slot[i], self.carried = self.carried, here
+
+    def hotbar(self):
+        return [self.slot[36 + i] for i in range(9)]
+
+    def inventory(self):
+        out = {}
+        for s in list(self.slot.values()) + [self.carried]:
+            if s:
+                out[s[0]] = out.get(s[0], 0) + s[1]
+        return out
+
+
+class ArrangeTests(unittest.TestCase):
+    """The inventory skill ("move the iron into my hotbar and sort things" was "my orders don't reach the
+    inventory slots", while crafting used the same screen, 2026-10-16)."""
+
+    def run_arrange(self, sc, layout):
+        class W(World):
+            def task_point(self, x, y):
+                sc.ptr = (round(x), round(y))
+
+            def task_press(self, button):
+                sc.click()
+        r = TaskRunner(W())
+        r.start([('arrange', layout)], 'hotbar', 1)
+        for _ in range(30 * 20):
+            snap = Snapshot('t', 1, True, Player((0.0, 0.0, 0.0), None, 'alive'), None, (), None,
+                            screen=Screen(0, 0, 800, 600, True),
+                            extra={'inventory': sc.inventory(), 'container': sc.screen() if sc.open else None})
+            intent = r.update(snap, 1 / 30, False)
+            if intent is not None:
+                if 'inventory' in intent.taps:
+                    sc.open = True
+                if 'escape' in intent.taps:
+                    sc.open = False
+            if not r.active:
+                break
+        return r
+
+    def test_an_item_from_the_inventory_into_the_hotbar_and_a_sort(self):
+        sc = InvScreen([('mc:dirt', 9), ('mc:apple', 1), None, ('mc:stone_pickaxe', 1), None, None, None, None,
+                        None], [('mc:raw_iron', 6), ('mc:stone_sword', 1), ('mc:cobblestone', 64)])
+        layout = ('mc:stone_sword', 'mc:stone_pickaxe', None, None, 'mc:apple', 'mc:cobblestone', 'mc:raw_iron',
+                  None, None)
+        before = sc.inventory()
+        r = self.run_arrange(sc, layout)
+        self.assertEqual(r.result, 'done')
+        got = [s[0] if s else None for s in sc.hotbar()]
+        for i, want in enumerate(layout):
+            if want:
+                self.assertEqual(got[i], want, (i, got))
+        self.assertEqual(sc.inventory(), before)        # (nothing lost or dropped)
+        self.assertIsNone(sc.carried)
+        self.assertFalse(sc.open)
+
+
+class HotbarLayoutTests(unittest.TestCase):
+    def test_the_usual_layout_with_what_was_asked_for(self):
+        from game_assistant.games.minecraft.adapter import MinecraftAdapter
+        a = MinecraftAdapter()
+        inv = {'minecraft:dirt': 9, 'minecraft:apple': 1, 'minecraft:stone_pickaxe': 1,
+               'minecraft:wooden_pickaxe': 1, 'minecraft:raw_iron': 6, 'minecraft:wooden_sword': 1,
+               'minecraft:cobblestone': 132, 'minecraft:shield': 1}
+        hot = [('minecraft:dirt', 9), ('minecraft:apple', 1), ('minecraft:stone_pickaxe', 1)]
+        lay = a.hotbar_layout(inv, hot, ['minecraft:raw_iron'], sort=True)
+        self.assertEqual(lay[:3], ('minecraft:wooden_sword', 'minecraft:stone_pickaxe', 'minecraft:apple'))
+        self.assertIn('minecraft:raw_iron', lay)
+        self.assertIn('minecraft:cobblestone', lay)
+        lay = a.hotbar_layout(inv, hot, ['minecraft:raw_iron'])   # (not sorted: into a free slot)
+        self.assertEqual(lay[:4], ('minecraft:dirt', 'minecraft:apple', 'minecraft:stone_pickaxe',
+                                   'minecraft:raw_iron'))

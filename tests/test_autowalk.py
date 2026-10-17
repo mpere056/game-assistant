@@ -8,7 +8,7 @@ try:
 except ModuleNotFoundError:                 # (run as tests.<module>)
     from tests.mc_fakes import fake_sight
 
-from game_assistant.core.autowalk import AutoWalk
+from game_assistant.core.autowalk import AutoWalk, Intent
 from game_assistant.core.interface import Camera, Entity, Player, Screen, Snapshot
 
 SPEED = {False: 4.0, True: 7.0}  # m/s walking, running
@@ -636,3 +636,119 @@ class AimPointTests(unittest.TestCase):
         pt, blocker = a.aim_point((0, 0, 0), _mirror((0.5, 1.62, 2.5)))
         self.assertIsNone(pt)
         self.assertIn(blocker, {(0, 1, 1), (0, 0, 1)})
+
+
+class NarrowLanding(LeapWorld):
+    """The LeapWorld's landing only 1.8 blocks deep (z 3 to 4.8): past it, another drop. The game says when the
+    player's on the ground."""
+
+    def snap(self):
+        s = super().snap()
+        return Snapshot(s.game, s.frame, s.in_world, s.player, s.camera, s.entities, None, screen=s.screen,
+                        extra={'on_ground': self.pos[1] == 0.0 and self.vy == 0.0})
+
+    def apply(self, intent, dt):
+        super().apply(intent, dt)
+        if self.pos[2] >= 4.8 and self.pos[1] <= 0.0 and self.vy == 0.0:
+            self.pos[1], self.vy = -0.01, -0.1           # (off the far edge: falling)
+
+
+class OvershootTests(unittest.TestCase):
+    def test_a_jump_made_stops_on_the_landing_not_off_its_far_edge(self):
+        # (4 of 6 "missed" jumps were made, then forward held on past the landing: off the next edge, once a pit's
+        # rim, 13 blocks down among zombies, 2026-10-16)
+        w = NarrowLanding()
+        aw = AutoWalk(sprint=False, precise=True)
+        route = [(0.5, 0.0, 0.5), (0.5, 0.0, 3.5), (0.5, 0.0, 4.0)]
+        aw.start(route, route[-1], 'Over there',
+                 actions=[('parkour', (0.5, 0.0, 0.5), (0.5, 0.0, 3.5), {'gap': 2, 'sprint': True})])
+        walk(aw, w, 6)
+        self.assertNotIn('work_failed:parkour', aw.events)
+        self.assertEqual(w.pos[1], 0.0)                 # on the landing, not fallen off it
+        self.assertLess(w.pos[2], 4.8)
+
+
+class SlideLanding(LeapWorld):
+    """Momentum, as in Minecraft: on the ground the speed dies away over a few ticks with nothing held (more than
+    half of it each tick), in the air it carries on. Ground: z < 1, and the landing from 3 to 4.15 (a narrow rim,
+    the middle at 3.5); past that, a drop. Crouched on the ground, the player never goes over an
+    edge."""
+
+    def __init__(self):
+        super().__init__()
+        self.vz = 0.0
+
+    def snap(self):
+        s = super().snap()
+        return Snapshot(s.game, s.frame, s.in_world, s.player, s.camera, s.entities, None, screen=s.screen,
+                        extra={'on_ground': self.pos[1] == 0.0 and self.vy == 0.0})
+
+    @staticmethod
+    def ground(z):
+        return z < 1.0 or 3.0 <= z < 4.15
+
+    def apply(self, intent, dt):
+        self.yaw += intent.turn
+        on = self.pos[1] == 0.0 and self.vy == 0.0
+        if 'jump' in intent.taps and on:
+            self.vy, self.jumped_at = 8.4, self.pos[2]
+        self.sprinted = self.sprinted or 'sprint' in intent.keys
+        fx = ('forward' in intent.keys) - ('back' in intent.keys)
+        speed = (5.6 if 'sprint' in intent.keys else 4.3) * (0.3 if 'sneak' in intent.keys else 1.0)
+        if on:
+            if fx:
+                self.vz += (fx * speed - self.vz) * min(1.0, dt * 9.0)
+            else:
+                self.vz *= 0.546 ** (dt * 20.0)
+        z0 = self.pos[2]
+        self.pos[2] += self.vz * math.cos(math.radians(self.yaw)) * dt
+        if on and 'sneak' in intent.keys and self.ground(z0) and not self.ground(self.pos[2]):
+            self.pos[2], self.vz = z0, 0.0               # (crouched: not over the edge)
+        ground = self.ground(self.pos[2])
+        if self.vy != 0.0 or not ground or self.pos[1] < 0.0:
+            self.vy -= 28.0 * dt
+            self.pos[1] += self.vy * dt
+            if ground and self.pos[1] <= 0.0 and self.pos[1] > -0.5:
+                self.pos[1], self.vy = 0.0, 0.0
+
+
+class SlideTests(unittest.TestCase):
+    def test_a_jump_onto_a_rim_doesnt_slide_off_its_far_edge(self):
+        # (a sprinting jump onto a pit's rim landed 0.4 past the middle, nothing held, and slid on off the far
+        # edge: 11 blocks down among zombies, the player died there, 2026-10-16)
+        w = SlideLanding()
+        aw = AutoWalk(sprint=False, precise=True)
+        route = [(0.5, 0.0, 0.5), (0.5, 0.0, 3.5)]
+        aw.start(route, route[-1], 'Oak Log',
+                 actions=[('parkour', (0.5, 0.0, 0.5), (0.5, 0.0, 3.5), {'gap': 2, 'sprint': True})])
+        lowest = 0.0
+        for _ in range(6 * 30):
+            intent = aw.update(w.snap(), 1 / 30)
+            w.apply(intent, 1 / 30)
+            lowest = min(lowest, w.pos[1])
+        self.assertNotIn('work_failed:parkour', aw.events)
+        self.assertGreater(lowest, -0.5)                 # never off the edge
+        self.assertTrue(3.0 <= w.pos[2] < 4.15)
+
+    def test_the_slide_alone_would_have_gone_off(self):
+        # (the world's own check: landed at speed with nothing held, it goes over)
+        w = SlideLanding()
+        w.pos[2], w.vz = 3.85, 5.1                      # (where and how fast the jump lands)
+        for _ in range(30):
+            w.apply(Intent(frozenset()), 1 / 30)
+        self.assertLess(w.pos[1], -0.5)
+
+
+class AfloatTests(unittest.TestCase):
+    def test_kept_afloat_between_routes(self):
+        # (planning again in a lake, no key was held: the player sank 3 blocks, the air nearly gone, 2026-10-17)
+        w = World()
+        aw = AutoWalk()
+        aw.start([(0.0, 0.0, 0.0), (0.0, 0.0, 30.0)], (0.0, 0.0, 30.0))
+        aw.route = []                                    # (planning again: no way yet)
+        s = w.snap()
+        wet = s.__class__(**{**s.__dict__, 'extra': {'in_water': True}})
+        intent = aw.update(wet, 1 / 30)
+        self.assertIn('jump', intent.keys)
+        self.assertNotIn('sprint', intent.keys)
+        self.assertNotIn('jump', aw.update(s, 1 / 30).keys)          # (not in water: as it was)

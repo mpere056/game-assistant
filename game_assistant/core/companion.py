@@ -49,8 +49,13 @@ BEACON_HEIGHT = 6.0      # guide mode: metres above the ground under it (high, t
 GUIDE_NEAREST = 15.0     # guide mode: never closer ahead than this
 GUIDE_STEP = 10.0        # guide mode: candidate spots every this many metres toward the goal
 SIGHT_EVERY = 15         # guide mode: frames between "which spot ahead can the player see?" checks
-REPLAN_NEAR_END = 50.0   # guide mode: re-plan when the player is this close to the end of a partial route
+REPLAN_NEAR_END = 50.0   # guide mode: re-plan when the player is this close to the end of a partial route...
+REPLAN_NEAR_END_STEPS = 8.0   # ...a route walked block by block (Minecraft): this close (Baritone plans the next
+                              # part ahead near the end; at 50, a dig through stone re-planned every 1.6 s)
 REPLAN_OFF_ROUTE = 25.0  # guide mode: ...or this far from the route
+PLAN_SAME = 0.75         # blocks: planned again from as near the same spot, for as near the same goal...
+PLAN_WAIT_MIN = 0.25     # ...waits this long after the last plan the first time...
+PLAN_WAIT_MAX = 4.0      # ...twice as long each time after, up to this
 REPLAN_EVERY = 12.0      # guide mode: ...or this many seconds after the last plan
 NO_PROGRESS = 15.0       # guide mode: a route must bring the player at least this much closer, else "no way" 
 TRAIL_SECONDS = 2.0      # the trail: world positions of the last 2 s (the user asked for about 2 s)
@@ -118,6 +123,9 @@ class Companion:
         self.route_fn = None
         self.route_source = ''        # 'navmesh' or 'raycast': which planner made the current route
         self.route_actions: list = []  # (what, where) on the route: 'ladder', 'lift', 'jump', 'drop'
+        self.route_moves: list = []    # the route as the game's moves (Minecraft), and what it was planned over
+        self.route_grid = None
+        self.on_error = None           # (where, exception): a plan that raised (the app logs it)
         self._announced: set = set()
         self._said_action: dict = {}     # what -> when Navi last said it
         self.route: list[Vec3] | None = None    # guide mode: walkable waypoints toward the goal
@@ -157,6 +165,7 @@ class Companion:
         self._sight_ahead = None
         self.route, self.route_complete, self._route_time = None, False, 0.0
         self.route_actions, self._announced, self._said_action = [], set(), {}
+        self.route_moves, self.route_grid = [], None
         self._said_no_way = False
         self._plan_gen += 1
 
@@ -172,6 +181,15 @@ class Companion:
     def _start_plan(self, start: Vec3, goal: Vec3) -> None:
         if self._planning or (not self.raycast and self.route_fn is None):
             return
+        # planned again from the same spot for the same goal: each time a while longer after the last (a way whose
+        # first move gave up at once was planned 10 times a second for 15 s, the game lagging, 2026-10-17)
+        spot, to, when = getattr(self, '_plan_last', (None, None, -1e9))
+        same = spot is not None and math.dist(start, spot) < PLAN_SAME and math.dist(goal, to) < PLAN_SAME
+        wait = getattr(self, '_plan_wait', 0.0)
+        if same and self.t - when < wait:
+            return
+        self._plan_wait = min(PLAN_WAIT_MAX, max(PLAN_WAIT_MIN, wait * 2)) if same else 0.0
+        self._plan_last = (start, goal, self.t)
         self._planning = True
         gen = self._plan_gen
 
@@ -187,13 +205,17 @@ class Companion:
             if self.route_fn is not None:
                 try:
                     route = self.route_fn(start, goal)
-                except Exception:
+                except Exception as e:
                     route = None
+                    if self.on_error is not None:    # (swallowed, a route that failed every time looked like
+                        self.on_error('route', e)    # "no way" and was planned again for a minute, 2026-10-16)
                 if route is not None and len(route.waypoints) >= 2:
                     if gen == self._plan_gen and self.mode == 'guide':
                         self.route, self.route_complete = route.waypoints, route.reaches_goal
                         self.route_source = 'navmesh'
                         self.route_actions = list(getattr(route, 'actions', []))
+                        self.route_moves = list(getattr(route, 'moves', None) or [])
+                        self.route_grid = getattr(route, 'grid', None)
                         self._route_time = self.t
                     # A long way: the search stopped at its time limit with the best part so far.
                     # Set off along it now and plan the rest from its end meanwhile (Baritone-style).
@@ -209,6 +231,7 @@ class Companion:
                         self.route = list(self.route) + list(route.waypoints[1:])
                         self.route_complete = route.reaches_goal
                         self.route_actions += list(getattr(route, 'actions', []))
+                        self.route_moves += list(getattr(route, 'moves', None) or [])
                     self._planning = False
                     return
             far = math.hypot(goal[0] - start[0], goal[2] - start[2]) > 250.0
@@ -359,7 +382,8 @@ class Companion:
         else:
             path, off = self._route_ahead(p)
             path_len = sum(math.hypot(b[0] - a[0], b[2] - a[2]) for a, b in zip(path, path[1:]))
-            if not self._planning and ((not self.route_complete and path_len < REPLAN_NEAR_END)
+            near_end = REPLAN_NEAR_END_STEPS if getattr(self, 'walk_decides', False) else REPLAN_NEAR_END
+            if not self._planning and ((not self.route_complete and path_len < near_end)
                                        or off > REPLAN_OFF_ROUTE or self.t - self._route_time > REPLAN_EVERY):
                 self._start_plan(p, goal)
             if self.route_complete:

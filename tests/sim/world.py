@@ -2,7 +2,7 @@
 
 The real planners run in it: the goal planner (core/goals.py), the crafting planner with a book that costs in
 seconds from where the player is (core/crafting.py), the route planner and its "build or dig" choice
-(games/minecraft/blocks.py), the world memory (core/memory.py). What the skills do in the game by keys and
+(games/minecraft/pathing.py), the world memory (core/memory.py). What the skills do in the game by keys and
 the mouse is done here on the world's blocks and the inventory: moving follows the planned route (what it
 breaks is broken and picked up, what it puts down is taken from the inventory) and takes its time; mining takes
 the block and gives its drop (with the tool it needs); crafting and smelting need their station in reach;
@@ -19,6 +19,7 @@ from game_assistant.core.crafting import CantMake, Recipe, Source, plan, step_co
 from game_assistant.core.goals import GoalRunner
 from game_assistant.core.memory import WorldMemory
 from game_assistant.games.minecraft import blocks as B
+from game_assistant.games.minecraft import pathing
 
 M = 'minecraft:'
 AIR = M + 'air'
@@ -124,7 +125,7 @@ class SimWorld:
         lo = [min(s[i], t[i]) - (8 if i != 1 else 12) for i in range(3)]
         hi = [max(s[i], t[i]) + (8 if i != 1 else 12) for i in range(3)]
         lo[1], hi[1] = max(lo[1], 0), min(hi[1], self.size[1] + 10)
-        return B.plan_route(self.grid(lo, hi), s, t, self.spare(), budget_s=3.0, can_break=True, kind=kind,
+        return pathing.plan_route(self.grid(lo, hi), s, t, self.spare(), budget_s=3.0, can_break=True, kind=kind,
                             back=back)
 
     def walk(self, path) -> None:
@@ -137,7 +138,7 @@ class SimWorld:
                 self.put(a[2], block)
         end = path.cells[-1]
         self.player = (math.floor(end[0]), math.floor(end[1] + 0.01), math.floor(end[2]))
-        self.t += path.cost / WALK
+        self.t += path.cost / 20.0                       # (the route's cost: game ticks)
 
     def dig(self, c) -> None:
         b = self.at(c)
